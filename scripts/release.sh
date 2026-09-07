@@ -78,6 +78,8 @@ case $bump in
     ;;
 esac
 
+[ "$version" != "$current" ] || die "already at $current; there is nothing to bump"
+
 tag="v$version"
 git rev-parse -q --verify "refs/tags/$tag" >/dev/null &&
   die "$tag already exists; a released version is not re-cut"
