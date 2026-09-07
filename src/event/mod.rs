@@ -9,6 +9,7 @@ use std::thread;
 
 use crossterm::event::{self as term, Event, KeyEvent, KeyEventKind, MouseEvent};
 
+use crate::filesystem::watcher::FsChange;
 use crate::git::JobOutcome;
 
 /// Everything the main loop can be woken by.
@@ -16,7 +17,7 @@ use crate::git::JobOutcome;
 /// `GitJob` is the first variant that does not come from the terminal: the git
 /// worker pushes finished jobs into the same channel, so a push that completes
 /// wakes the loop exactly as a key press does and nothing has to poll
-/// (ADR-033).
+/// (ADR-033). `FilesChanged` is the second, on the same terms.
 #[derive(Debug, Clone)]
 pub enum AppEvent {
     Key(KeyEvent),
@@ -24,6 +25,10 @@ pub enum AppEvent {
     Paste(String),
     Resize(u16, u16),
     GitJob(JobOutcome),
+    /// Something changed on disk that the editor did not do (ADR-040). The
+    /// second non-terminal producer, and coalesced before it gets here: one of
+    /// these is a burst of filesystem events, not a single write.
+    FilesChanged(FsChange),
 }
 
 /// Reads terminal events on a dedicated thread.

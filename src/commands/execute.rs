@@ -15,6 +15,7 @@ use crate::commands::{Command, FileOp, MENUS};
 use crate::editor::coords::VisualCol;
 use crate::editor::document::Document;
 use crate::filesystem;
+use crate::filesystem::watcher::FsChange;
 use crate::git::diff::DiffSide;
 use crate::git::models::Change;
 use crate::git::{GitJob, JobOutcome};
@@ -56,6 +57,7 @@ pub fn execute_command(app: &mut App, command: Command) {
             app.notifications.info("Explorer refreshed");
         }
         Command::GitRefresh => git_rescan(app),
+        Command::ExternalChange(change) => external_change(app, change),
         Command::GitOpenSelected => git_open_selected(app),
         Command::GitStage => git_stage_selected(app, true),
         Command::GitUnstage => git_stage_selected(app, false),
@@ -1171,6 +1173,21 @@ fn refresh_git(app: &mut App) {
 /// The Git menu's Refresh, and `F5` in the panel: looks for the repository
 /// again as well as re-reading its status, so a `git init` in the terminal next
 /// door does not need a restart to show up.
+/// A change the editor did not make (ADR-040).
+///
+/// Silent on purpose: the panes are re-read and nothing is said. A refresh
+/// nobody asked for that announced itself would put a notification on the
+/// status bar every time a build touched a file, and the notification is where
+/// the answers to the user's own commands go.
+fn external_change(app: &mut App, change: FsChange) {
+    if change.worktree {
+        refresh_tree(app, None);
+    }
+    if change.repository {
+        refresh_git(app);
+    }
+}
+
 fn git_rescan(app: &mut App) {
     let root = app.workspace.root().to_path_buf();
     app.git.discover(&root);
@@ -3719,6 +3736,84 @@ mod tests {
         execute_command(&mut app, Command::DialogActivate);
         assert!(app.dialog.is_none());
         assert_eq!(app.focus, FocusTarget::Editor);
+    }
+
+    /// The watcher's whole point: a change made outside the editor is on
+    /// screen without anybody pressing `F5` (ADR-040).
+    #[test]
+    fn a_change_made_outside_the_editor_reaches_the_panel_and_the_tree() {
+        let repo = crate::git::testing::TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+        let (mut app, _rx) = app_over(&repo);
+        assert!(app.git.entries().is_empty(), "a clean tree to start from");
+        let before = app.sidebar.tree.len();
+
+        // Somebody else's terminal, or a build, or a `git checkout`.
+        repo.write("a.txt", "changed\n");
+        repo.write("b.txt", "new\n");
+        execute_command(
+            &mut app,
+            Command::ExternalChange(FsChange {
+                worktree: true,
+                repository: true,
+            }),
+        );
+
+        assert_eq!(app.git.entries().len(), 2, "{:?}", app.git.entries());
+        assert!(app.sidebar.tree.len() > before, "the tree grew a row");
+    }
+
+    /// Silent by design: a refresh nobody asked for must not take the status
+    /// bar away from the answers to the user's own commands.
+    #[test]
+    fn an_outside_change_says_nothing_on_the_status_bar() {
+        let repo = changed_repo();
+        let (mut app, _rx) = app_over(&repo);
+        app.notifications.info("Saved a.txt");
+        execute_command(
+            &mut app,
+            Command::ExternalChange(FsChange {
+                worktree: true,
+                repository: true,
+            }),
+        );
+        assert_eq!(
+            app.notifications.current().unwrap().message,
+            "Saved a.txt",
+            "the refresh spoke over the last answer"
+        );
+    }
+
+    /// Staging in another terminal is a repository change and not a worktree
+    /// one, so the explorer is left alone.
+    #[test]
+    fn an_index_only_change_does_not_rebuild_the_tree() {
+        let repo = changed_repo();
+        let (mut app, _rx) = app_over(&repo);
+        app.sidebar.tree.set_show_hidden(true);
+        let rows: Vec<_> = app.sidebar.rows().iter().map(|r| r.path.clone()).collect();
+
+        repo.run(&["add", "a.txt"]);
+        execute_command(
+            &mut app,
+            Command::ExternalChange(FsChange {
+                worktree: false,
+                repository: true,
+            }),
+        );
+
+        let after: Vec<_> = app.sidebar.rows().iter().map(|r| r.path.clone()).collect();
+        assert_eq!(rows, after);
+        assert!(
+            app.git
+                .entries()
+                .iter()
+                .any(|e| e.path == Path::new("a.txt") && e.index.is_change()),
+            "the status was re-read: {:?}",
+            app.git.entries()
+        );
     }
 
     #[test]

@@ -100,6 +100,17 @@ fn run(cli: &Cli) -> Result<()> {
         panic!("--panic-test: forcing a panic to verify terminal restore");
     }
 
+    // The watcher goes in after the guard so a failure to start it can be said
+    // on the status bar rather than printed over a terminal that is about to be
+    // taken over. It is best effort: without it the editor behaves exactly as
+    // it did before, and `F5` still re-reads everything (ADR-040).
+    if let Err(err) = filesystem::watcher::spawn(&root, tx.clone()) {
+        log::warn!("no filesystem watcher: {err}");
+        app.notifications.warning(format!(
+            "Not watching for outside changes: {err} — F5 refreshes"
+        ));
+    }
+
     spawn_input_thread(tx);
 
     let mut rects = LayoutRects::default();
@@ -289,6 +300,8 @@ fn handle_event(app: &mut App, rects: &LayoutRects, event: AppEvent) {
         // else, so the worker mutates `App` through the same single door as the
         // keyboard (ARCHITECTURE invariant 3).
         AppEvent::GitJob(outcome) => Some(Command::GitJobFinished(outcome)),
+        // A coalesced burst of filesystem events, through the same door.
+        AppEvent::FilesChanged(change) => Some(Command::ExternalChange(change)),
     };
 
     if let Some(command) = command {

@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use crate::app::focus::FocusTarget;
 use crate::app::search::SearchField;
 use crate::editor::cursor::Motion;
+use crate::filesystem::watcher::FsChange;
 use crate::git::JobOutcome;
 
 /// An operation that needs a name or a path typed before it can run
@@ -156,6 +157,13 @@ pub enum Command {
     DiffScrollHorizontal(i16),
     DiffHome,
     DiffEnd,
+
+    /// Something changed on disk that the editor did not do (ADR-040). Like
+    /// `GitJobFinished` no user can produce it: the run loop makes it out of an
+    /// `AppEvent::FilesChanged` so that the watcher reaches `App` through the
+    /// same door as everything else. It says nothing on the status bar — a
+    /// refresh nobody asked for should not talk.
+    ExternalChange(FsChange),
 
     /// A job the worker has finished. The only command no user can produce: the
     /// run loop makes it out of an `AppEvent::GitJob` so that a background
@@ -379,6 +387,7 @@ impl Command {
             Self::GitMerge(_) => "Merge a branch into the current one".into(),
             Self::GitStageResolved => "Stage the conflicted file as resolved".into(),
             Self::GitJobFinished(_) => "Report a finished background git job".into(),
+            Self::ExternalChange(_) => "Re-read what changed on disk".into(),
 
             Self::GitDiff => "Show the diff of the selected file".into(),
             Self::GitDiffToggleSide => "Show the other side: staged or unstaged".into(),

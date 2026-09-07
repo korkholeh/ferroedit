@@ -7,6 +7,7 @@
 //! and swallowed.
 
 pub mod tree;
+pub mod watcher;
 
 use std::fs;
 use std::io;

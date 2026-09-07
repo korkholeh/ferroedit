@@ -39,6 +39,11 @@ clap = { version = "4", features = ["derive"] }
 log = "0.4"
 simplelog = "0.12"
 arboard = { version = "3", optional = true }
+# The filesystem watcher (ADR-040). Pinned below 8.x by the MSRV, and taken
+# with default features: on Linux that is the pure-Rust `inotify` crate, so a
+# static musl build is unaffected (ADR-003); the C `fsevent-sys` it links on
+# macOS is not in any release target.
+notify = "7"
 
 [build-dependencies]
 # Same features as the runtime dependency: the dump `build.rs` writes has to be
