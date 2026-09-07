@@ -98,18 +98,38 @@ impl DialogState {
         )
     }
 
-    /// Asked before quitting with modified tabs open.
+    /// Asked once per modified tab while quitting (ADR-047).
     ///
-    /// Cancel is the default here rather than Save: quitting discards every
-    /// dirty buffer at once, so the safe answer is the one that does nothing.
-    pub fn unsaved_on_quit(dirty: usize, return_focus: FocusTarget) -> Self {
-        let files = if dirty == 1 { "file has" } else { "files have" };
+    /// The same three answers as closing one tab, because it is the same
+    /// question: a quit with four dirty files is four closes and then an exit.
+    /// `remaining` counts this file and the ones still to be asked about. It
+    /// goes in the *title* and not the message: a walk that says nothing about
+    /// its length is a dialog that looks like it reappeared, and a sentence
+    /// with a counter bolted on is what pushes the box past a 40-column
+    /// terminal for any ordinary file name.
+    ///
+    /// Save is the default, which the all-at-once prompt this replaced could
+    /// not afford: its Enter discarded every dirty buffer, so the safe answer
+    /// there was the one that did nothing. Here Enter saves this file and asks
+    /// about the next, so holding it down saves everything and quits.
+    pub fn unsaved_on_quit(
+        index: usize,
+        title: &str,
+        remaining: usize,
+        return_focus: FocusTarget,
+    ) -> Self {
+        let heading = if remaining > 1 {
+            format!("Unsaved changes ({remaining} left)")
+        } else {
+            "Unsaved changes".to_string()
+        };
         Self::confirm(
-            "Unsaved changes",
-            format!("{dirty} {files} unsaved changes."),
+            &heading,
+            format!("{title} has unsaved changes."),
             vec![
+                DialogButton::new("Save", Some(Command::SaveAndQuit(index))),
+                DialogButton::new("Don't Save", Some(Command::DiscardAndQuit(index))),
                 DialogButton::new("Cancel", None),
-                DialogButton::new("Quit Anyway", Some(Command::QuitDiscarding)),
             ],
             return_focus,
         )
@@ -633,14 +653,30 @@ mod tests {
         assert_eq!(dialog.command_at(2), None, "Cancel only dismisses");
     }
 
+    /// ADR-047: the quit walk asks the close-tab question once per file, so
+    /// Enter is the safe answer rather than the destructive one.
     #[test]
-    fn the_quit_dialog_defaults_to_doing_nothing() {
-        let dialog = DialogState::unsaved_on_quit(3, FocusTarget::Editor);
-        assert_eq!(dialog.buttons[dialog.selected].label, "Cancel");
-        assert_eq!(dialog.prompt(), "3 files have unsaved changes.");
+    fn the_quit_dialog_asks_about_one_file_and_defaults_to_saving_it() {
+        let dialog = DialogState::unsaved_on_quit(2, "a.txt", 3, FocusTarget::Editor);
+        assert_eq!(dialog.buttons[dialog.selected].label, "Save");
+        assert_eq!(dialog.title, "Unsaved changes (3 left)");
+        assert_eq!(dialog.prompt(), "a.txt has unsaved changes.");
+        assert_eq!(dialog.command_at(0), Some(Command::SaveAndQuit(2)));
+        assert_eq!(dialog.command_at(1), Some(Command::DiscardAndQuit(2)));
+        assert_eq!(dialog.command_at(2), None, "Cancel only dismisses");
+    }
+
+    /// Every question of a walk asks the close-tab dialog's own sentence; only
+    /// the title counts, and the last one does not even do that.
+    #[test]
+    fn the_last_file_of_a_walk_is_not_counted_at_the_reader() {
+        let last = DialogState::unsaved_on_quit(0, "a.txt", 1, FocusTarget::Editor);
+        assert_eq!(last.title, "Unsaved changes");
+        assert_eq!(last.prompt(), "a.txt has unsaved changes.");
         assert_eq!(
-            DialogState::unsaved_on_quit(1, FocusTarget::Editor).prompt(),
-            "1 file has unsaved changes."
+            DialogState::unsaved_changes(0, "a.txt", FocusTarget::Editor).prompt(),
+            last.prompt(),
+            "a quit is closing every dirty tab, so it is the same question"
         );
     }
 
@@ -814,7 +850,7 @@ mod tests {
     #[test]
     fn a_message_and_an_input_body_are_the_same_height_they_always_were() {
         assert_eq!(
-            DialogState::unsaved_on_quit(1, FocusTarget::Editor).body_height(),
+            DialogState::unsaved_on_quit(0, "a.txt", 1, FocusTarget::Editor).body_height(),
             2
         );
         assert_eq!(
@@ -834,7 +870,7 @@ mod tests {
 
     #[test]
     fn a_body_that_is_not_a_list_answers_the_list_questions_harmlessly() {
-        let mut dialog = DialogState::unsaved_on_quit(1, FocusTarget::Editor);
+        let mut dialog = DialogState::unsaved_on_quit(0, "a.txt", 1, FocusTarget::Editor);
         assert!(dialog.items().is_empty());
         assert!(dialog.selected_item().is_none());
         dialog.step_list(3);
@@ -844,8 +880,10 @@ mod tests {
 
     #[test]
     fn a_confirmation_dialog_has_no_field_at_all() {
-        assert!(DialogState::unsaved_on_quit(1, FocusTarget::Editor)
-            .field()
-            .is_none());
+        assert!(
+            DialogState::unsaved_on_quit(0, "a.txt", 1, FocusTarget::Editor)
+                .field()
+                .is_none()
+        );
     }
 }

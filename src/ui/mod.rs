@@ -612,6 +612,8 @@ mod tests {
     fn a_dialog_hides_the_caret_because_the_editor_no_longer_has_focus() {
         let mut app = app();
         app.dialog = Some(crate::app::dialog::DialogState::unsaved_on_quit(
+            0,
+            "a.txt",
             1,
             FocusTarget::Editor,
         ));
@@ -766,6 +768,8 @@ mod tests {
     fn a_confirmation_dialog_puts_no_caret_on_the_screen() {
         let mut app = app();
         app.dialog = Some(crate::app::dialog::DialogState::unsaved_on_quit(
+            0,
+            "a.txt",
             1,
             FocusTarget::Editor,
         ));

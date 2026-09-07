@@ -70,11 +70,14 @@ impl FileOp {
 /// match arm it passes through.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    /// Asks first when any tab has unsaved changes; `QuitDiscarding` is what
-    /// actually ends the run.
+    /// Asks about each unsaved tab in turn; the last answer is what ends the
+    /// run (ADR-047).
     Quit,
-    /// Quits without asking — the confirm dialog's "Quit Anyway".
-    QuitDiscarding,
+    /// One answer of that walk: save this tab, close it, and ask about the
+    /// next. A save that fails stops the quit rather than losing the file.
+    SaveAndQuit(usize),
+    /// The other: close this tab without saving, and ask about the next.
+    DiscardAndQuit(usize),
 
     FocusPane(FocusTarget),
     CycleFocus,
@@ -356,7 +359,8 @@ impl Command {
         };
         match self {
             Self::Quit => "Quit, asking first when a tab has unsaved changes".into(),
-            Self::QuitDiscarding => "Quit without saving".into(),
+            Self::SaveAndQuit(_) => "Save this tab and go on quitting".into(),
+            Self::DiscardAndQuit(_) => "Close this tab without saving and go on quitting".into(),
 
             Self::FocusPane(target) => format!("Focus the {}", pane_name(*target)),
             Self::CycleFocus => "Cycle focus: editor → explorer → git panel".into(),

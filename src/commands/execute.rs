@@ -25,7 +25,20 @@ pub fn execute_command(app: &mut App, command: Command) {
     log::debug!("command {command:?} (focus {:?})", app.focus);
     match command {
         Command::Quit => quit(app),
-        Command::QuitDiscarding => app.should_quit = true,
+        // Each answer closes its tab and asks `quit` again, which either finds
+        // the next dirty tab or ends the run (ADR-047). A save that failed
+        // stops there: the file is still only in the buffer, and quitting past
+        // it is the one outcome that cannot be taken back.
+        Command::SaveAndQuit(index) => {
+            if save_tab(app, index) {
+                remove_tab(app, index);
+                quit(app);
+            }
+        }
+        Command::DiscardAndQuit(index) => {
+            remove_tab(app, index);
+            quit(app);
+        }
 
         Command::FocusPane(target) => focus_pane(app, target),
         Command::CycleFocus => focus_pane(app, app.focus.next()),
@@ -715,12 +728,16 @@ fn prompt_stale(app: &mut App) {
 /// to what is on disk does not hold up the exit.
 fn quit(app: &mut App) {
     let dirty = app.tabs.iter().filter(|t| t.document.is_dirty()).count();
-    if dirty == 0 {
+    let Some(index) = app.tabs.iter().position(|t| t.document.is_dirty()) else {
         app.should_quit = true;
         return;
-    }
+    };
+    let title = app.tabs[index].document.title().to_string();
     let return_focus = dialog_return_focus(app);
-    open_dialog(app, DialogState::unsaved_on_quit(dirty, return_focus));
+    open_dialog(
+        app,
+        DialogState::unsaved_on_quit(index, &title, dirty, return_focus),
+    );
 }
 
 /// Closes a tab, asking first when it has unsaved changes (SPEC §11).
@@ -2575,10 +2592,11 @@ mod tests {
         execute_command(&mut app, Command::Quit);
         assert!(!app.should_quit, "the editor is still running");
         let dialog = app.dialog.as_ref().expect("a prompt");
-        assert_eq!(dialog.prompt(), "1 file has unsaved changes.");
+        assert_eq!(dialog.prompt(), "editor.rs has unsaved changes.");
         assert_eq!(app.focus, FocusTarget::Dialog);
 
-        // Cancel is the default, so Enter without reading changes nothing.
+        // Cancel is the third button now that Save is the first one.
+        execute_command(&mut app, Command::DialogMove(-1));
         execute_command(&mut app, Command::DialogActivate);
         assert!(!app.should_quit);
         assert!(app.dialog.is_none());
@@ -2587,7 +2605,112 @@ mod tests {
         execute_command(&mut app, Command::Quit);
         execute_command(&mut app, Command::DialogMove(1));
         execute_command(&mut app, Command::DialogActivate);
-        assert!(app.should_quit, "Quit Anyway does");
+        assert!(app.should_quit, "Don't Save was the last file's answer");
+        assert_eq!(app.tabs.len(), 2, "and it closed the tab it discarded");
+    }
+
+    /// ADR-047: the quit prompt was one question with one Quit Anyway, so
+    /// saving four files on the way out was not something it could express.
+    #[test]
+    fn quitting_asks_about_every_unsaved_file_in_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::fixture_in(dir.path());
+        let paths: Vec<PathBuf> = ["a.txt", "b.txt", "c.txt"]
+            .iter()
+            .map(|name| {
+                let path = dir.path().join(name);
+                std::fs::write(&path, "one\n").unwrap();
+                app.open_path(&path, None).unwrap();
+                path
+            })
+            .collect();
+        for index in 0..3 {
+            app.active_tab = Some(index);
+            execute_command(&mut app, Command::InsertChar('!'));
+        }
+
+        // Enter three times: Save is the first button, so holding it down saves
+        // everything and quits.
+        for left in [3, 2, 1] {
+            execute_command(&mut app, Command::Quit);
+            assert!(!app.should_quit, "{left} still to answer");
+            let dialog = app.dialog.as_ref().expect("a prompt");
+            assert!(
+                dialog.prompt().ends_with("has unsaved changes."),
+                "{}",
+                dialog.prompt()
+            );
+            let expected = if left > 1 {
+                format!("Unsaved changes ({left} left)")
+            } else {
+                "Unsaved changes".to_string()
+            };
+            assert_eq!(dialog.title, expected, "the title counts the walk down");
+            execute_command(&mut app, Command::DialogActivate);
+        }
+        assert!(app.should_quit);
+        for path in &paths {
+            assert_eq!(std::fs::read_to_string(path).unwrap(), "!one\n");
+        }
+    }
+
+    /// Cancel stops the quit, and leaves the answers already given standing:
+    /// each one was final when it was made, and a save is not something to
+    /// take back.
+    #[test]
+    fn a_cancel_partway_through_the_walk_stops_the_quit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::fixture_in(dir.path());
+        for name in ["a.txt", "b.txt"] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, "one\n").unwrap();
+            app.open_path(&path, None).unwrap();
+        }
+        for index in 0..2 {
+            app.active_tab = Some(index);
+            execute_command(&mut app, Command::InsertChar('!'));
+        }
+
+        execute_command(&mut app, Command::Quit);
+        execute_command(&mut app, Command::DialogActivate);
+        execute_command(&mut app, Command::DialogMove(-1));
+        execute_command(&mut app, Command::DialogActivate);
+
+        assert!(!app.should_quit, "Cancel ends the walk, not the editor");
+        assert!(app.dialog.is_none());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "!one\n",
+            "the file already answered for stays saved"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("b.txt")).unwrap(),
+            "one\n"
+        );
+        assert_eq!(app.tabs.len(), 1, "and only the answered tab was closed");
+    }
+
+    /// A save that fails is the one answer that must not go on: quitting past
+    /// it would take the buffer with it.
+    #[test]
+    fn a_failed_save_stops_the_quit_where_it_is() {
+        let mut app = app();
+        // A scratch tab has no path, so its save fails.
+        execute_command(&mut app, Command::Quit);
+        execute_command(&mut app, Command::DialogActivate);
+
+        assert!(!app.should_quit, "the buffer is still the only copy");
+        assert!(
+            app.dialog.is_none(),
+            "and the walk stopped rather than looped"
+        );
+        assert_eq!(app.tabs.len(), 3, "nothing was closed");
+        let notification = app.notifications.current().unwrap();
+        assert!(
+            notification.message.starts_with("Failed to save:"),
+            "{}",
+            notification.message
+        );
     }
 
     #[test]
