@@ -2,7 +2,7 @@
 
 Phase 14 — Polish (in progress: help screen, status bar, watcher, undo budget,
 external reload, job cancellation, the combined-diff parser, the error-message pass
-and the per-file quit walk done)
+the per-file quit walk and green CI done)
 
 ## Completed
 
@@ -702,6 +702,11 @@ and the per-file quit walk done)
     so a wording change alone cannot pass a dynamic binary. The known issue "x86_64 musl
     not yet built anywhere" is answered: `file` on the runner's artefact reads
     `ELF 64-bit LSB pie executable, x86-64, static-pie linked, stripped`.
+  - **CI is green, for the first time in the project's history.** Run 34125005795 on
+    `fe6af84`: `fmt + clippy + test` on ubuntu and macos, and all four `link` jobs —
+    `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, `x86_64-apple-darwin`,
+    `aarch64-apple-darwin`. Every target the release owes now links on a machine that is
+    not this one, and both Linux binaries are asserted static there.
   - 690 tests (was 689).
 
 ## In progress
@@ -1284,9 +1289,9 @@ Phase 14 continues. What is left of it, roughly in order of how much it is worth
 
 - What is still unchecked by hand, as after every phase: the real target terminals —
   iTerm2, Ghostty, Terminal.app, tmux, plain ssh.
-- The CI run that proves the two fixes of ADR-048 has not come back yet. x86_64 musl is
-  linked and static on the runner; what is left downstream is the release binaries
-  themselves.
+- The release binaries themselves. CI is green on all four targets (ADR-048), so what
+  is left is tagging a version and letting `release.yml` — still the Phase 0 stub — do
+  something with it.
 - A worker for the explorer's directory reads is the last of the known issues above that
   Phase 14 named as its own and has not answered.
 - Reloading has no merge and does not offer one: Reload takes the file, Keep Mine keeps
