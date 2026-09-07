@@ -1,7 +1,8 @@
 # Current Phase
 
 Phase 14 — Polish (in progress: help screen, status bar, watcher, undo budget,
-external reload, job cancellation and the combined-diff parser done)
+external reload, job cancellation, the combined-diff parser and the error-message
+pass done)
 
 ## Completed
 
@@ -640,12 +641,34 @@ external reload, job cancellation and the combined-diff parser done)
     file answers `* Unmerged path f.txt`, which is now drawn dim as git talking about the
     file rather than as a line of it.
   - 681 tests (was 674), including the pty check below.
+  - **The error-message pass** (ADR-046), read as a pass rather than one feature at a
+    time. Every message the editor can put on the status bar was listed side by side,
+    which is the only way the split showed: `Nothing to undo` was `Info` and `No file to
+    save` was `Warning`; `Nothing selected in the Git panel` was `Info` and `Select
+    something in the explorer first` was `Warning` — the same situation in the two
+    panels, in two colours and two voices.
+  - The kinds now answer one mechanical question. `Info` — it was done. `Warning` —
+    nothing was done, and the reason is the state the editor is in. `Error` — it was
+    attempted and something outside the editor refused. Seventeen sites moved; the rule
+    is the one the existing `Warning` sites already followed, so nothing that read
+    correctly changed colour.
+  - **`Diff failed: git diff failed: fatal: …`** said it twice and named a subprocess the
+    user never typed. `worker.rs` had solved this for the background path and written
+    down why; `GitError::reason` moves that knowledge onto the error so both paths share
+    it. The three "could not open" sites and the delete site got the verb `Failed to
+    save:` and `Failed to reload:` already had.
+  - `GitState::start` returns a `NotStarted` with two variants instead of one string, so
+    "there is no repository" can be a warning and "the worker is gone" an error without
+    the caller matching on a message (SPEC §45).
+  - 685 tests (was 681). Ten declined commands are asserted to be warnings in one test,
+    so the rule is checkable rather than a paragraph — which is what the fifteen-way
+    split came from not having.
 
 ## In progress
 
 - Phase 14. The help screen, the responsive status bar, the watcher, the undo budget,
-  reloading a buffer whose file changed, cancelling a running job and the combined-diff
-  parser have landed; the error-message pass, the README screenshot and the release
+  reloading a buffer whose file changed, cancelling a running job, the combined-diff
+  parser and the error-message pass have landed; the README screenshot and the release
   binaries have not.
 
 ## Known issues
@@ -818,6 +841,21 @@ external reload, job cancellation and the combined-diff parser done)
 Phase 2 through Phase 8 acceptance were verified by driving the real binary in a pty
 (the Phase 1 harness: fork a pty, set `TIOCSWINSZ`, write key and mouse bytes, replay
 the output through a minimal terminal emulator).
+
+### Phase 14 — the error-message pass
+
+Same harness, at 100x30, checking the colour the status bar actually emits rather than
+the kind the code names.
+
+- **The rule holds where it is easiest to get wrong.** `Ctrl+Z` on a fresh file, `Ctrl+V`
+  with an empty clipboard, `Ctrl+C` with no selection, `Ctrl+W` with no tab left and
+  `Esc` in the git panel with nothing running all emit `38;5;215` — the warning colour —
+  for `Nothing to undo`, `The clipboard is empty`, `Nothing selected`, `No tab to close`
+  and `Nothing to cancel`. Every one of those was `38;5;75` before the pass, the same
+  blue as `Saved f.txt`.
+- **And `Saved f.txt` is still that blue.** Typing a character and pressing `Ctrl+S`
+  emits `38;5;75`: the pass moved the messages that report nothing happening, and left
+  the ones that report something alone.
 
 ### Phase 14 — the diff of a conflicted file
 
@@ -1201,8 +1239,6 @@ Phase 14 continues. What is left of it, roughly in order of how much it is worth
   iTerm2, Ghostty, Terminal.app, tmux, plain ssh.
 - The CI `targets` job has still not been seen green — x86_64 musl has not been linked
   anywhere, and the release binaries the phase owes are downstream of it.
-- The error-message pass the phase names has not been done as a pass: the messages that
-  were written with their features read well, and nobody has read them all side by side.
 - A worker for the explorer's directory reads and per-file answers on the quit prompt are
   the two known issues above that Phase 14 named as its own and has not answered.
 - Reloading has no merge and does not offer one: Reload takes the file, Keep Mine keeps

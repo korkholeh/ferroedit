@@ -1301,3 +1301,57 @@ changed ones, so a conflict of one line reads `+5 −0`: that is what the output
 inventing a smaller number would be summarising a diff we do not otherwise interpret. The
 staged side of a conflicted file is still one dim line saying there is nothing to diff —
 git's own answer, and a truer one than an empty pane.
+
+---
+
+## ADR-046: A notification's kind says what happened, not how bad it sounds
+
+**Decision.** The three `NotificationKind`s are decided by one mechanical question — did
+anything change?
+
+- `Info` — it was done. `Saved main.rs`, `Copied 5 characters`, `Cancelling…`.
+- `Warning` — nothing was done, and the reason is the state the editor is in.
+  `No file to save`, `Nothing to undo`, `Nothing selected in the Git panel`.
+- `Error` — it was attempted and something outside the editor refused: the filesystem,
+  git, the terminal. `Failed to save: Permission denied`.
+
+Seventeen call sites moved to match. A failure message names the thing the *user* asked
+for and quotes the reason after a colon — `Failed to open:`, `Failed to delete:`,
+`Diff failed:` — and `GitError::reason` is what goes after that colon. `GitState::start`
+returns a `NotStarted` with two variants rather than one string, so its caller can tell
+the two apart without reading the message.
+
+**Why.** The messages were written one feature at a time and each read well beside the
+feature it belonged to. Read side by side they did not: `Nothing to undo` was `Info` and
+`No file to save` was `Warning`; `Nothing selected in the Git panel` was `Info` and
+`Select something in the explorer first` was `Warning` — the same situation in the two
+panels, in two colours and two voices. Fifteen sites had made this decision on their own
+and split roughly down the middle.
+
+"Nothing changed" is the whole of the middle case, and it is the rule that makes the
+existing `Warning` sites right without exception rather than a new convention imposed on
+them. It is also the one worth a colour: yellow means the keystroke landed and produced
+nothing, which is exactly the moment a silent no-op leaves a user pressing the key again.
+`Error` is reserved for something outside the editor saying no, so it keeps meaning
+"a thing went wrong" rather than "you asked for something unavailable".
+
+The doubled prefix was the other thing only a side-by-side reading finds. `Diff failed:
+{err}` printed `Diff failed: git diff failed: fatal: …` — the sentence twice, naming a
+subprocess the user never typed. `worker.rs` had already solved this for the background
+path and documented why; the fix is to move that knowledge onto `GitError` so both paths
+share it, and `git reset failed` never reaches a user who asked to unstage.
+
+`FsError` keeps no verb prefix. Three of its four variants complain about a typed *name*
+and already stand alone — `Could not create foo.txt: foo.txt already exists` would say
+the name twice to add a verb nobody needed. `DocumentError` is the opposite: it is
+`{path}: {source}` and the source is the OS's fragment, so every one of its sites
+supplies the verb.
+
+**Consequence.** A test walks ten declined commands and asserts every one is a `Warning`;
+the rule is checkable rather than a paragraph, which is what the fifteen-way split came
+from not having. The rule does not decide *wording* — `No file to save` and `Nothing to
+undo` are both correct under it — and the pass left the two families that already read
+consistently alone. `Merge failed: conflicts — resolve them in the panel, then commit`
+stays an `Error` even though ADR-036 calls a stopped merge not-a-failure: git itself
+calls it one, the message is accurate and actionable, and the alternative was a third
+`JobFailure` variant for a case the user is not confused about.
