@@ -46,11 +46,19 @@ impl DiffState {
     ///
     /// The side is in the title because the two sides are different answers
     /// and a viewer that did not say which it was showing would be no answer
-    /// at all.
+    /// at all. A conflicted file adds `merge` for the same reason: what is on
+    /// screen then is a combined diff, whose `+` and `-` are one column per
+    /// parent rather than one change (ADR-045), and the columns do not
+    /// announce themselves.
     pub fn title(&self) -> String {
         let truncated = if self.diff.truncated { " (cut)" } else { "" };
+        let merge = if self.diff.is_combined() {
+            ", merge"
+        } else {
+            ""
+        };
         format!(
-            " Diff — {} [{}] {}{truncated} ",
+            " Diff — {} [{}{merge}] {}{truncated} ",
             self.path.display(),
             self.side.label(),
             self.diff.summary()

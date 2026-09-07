@@ -5,6 +5,13 @@
 //! header, a hunk marker, an addition, a removal or context — so the work here
 //! is to say *which* each line is, once, rather than to look at its first byte
 //! again on every frame (ARCHITECTURE invariant 4).
+//!
+//! *First byte* is the part a conflicted file makes wrong. `git diff` of an
+//! unmerged path is a **combined** diff: one marker column per parent, so a
+//! two-parent merge writes two of them and ` +ours` is an addition whose first
+//! byte is a space (ADR-045). The classifier therefore keeps two pieces of
+//! state per file — how many columns there are, and whether a hunk has begun —
+//! rather than reading one byte in isolation.
 
 use crate::editor::coords::{line_width, DEFAULT_TAB_WIDTH};
 
@@ -80,26 +87,36 @@ pub struct Diff {
     pub removed: usize,
     /// The widest line in display cells, so horizontal scrolling has an end.
     pub width: usize,
+    /// How many parents the widest hunk header claimed: one for an ordinary
+    /// diff, two for a conflicted file in an ordinary merge, more for an
+    /// octopus. Zero when the output held no hunk at all.
+    pub parents: usize,
 }
 
 impl Diff {
     /// Classifies the output of one `git diff`.
     ///
-    /// Order matters at the top: `--- a/file` and `+++ b/file` begin with the
-    /// same bytes as a removal and an addition, and a viewer that painted the
-    /// file header red and green would be colouring the one part of the output
-    /// that is not a change.
+    /// The classifier is stateful because the format is. `--- a/file` and
+    /// `+++ b/file` begin with the same bytes as a removal and an addition,
+    /// and a viewer that painted the file header red and green would be
+    /// colouring the one part of the output that is not a change — but in a
+    /// two-column combined diff `--- x` is also exactly how a line removed
+    /// from both parents is printed. What separates them is not the bytes, it
+    /// is where they are: a file header comes before the first hunk of its
+    /// file, and everything after one is contents.
     pub fn parse(text: &str) -> Self {
         let mut diff = Self::default();
+        let mut classifier = Classifier::default();
         for line in text.lines() {
             if diff.lines.len() == MAX_LINES {
                 diff.truncated = true;
                 break;
             }
-            let kind = classify(line);
+            let kind = classifier.classify(line);
             match kind {
                 DiffLineKind::Added => diff.added += 1,
                 DiffLineKind::Removed => diff.removed += 1,
+                DiffLineKind::Hunk => diff.parents = diff.parents.max(classifier.columns),
                 _ => {}
             }
             diff.width = diff.width.max(line_width(line, DEFAULT_TAB_WIDTH).0);
@@ -109,6 +126,16 @@ impl Diff {
             });
         }
         diff
+    }
+
+    /// Whether this is a combined diff — the shape `git diff` takes for an
+    /// unmerged path, with one marker column per parent instead of one.
+    ///
+    /// The viewer says so in its title: two columns of `+` and `-` mean
+    /// something different from one, and a reader who has not been told which
+    /// they are looking at will read `+ theirs` as an ordinary addition.
+    pub fn is_combined(&self) -> bool {
+        self.parents > 1
     }
 
     pub fn is_empty(&self) -> bool {
@@ -126,12 +153,13 @@ impl Diff {
     }
 }
 
-/// The prefixes git writes for the parts of the output that describe the file
-/// rather than its contents.
-const HEADERS: [&str; 10] = [
-    "diff --git",
-    "diff --cc",
-    "diff --combined",
+/// The three spellings of the line that opens a file's diff. Each one resets
+/// the classifier: a diff of several files is several state machines in a row.
+const FILE_HEADERS: [&str; 3] = ["diff --git", "diff --cc", "diff --combined"];
+
+/// The prefixes git writes, before the first hunk, for the parts of the output
+/// that describe the file rather than its contents.
+const PREAMBLE: [&str; 12] = [
     "index ",
     "old mode ",
     "new mode ",
@@ -139,28 +167,101 @@ const HEADERS: [&str; 10] = [
     "deleted file mode ",
     "similarity index ",
     "dissimilarity index ",
+    "rename from ",
+    "rename to ",
+    "copy from ",
+    "copy to ",
+    "Binary files ",
 ];
 
-fn classify(line: &str) -> DiffLineKind {
-    if line.starts_with("--- ") || line.starts_with("+++ ") || line == "---" || line == "+++" {
-        return DiffLineKind::Header;
+/// One `git diff`'s worth of state: enough to tell a file header from a line
+/// of a file, which the bytes alone cannot (see `Diff::parse`).
+#[derive(Debug)]
+struct Classifier {
+    /// Marker columns in the hunks of the file being read: one for an ordinary
+    /// diff, one per parent for a combined one. Taken from the hunk header,
+    /// which spells it out — `@@@ … @@@` is two.
+    columns: usize,
+    /// Whether a hunk of this file has begun. Before the first one every line
+    /// describes the file; after it every line is contents.
+    in_hunk: bool,
+}
+
+impl Default for Classifier {
+    fn default() -> Self {
+        Self {
+            columns: 1,
+            in_hunk: false,
+        }
     }
-    if HEADERS.iter().any(|prefix| line.starts_with(prefix))
-        || line.starts_with("rename from ")
-        || line.starts_with("rename to ")
-        || line.starts_with("copy from ")
-        || line.starts_with("copy to ")
-        || line.starts_with("Binary files ")
-    {
-        return DiffLineKind::Header;
+}
+
+impl Classifier {
+    fn classify(&mut self, line: &str) -> DiffLineKind {
+        if FILE_HEADERS.iter().any(|prefix| line.starts_with(prefix)) {
+            *self = Self::default();
+            return DiffLineKind::Header;
+        }
+        if let Some(columns) = hunk_columns(line) {
+            self.columns = columns;
+            self.in_hunk = true;
+            return DiffLineKind::Hunk;
+        }
+        if !self.in_hunk {
+            // `--- ` and `+++ ` are the file's two halves being named here and
+            // a pair of removals in a combined hunk once one has started, so
+            // they are only headers on this side of the first `@@`.
+            if line.starts_with("--- ")
+                || line.starts_with("+++ ")
+                || line == "---"
+                || line == "+++"
+            {
+                return DiffLineKind::Header;
+            }
+            if PREAMBLE.iter().any(|prefix| line.starts_with(prefix)) {
+                return DiffLineKind::Header;
+            }
+            // `git diff --cached` of an unmerged path prints this instead of a
+            // diff: there is no single staged blob to diff against.
+            if line.starts_with("* Unmerged path ") {
+                return DiffLineKind::Meta;
+            }
+        }
+        if line.starts_with('\\') {
+            return DiffLineKind::Meta;
+        }
+        markers(line, self.columns)
     }
-    match line.chars().next() {
-        Some('@') => DiffLineKind::Hunk,
-        Some('+') => DiffLineKind::Added,
-        Some('-') => DiffLineKind::Removed,
-        Some('\\') => DiffLineKind::Meta,
-        _ => DiffLineKind::Context,
+}
+
+/// The parent count a hunk header claims, as a column count.
+///
+/// `@@ … @@` is one column, `@@@ … @@@` two, and an octopus adds one `@` per
+/// parent. Nothing else in the output starts with `@`: inside a hunk every
+/// line begins with its marker columns, so an `@` at column zero is a hunk
+/// header or it is not a body line at all.
+fn hunk_columns(line: &str) -> Option<usize> {
+    let ats = line.bytes().take_while(|&b| b == b'@').count();
+    (ats >= 2).then(|| ats - 1)
+}
+
+/// Reads the marker columns of a body line.
+///
+/// A combined diff puts one column per parent, so an addition can begin with a
+/// space: ` +ours` is "unchanged against the first parent, added against the
+/// second". A row cannot be both — the lines a `-` marks are the ones missing
+/// from the result, and a `+` row is in it — so the two are read in one pass
+/// and `+` is answered first.
+fn markers(line: &str, columns: usize) -> DiffLineKind {
+    let mut kind = DiffLineKind::Context;
+    for c in line.chars().take(columns) {
+        match c {
+            '+' => return DiffLineKind::Added,
+            '-' => kind = DiffLineKind::Removed,
+            _ => {}
+        }
     }
+    kind
 }
 
 #[cfg(test)]
@@ -240,6 +341,119 @@ Binary files a/x.png and b/x.png differ
         // The `+` is one cell, the tab advances from column one to the next
         // stop, and `x` is the cell after it.
         assert_eq!(diff.width, DEFAULT_TAB_WIDTH + 1);
+    }
+
+    /// `git diff` of a conflicted file, exactly as git prints it: two marker
+    /// columns, one per parent of the stopped merge.
+    const COMBINED: &str = "\
+diff --cc f.txt
+index daf31e1,594dc4f..0000000
+--- a/f.txt
++++ b/f.txt
+@@@ -1,3 -1,3 +1,7 @@@
+  one
+++<<<<<<< HEAD
+ +OURS
+++=======
++ THEIRS
+++>>>>>>> other
+  three
+";
+
+    #[test]
+    fn both_marker_columns_of_a_combined_diff_are_read() {
+        use DiffLineKind::{Added, Context, Header, Hunk};
+        assert_eq!(
+            kinds(COMBINED),
+            vec![
+                Header, Header, Header, Header, Hunk,
+                Context, // `  one` — unchanged against both parents
+                Added,   // `++<<<<<<< HEAD`
+                Added,   // ` +OURS` — added against the second parent only
+                Added,   // `++=======`
+                Added,   // `+ THEIRS` — added against the first parent only
+                Added,   // `++>>>>>>> other`
+                Context, // `  three`
+            ]
+        );
+        let diff = Diff::parse(COMBINED);
+        assert_eq!((diff.added, diff.removed), (5, 0));
+    }
+
+    #[test]
+    fn a_combined_diff_says_how_many_parents_it_has() {
+        let diff = Diff::parse(COMBINED);
+        assert_eq!(diff.parents, 2);
+        assert!(diff.is_combined());
+
+        let ordinary = Diff::parse(SAMPLE);
+        assert_eq!(ordinary.parents, 1);
+        assert!(!ordinary.is_combined());
+
+        // Nothing to read is not a merge.
+        assert!(!Diff::parse("").is_combined());
+    }
+
+    /// An octopus writes one column per parent, and the hunk header counts
+    /// them out in `@`s.
+    #[test]
+    fn three_columns_are_read_as_three() {
+        use DiffLineKind::{Added, Context, Hunk, Removed};
+        let text = "\
+@@@@ -1,2 -1,2 -1,2 +1,2 @@@@
+   kept
++++ added against all three
+  - gone from the third
+";
+        assert_eq!(kinds(text), vec![Hunk, Context, Added, Removed]);
+        assert_eq!(Diff::parse(text).parents, 3);
+    }
+
+    /// The one case the bytes alone cannot decide: in a two-column diff a line
+    /// removed from both parents is printed `--` followed by its own text, and
+    /// a line whose text begins `- ` makes that `--- …` — the file header's
+    /// spelling. What tells them apart is the hunk that has begun by then.
+    #[test]
+    fn a_removal_that_looks_like_a_file_header_is_still_a_removal() {
+        use DiffLineKind::{Added, Header, Hunk, Removed};
+        let text = "\
+diff --cc list.md
+--- a/list.md
++++ b/list.md
+@@@ -1,2 -1,2 +1,2 @@@
+--- a bullet both parents dropped
++++ b line added against both
+";
+        assert_eq!(
+            kinds(text),
+            vec![Header, Header, Header, Hunk, Removed, Added]
+        );
+    }
+
+    #[test]
+    fn an_unmerged_path_has_nothing_staged_to_diff_and_says_so() {
+        // What `git diff --cached` prints for a conflicted file. It is git
+        // talking about the file, not a line of it, so it is not context.
+        assert_eq!(kinds("* Unmerged path f.txt\n"), vec![DiffLineKind::Meta]);
+    }
+
+    #[test]
+    fn each_file_of_a_multi_file_diff_gets_its_own_columns() {
+        use DiffLineKind::{Added, Context, Header, Hunk};
+        let text = "\
+diff --cc a.txt
+@@@ -1,1 -1,1 +1,1 @@@
+ +ours
+diff --git b.txt b.txt
+@@ -1,1 +1,1 @@
+ context
+";
+        assert_eq!(
+            kinds(text),
+            vec![Header, Hunk, Added, Header, Hunk, Context],
+            "` +ours` is an addition in the two-column file and ` context` is \
+             context in the one-column file that follows it"
+        );
     }
 
     #[test]

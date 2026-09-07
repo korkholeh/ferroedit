@@ -543,6 +543,7 @@ fn first_line_of(stdout: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::diff::DiffLineKind;
     use crate::git::models::{Branch, Change, Head};
     use crate::git::testing::TestRepo;
 
@@ -1192,6 +1193,54 @@ mod tests {
             .diff(Path::new("-x.txt"), DiffSide::Worktree)
             .unwrap();
         assert_eq!((diff.added, diff.removed), (1, 1));
+    }
+
+    /// ADR-045, end to end against the real binary: `git diff` of an unmerged
+    /// path is a combined diff, and the parser has to read both of its marker
+    /// columns rather than the first byte of each line.
+    #[test]
+    fn the_diff_of_a_conflicted_file_is_read_as_a_combined_diff() {
+        let repo = TestRepo::new();
+        repo.write("c.txt", "one\ntwo\nthree\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+        repo.run(&["checkout", "-q", "-b", "other"]);
+        repo.write("c.txt", "one\nTHEIRS\nthree\n");
+        repo.commit("theirs");
+        repo.run(&["checkout", "-q", "main"]);
+        repo.write("c.txt", "one\nOURS\nthree\n");
+        repo.commit("ours");
+
+        let service = GitService::discover(repo.path()).unwrap();
+        assert!(matches!(service.merge("other"), Err(GitError::Conflicted)));
+
+        let diff = service
+            .diff(Path::new("c.txt"), DiffSide::Worktree)
+            .unwrap();
+        assert!(diff.is_combined(), "{:?}", diff.lines);
+        assert_eq!(diff.parents, 2);
+
+        // Each side of the conflict is an addition, whichever column says so:
+        // `++<<<<<<< HEAD` is added against both parents, ` +OURS` against the
+        // second only, and `+ THEIRS` against the first only.
+        let kind = |text: &str| {
+            diff.lines
+                .iter()
+                .find(|line| line.text.contains(text))
+                .unwrap_or_else(|| panic!("{text} is in the diff: {:?}", diff.lines))
+                .kind
+        };
+        assert_eq!(kind("OURS"), DiffLineKind::Added);
+        assert_eq!(kind("THEIRS"), DiffLineKind::Added);
+        assert_eq!(kind("<<<<<<<"), DiffLineKind::Added);
+        assert_eq!(kind("one"), DiffLineKind::Context);
+
+        // The other side has no diff to give: there is no single staged blob
+        // for a path with three stages in the index.
+        let staged = service.diff(Path::new("c.txt"), DiffSide::Staged).unwrap();
+        assert_eq!(staged.lines.len(), 1);
+        assert_eq!(staged.lines[0].kind, DiffLineKind::Meta);
+        assert!(staged.lines[0].text.starts_with("* Unmerged path"));
     }
 
     /// The diff runs from the repository root, so a path git printed in a
