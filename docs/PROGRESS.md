@@ -1,8 +1,8 @@
 # Current Phase
 
 Phase 14 — Polish (in progress: help screen, status bar, watcher, undo budget,
-external reload, job cancellation, the combined-diff parser and the error-message
-pass done)
+external reload, job cancellation, the combined-diff parser, the error-message pass
+and the per-file quit walk done)
 
 ## Completed
 
@@ -663,13 +663,33 @@ pass done)
   - 685 tests (was 681). Ten declined commands are asserted to be warnings in one test,
     so the rule is checkable rather than a paragraph — which is what the fifteen-way
     split came from not having.
+  - **Quitting asks about each unsaved file in turn** (ADR-047), closing the Phase 5
+    known issue. The old prompt could express two answers — lose everything, or nothing —
+    and the one users want most was not among them: saving four modified files on the way
+    out meant cancelling the quit, pressing `Ctrl+S` in each tab, and quitting again.
+  - It is not a new dialog. A quit *is* closing every dirty tab and then exiting, so the
+    question is the one `Ctrl+W` already asks — `a.txt has unsaved changes.` over
+    `[ Save ] [ Don't Save ] [ Cancel ]` — once per tab, in tab order, with the count in
+    the title: `Unsaved changes (3 left)`.
+  - Save is the default again, which ADR-017 could not afford: its Enter discarded every
+    dirty buffer. Here Enter saves this file and asks about the next, so holding it down
+    saves everything and quits.
+  - The count is in the title and not the message because `alpha.txt has unsaved changes
+    (2 left).` is what pushes the box past a 40-column terminal for an ordinary file
+    name. A fourth button — `Discard All` — is fifty columns of button row and clips on
+    the same forty, so discarding four files costs four answers where `Quit Anyway` cost
+    one. That is the trade, and a safe Enter is worth more than a short one.
+  - A failed save stops the walk where it is: the file is still only in the buffer, and
+    quitting past `Permission denied` is the worst thing the editor could do.
+    `Command::QuitDiscarding` is deleted — nothing produced it any more.
+  - 689 tests (was 685).
 
 ## In progress
 
 - Phase 14. The help screen, the responsive status bar, the watcher, the undo budget,
   reloading a buffer whose file changed, cancelling a running job, the combined-diff
-  parser and the error-message pass have landed; the README screenshot and the release
-  binaries have not.
+  parser, the error-message pass and the per-file quit walk have landed; the README
+  screenshot and the release binaries have not.
 
 ## Known issues
 
@@ -713,15 +733,10 @@ pass done)
 - **Rename pre-fills the name and there is no way to select it.** The field has a caret
   but no selection, so replacing `main.rs` wholesale is seven `Backspace`s. Editing an
   extension or a suffix — the common case — is what the pre-filled name is good at.
-- **An open file changed on disk is not reloaded, and the tab does not say so.** The
-  watcher (ADR-040) made this visible rather than causing it: the tree and the git panel
-  now update while the buffer in front of the user does not. Closing it needs a reload
-  prompt, which is a decision of its own — a buffer with unsaved edits cannot simply be
-  replaced.
-- **Deleting a file that is open leaves the tab open.** The buffer keeps its text, the
-  tab keeps its name, and `Ctrl+S` writes the file back into existence. That is
-  recoverable rather than surprising, but the tab does not say that what it is showing
-  is no longer on disk.
+- **Deleting a file that is open leaves the tab open.** The buffer keeps its text and
+  `Ctrl+S` writes the file back into existence, which is the point: the buffer is the
+  last copy. Since ADR-043 the tab says so rather than looking unchanged; what it still
+  does not do is offer to close itself.
 - **Expanding a very large directory blocks the frame.** The read and the sort happen on
   the UI thread, so a directory with tens of thousands of entries is a visible pause.
   Everything above it stays lazy, so this is one directory's worth of work rather than
@@ -736,10 +751,11 @@ pass done)
   which tab is active (ADR-015), so the `‹` and `›` markers are indicators and not
   buttons. Browsing the tab list without changing the file in front of you is not
   possible; it needs either a stored offset or a tab picker, and neither is Phase 5.
-- **Closing tabs one at a time is the only way to close several.** There is no Close
-  All, Close Others, or a Save All on the quit prompt — quitting with four dirty files
-  is one prompt with one Quit Anyway, so the choice is all or nothing. Per-file answers
-  belong with the other multi-file work in Phase 14.
+- **There is still no Close All and no Close Others.** Quitting now asks about each
+  unsaved file in turn (ADR-047), so the answers are per file, but closing several tabs
+  that are *not* on the way out is still one `Ctrl+W` each. The cost of the walk is at
+  the other end: discarding four files is four answers, where the old one-shot
+  `Quit Anyway` was one.
 - **A tab's `×` costs two cells on every tab, whether or not it is wanted.** At 60
   columns that is roughly one tab's worth of the bar. The alternative — showing the
   close button only on the active tab, or on hover — makes tabs change width as the
@@ -805,10 +821,6 @@ pass done)
   staged, and `git diff --no-index /dev/null <path>` — which would show it as one big
   addition — exits non-zero by design and needs a platform-specific null path. The
   viewer says why instead of opening empty.
-- **A conflicted file's combined diff is coloured by its first column only.** git
-  writes two columns of markers for a merge (`++`, ` -`), so a line removed from one
-  parent reads as context here. The text is git's own and correct; the colour is a
-  simplification.
 - **The viewer is one file at a time.** There is no whole-repository diff and no
   hunk-level staging: SPEC §36 asks for a read-only unified diff and that is what this
   is.
@@ -841,6 +853,23 @@ pass done)
 Phase 2 through Phase 8 acceptance were verified by driving the real binary in a pty
 (the Phase 1 harness: fork a pty, set `TIOCSWINSZ`, write key and mouse bytes, replay
 the output through a minimal terminal emulator).
+
+### Phase 14 — the per-file quit walk
+
+Same harness, at 60x20 and at 40x12 (the minimum layout width), over three files opened
+from the command line and modified in turn.
+
+- **Three Enters save three files and quit.** `Ctrl+Q` at 60x20 shows
+  `┌ Unsaved changes (3 left) ┐` over `alpha.txt has unsaved changes.` and
+  `[ Save ] [ Don't Save ] [ Cancel ]` with Save selected. Enter saves `alpha.txt`,
+  closes its tab and asks about `beta.txt` with `(2 left)`; the third question drops the
+  counter, and the Enter after it exits 0. All three files on disk carry the edit.
+- **Two `Right, Enter` pairs discard two files and quit.** At 40x12, exit 0 and both
+  files byte-for-byte as they were opened.
+- **The box fits the minimum width.** At 40 columns the title, the sentence and all three
+  buttons are drawn whole — the counter in the title is what buys that: with it in the
+  message, `alpha.txt has unsaved changes (2 left).` needs 42 columns and lost its last
+  character.
 
 ### Phase 14 — the error-message pass
 
@@ -1239,8 +1268,8 @@ Phase 14 continues. What is left of it, roughly in order of how much it is worth
   iTerm2, Ghostty, Terminal.app, tmux, plain ssh.
 - The CI `targets` job has still not been seen green — x86_64 musl has not been linked
   anywhere, and the release binaries the phase owes are downstream of it.
-- A worker for the explorer's directory reads and per-file answers on the quit prompt are
-  the two known issues above that Phase 14 named as its own and has not answered.
+- A worker for the explorer's directory reads is the last of the known issues above that
+  Phase 14 named as its own and has not answered.
 - Reloading has no merge and does not offer one: Reload takes the file, Keep Mine keeps
   the buffer, and a save overwrites. Nothing in SPEC asks for a third answer, and the
   reload being undoable is what makes the pair enough.

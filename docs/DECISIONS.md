@@ -344,6 +344,10 @@ than to Save, because quitting is about *all* the dirty buffers at once and the 
 that does nothing is the safe one; the per-tab prompt defaults to Save for the opposite
 reason.
 
+*Superseded in Phase 14 by ADR-047.* Asking about all the dirty buffers at once is what
+made Cancel the only safe default, and it is also what left saving them out of reach:
+the walk asks per file, so `QuitDiscarding` is gone and Save is the default again.
+
 ---
 
 ## ADR-018: The CLI takes several files
@@ -1355,3 +1359,44 @@ consistently alone. `Merge failed: conflicts — resolve them in the panel, then
 stays an `Error` even though ADR-036 calls a stopped merge not-a-failure: git itself
 calls it one, the message is accurate and actionable, and the alternative was a third
 `JobFailure` variant for a case the user is not confused about.
+
+---
+
+## ADR-047: Quitting walks the unsaved tabs, one question each
+
+**Decision.** `Ctrl+Q` with dirty buffers asks the close-tab question — `a.txt has
+unsaved changes.` over `[ Save ] [ Don't Save ] [ Cancel ]` — once per dirty tab, in tab
+order, counting down in the *title*: `Unsaved changes (3 left)`. Each answer closes that
+tab and asks again; when none are left, the editor exits. Save is the default. A save
+that fails stops the walk where it is. `Command::QuitDiscarding` is deleted and replaced
+by `SaveAndQuit(index)` and `DiscardAndQuit(index)`.
+
+**Why.** The all-at-once prompt could express two answers — lose everything, or nothing —
+and the one users want most was not among them. Saving four modified files on the way out
+meant cancelling the quit, pressing `Ctrl+S` in each tab, and quitting again. ADR-017
+chose Cancel as that dialog's default for exactly this reason: its Enter discarded every
+dirty buffer, so the reflex answer had to be the one that did nothing.
+
+Asking per file makes Enter safe, and a safe Enter is worth more than a short one: hold
+it down and every file is saved and the editor exits. It is also not a new dialog. A quit
+*is* closing every dirty tab and then exiting, so the question is the one `Ctrl+W`
+already asks, with the same three answers in the same order.
+
+The count is in the title because the message is a sentence about one file and a counter
+bolted onto it — `alpha.txt has unsaved changes (2 left).` — is what pushes the box past
+a 40-column terminal for any ordinary file name. A title is where a progress indicator
+belongs, and it leaves every question of the walk asking in the close-tab dialog's own
+words.
+
+A failed save is the one answer that must not go on. The file is still only in the
+buffer, and an editor that shrugged and quit past `Permission denied` would be the single
+worst thing it could do; the walk stops, the error is on the status bar, and the tab is
+still open.
+
+**Consequence.** Discarding four files now costs four `Right, Enter` pairs where
+`Quit Anyway` cost one — the price of not having a fourth button, which at
+`[ Save ] [ Don't Save ] [ Discard All ] [ Cancel ]` is fifty columns and clips on the
+forty the layout supports. Cancel ends the walk without undoing the answers already
+given: each was final when it was made, and a save is not something to take back. That
+leaves a cancelled quit with the answered tabs closed and the rest untouched, which is
+what every editor that asks this question does.
