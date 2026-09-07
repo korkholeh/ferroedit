@@ -392,6 +392,46 @@ mod tests {
         assert!(screen.contains("Sel 36"), "no selection count: {screen}");
     }
 
+    /// The bar's known Phase 3 crowding, fixed: at 60 columns the pieces
+    /// nobody reads leave and the notification keeps its room (ADR-039).
+    #[test]
+    fn the_status_bar_sheds_its_readout_before_it_crowds_the_notification() {
+        let mut app = app();
+        app.notifications
+            .info("Saved src/main.rs to disk without trouble".to_string());
+
+        let wide = draw(&app, 120, 24)[23].clone();
+        assert!(wide.contains("UTF-8"), "{wide:?}");
+        assert!(wide.contains("Editor"), "{wide:?}");
+        assert!(wide.contains("main"), "{wide:?}");
+
+        let narrow = draw(&app, 60, 20)[19].clone();
+        assert!(
+            narrow.contains("Ln 1, Col 1"),
+            "the position never goes: {narrow:?}"
+        );
+        assert!(
+            !narrow.contains("UTF-8"),
+            "the encoding is the first piece out: {narrow:?}"
+        );
+        assert!(
+            narrow.contains("Saved src/main.rs"),
+            "the notification is no longer clipped: {narrow:?}"
+        );
+    }
+
+    /// Past every drop the position still fits, and nothing is written over
+    /// anything else.
+    #[test]
+    fn the_narrowest_bar_is_the_cursor_position_and_nothing_more() {
+        let app = app();
+        let row = draw(&app, layout::MIN_WIDTH, 20)[19].clone();
+        assert!(row.contains("Ln 1, Col 1"), "{row:?}");
+        assert!(!row.contains("Editor"), "{row:?}");
+        assert!(!row.contains("UTF-8"), "{row:?}");
+        assert_eq!(row.chars().count(), layout::MIN_WIDTH as usize);
+    }
+
     /// Draws one frame and reports where the terminal's cursor ended up.
     ///
     /// The backend starts at the origin, which the editor can never place the
