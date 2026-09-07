@@ -96,6 +96,11 @@ pub enum Command {
     /// Shows or hides the files `ignore` filters out (SPEC §19).
     ToggleHiddenFiles,
 
+    /// Looks for the repository again and re-reads `git status` (SPEC §30).
+    /// Everything that changes a file refreshes the status on its own; this is
+    /// for a change made outside the editor.
+    GitRefresh,
+
     /// Asks for a name and then creates a file, a directory, or a new name for
     /// what is selected (SPEC §20).
     NewFilePrompt,
@@ -278,6 +283,8 @@ impl Command {
             Self::ExplorerCollapse => "Collapse the directory, or step out to its parent".into(),
             Self::ExplorerRefresh => "Re-read the tree from disk".into(),
             Self::ToggleHiddenFiles => "Show or hide ignored and hidden files".into(),
+
+            Self::GitRefresh => "Re-read the repository status".into(),
 
             Self::NewFilePrompt => "New file — asks for a name".into(),
             Self::NewDirectoryPrompt => "New folder — asks for a name".into(),
@@ -484,6 +491,7 @@ pub static MENUS: &[MenuDef] = &[
     MenuDef {
         title: "Git",
         items: &[
+            item("Refresh", Command::GitRefresh),
             item("Stage All", Command::Unimplemented("Stage All")),
             item("Commit…", Command::Unimplemented("Commit")),
             item("Pull", Command::Unimplemented("Pull")),

@@ -642,3 +642,78 @@ another tab holds is refused rather than silently creating two histories over on
 **Consequence for ADR-019.** The `DialogBody::List` question is therefore still open, and
 Phase 12's branch picker is what will settle it — a branch list has no pane behind it to
 delegate to, so it is the case where a list body earns its place.
+
+---
+
+## ADR-030: The status is read on demand, in the foreground, with a kill timer
+
+**Decision.** `git status --porcelain=v2 --branch -z` runs synchronously on the UI
+thread: once at startup, then after every save, every file operation and every explicit
+refresh (`F5` in the panel, Git → Refresh). There is no worker thread and no filesystem
+watcher in this phase. Every git invocation gets `GIT_TERMINAL_PROMPT=0`,
+`GIT_OPTIONAL_LOCKS=0`, `-c core.pager=cat`, a closed stdin, and a ten-second timer that
+kills the child.
+
+**Why.** A status is a local read that finishes in single-digit milliseconds on the
+repositories a terminal editor is opened in; a `JobId`, a channel variant and an
+in-flight state would be three moving parts spent hiding a pause nobody can see. The
+work that genuinely cannot block a frame is `pull`, `push` and `fetch` (SPEC §37), and
+those are Phase 11 — which is where the worker earns its keep and where this decision
+gets revisited rather than reversed.
+
+What is *not* optional is the timer. The subprocess that never returns is not the slow
+one, it is the one waiting on a lock another git is holding, or on a credential helper
+that wants a terminal a TUI is not going to give it. Ten seconds is far past any honest
+status and far short of an editor that has stopped drawing.
+
+**Consequence.** A change made by another program — a `git checkout` in the next
+terminal — is not noticed until something refreshes. `F5` in the panel is the answer,
+and a watcher is Phase 14's, along with the thread and the dependency it costs. The
+startup discovery also means the very first frame waits for one `rev-parse` and one
+`status`.
+
+---
+
+## ADR-031: The panel shows git's own `XY` pair, and the count goes in the title
+
+**Decision.** Each row is two columns — the index side then the worktree side, exactly
+as `git status --short` writes them — a space, and the path. There is no "Changes"
+header row; the number of changed files is in the panel's title, next to the branch and
+its ahead/behind counts. A path too long for the sidebar is elided from the *left*.
+
+**Why.** The layout gives the panel four to ten rows and sixteen to thirty-two columns.
+A header would spend one of those rows on a word that the title already implies, and on
+a short terminal that is a quarter of the list. The two-column form is what SPEC §30
+sketches (` M src/main.rs`) and, more usefully, what every user has already read a
+thousand times in a terminal — the alternative, one collapsed "status" letter, throws
+away the staged/unstaged split that Phase 11 needs on screen anyway. Eliding from the
+left keeps the file name, which is what identifies a row; the directories in front of it
+are what a reader can infer.
+
+**Consequence.** An untracked file shows as ` ?` rather than `??`: porcelain v2 prints
+one `?` for it, because there is nothing in the index to describe. A rename shows its
+new path only — the original is parsed and kept, and the diff viewer of Phase 13 is
+where it has somewhere to go.
+
+---
+
+## ADR-032: The parser reads bytes, and the paths stay bytes
+
+**Decision.** `git status` is asked for `-z` output and parsed as `&[u8]`. Only the fixed
+prefix of a record — the codes, the modes, the object names — is required to be ASCII;
+the path is whatever bytes follow the last field separator, and it becomes a `PathBuf`
+through `OsStr::from_bytes` on unix.
+
+**Why.** Without `-z`, git quotes any path that is not plain ASCII, and unquoting it
+correctly means reimplementing C string escapes for a format that exists only to be
+unquoted. With `-z` there is no quoting at all: the path is raw and the record separator
+is a byte that cannot occur in one. Reading it as a `String` would then be the second
+mistake, because a unix path is bytes and not necessarily UTF-8 — a file called
+`caf\xe9.txt` is a file, and staging it in Phase 11 has to pass git the name it gave us
+rather than a lossy transcription of it.
+
+**Consequence.** A rename is the one record that reads two fields, and the parser holds
+its iterator across them for exactly that reason. `MAX_ENTRIES` caps the list at 5000
+paths, with a `truncated` flag the title shows as `(5000+)` — the ADR-027 argument, for
+the same reason: a mass rewrite must not turn one status into a hundred megabytes of
+allocations.

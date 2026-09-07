@@ -3,6 +3,7 @@
 
 pub mod dialog;
 pub mod focus;
+pub mod git;
 pub mod input_field;
 pub mod notifications;
 pub mod search;
@@ -13,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use dialog::DialogState;
 use focus::FocusTarget;
+use git::GitState;
 use notifications::Notifications;
 use search::SearchState;
 pub use tabs::Tab;
@@ -98,40 +100,6 @@ impl SidebarState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GitStatusCode {
-    Modified,
-    Added,
-    Deleted,
-    Untracked,
-}
-
-impl GitStatusCode {
-    pub fn symbol(self) -> char {
-        match self {
-            Self::Modified => 'M',
-            Self::Added => 'A',
-            Self::Deleted => 'D',
-            Self::Untracked => '?',
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct GitEntry {
-    pub status: GitStatusCode,
-    pub path: String,
-}
-
-/// Phase 1 mock. Replaced by the porcelain=v2 parser output in Phase 10.
-#[derive(Debug)]
-pub struct GitState {
-    pub branch: Option<String>,
-    pub entries: Vec<GitEntry>,
-    pub selected: usize,
-    pub scroll: usize,
-}
-
 #[derive(Debug)]
 pub struct MenuState {
     /// Index into `commands::MENUS`, or `None` when the menu bar is idle.
@@ -185,6 +153,10 @@ pub struct App {
     /// geometry, like `editor_view`, and read for the same reason: scrolling
     /// has to know how big the window is (ADR-010).
     pub explorer_rows: u16,
+    /// Rows the git panel could show in the last drawn frame, for the same
+    /// reason as `explorer_rows`: the changed-file list can be longer than the
+    /// four to ten rows the layout gives it.
+    pub git_rows: u16,
     pub should_quit: bool,
 }
 
@@ -202,7 +174,7 @@ impl App {
             },
             menu: MenuState::default(),
             focus: FocusTarget::Editor,
-            git: mock_git(),
+            git: GitState::default(),
             notifications: Notifications::default(),
             clipboard: Clipboard::default(),
             search: SearchState::default(),
@@ -210,6 +182,7 @@ impl App {
             last_click: None,
             editor_view: EditorView::default(),
             explorer_rows: 0,
+            git_rows: 0,
             should_quit: false,
             workspace,
         }
@@ -325,38 +298,6 @@ impl App {
     }
 }
 
-// --- mock data -------------------------------------------------------------
-//
-// The git panel is the last zone still drawing invented data; the porcelain=v2
-// parser replaces it in Phase 10. The explorer became real in Phase 6 and tabs
-// in Phase 2.
-
-fn mock_git() -> GitState {
-    GitState {
-        branch: Some("main".into()),
-        entries: vec![
-            GitEntry {
-                status: GitStatusCode::Modified,
-                path: "src/main.rs".into(),
-            },
-            GitEntry {
-                status: GitStatusCode::Added,
-                path: "src/ui/theme.rs".into(),
-            },
-            GitEntry {
-                status: GitStatusCode::Deleted,
-                path: "src/old.rs".into(),
-            },
-            GitEntry {
-                status: GitStatusCode::Untracked,
-                path: "src/new.rs".into(),
-            },
-        ],
-        selected: 0,
-        scroll: 0,
-    }
-}
-
 /// Test fixtures. Three tabs of in-memory text, shared by the `ui`, `event` and
 /// `commands` test modules so they all exercise the same shapes: a clean file,
 /// a file with unsaved changes, and a second language.
@@ -377,6 +318,10 @@ impl App {
         app.tabs[1].document.backspace();
         // Nothing in a test may write an escape sequence to the runner's stdout.
         app.clipboard = crate::editor::clipboard::Clipboard::detached();
+        // A status that was never read, in a fixture that never runs git: the
+        // panel's own tests want something to draw (see `GitState::fixture`).
+        app.git = GitState::fixture();
+        app.git_rows = 4;
         app.active_tab = Some(0);
         app.editor_view = EditorView {
             width: 80,

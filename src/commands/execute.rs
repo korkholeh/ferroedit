@@ -45,8 +45,12 @@ pub fn execute_command(app: &mut App, command: Command) {
         Command::ExplorerCollapse => explorer_collapse(app),
         Command::ExplorerRefresh => {
             refresh_tree(app, None);
+            // The tree and the status describe the same directory, so a
+            // deliberate "show me what is really there" refreshes both.
+            refresh_git(app);
             app.notifications.info("Explorer refreshed");
         }
+        Command::GitRefresh => git_rescan(app),
         Command::ToggleHiddenFiles => toggle_hidden_files(app),
 
         Command::NewFilePrompt => prompt_new(app, false),
@@ -393,6 +397,8 @@ fn save_tab(app: &mut App, index: usize) -> bool {
     let title = tab.document.title().to_string();
     match outcome {
         Ok(()) => {
+            // What was just written is a change git has an opinion about.
+            refresh_git(app);
             app.notifications.info(format!("Saved {title}"));
             true
         }
@@ -836,6 +842,7 @@ fn apply_file_op(app: &mut App, operation: FileOp, name: &str) {
         rename_open_tabs(app, old, &path);
     }
     refresh_tree(app, Some(&path));
+    refresh_git(app);
     // A new file is opened straight away: naming one and then having to find it
     // in the tree is a step nobody wants. The notification comes after, because
     // opening writes one of its own and there is only one status line.
@@ -931,6 +938,7 @@ fn delete_path(app: &mut App, path: &Path) {
     }
     let parent = path.parent().map(Path::to_path_buf);
     refresh_tree(app, parent.as_deref());
+    refresh_git(app);
     app.notifications
         .info(format!("Deleted {}", display_name(path)));
 }
@@ -967,7 +975,7 @@ fn display_name(path: &Path) -> String {
 fn sidebar_len(app: &App) -> usize {
     match app.sidebar.mode {
         SidebarMode::Explorer => app.sidebar.tree.len(),
-        SidebarMode::Git => app.git.entries.len(),
+        SidebarMode::Git => app.git.entries().len(),
     }
 }
 
@@ -982,6 +990,7 @@ fn move_sidebar_selection(app: &mut App, delta: i16) {
         }
         SidebarMode::Git => {
             app.git.selected = shift(app.git.selected, delta, max);
+            follow_git(app);
         }
     }
 }
@@ -993,8 +1002,37 @@ fn select_sidebar_row(app: &mut App, row: usize) {
             app.sidebar.selected = row.min(max);
             follow_explorer(app);
         }
-        SidebarMode::Git => app.git.selected = row.min(max),
+        SidebarMode::Git => {
+            app.git.selected = row.min(max);
+            follow_git(app);
+        }
     }
+}
+
+/// Keeps the git panel's selection on an entry and in view.
+fn follow_git(app: &mut App) {
+    let rows = app.git_rows as usize;
+    app.git.follow_selection(rows);
+}
+
+/// Re-reads `git status` after something changed the working tree.
+///
+/// Silent on purpose: it runs after every save and every file operation, and
+/// the status bar already says what happened. Outside a repository it is not
+/// even a subprocess — `GitState::refresh` returns without running anything.
+fn refresh_git(app: &mut App) {
+    app.git.refresh();
+    follow_git(app);
+}
+
+/// The Git menu's Refresh, and `F5` in the panel: looks for the repository
+/// again as well as re-reading its status, so a `git init` in the terminal next
+/// door does not need a restart to show up.
+fn git_rescan(app: &mut App) {
+    let root = app.workspace.root().to_path_buf();
+    app.git.discover(&root);
+    follow_git(app);
+    app.notifications.info(app.git.summary());
 }
 
 fn scroll_sidebar(app: &mut App, delta: i16) {
@@ -1066,6 +1104,129 @@ mod tests {
 
     fn app() -> App {
         App::fixture()
+    }
+
+    // --- git panel (SPEC §28, §30) ----------------------------------------
+
+    #[test]
+    fn refreshing_reads_the_branch_and_the_changes_of_a_real_repository() {
+        let repo = crate::git::testing::TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+        repo.write("b.txt", "b\n");
+
+        let mut app = App::fixture_in(repo.path());
+        execute_command(&mut app, Command::GitRefresh);
+
+        assert!(app.git.is_repository());
+        assert_eq!(app.git.branch_label(), "main");
+        assert_eq!(app.git.entries().len(), 1);
+        assert_eq!(app.git.summary(), "main — 1 change");
+        assert_eq!(
+            app.notifications.current().map(|n| n.message.as_str()),
+            Some("main — 1 change")
+        );
+    }
+
+    #[test]
+    fn refreshing_outside_a_repository_says_so_and_leaves_the_editor_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::fixture_in(dir.path());
+        execute_command(&mut app, Command::GitRefresh);
+
+        assert!(!app.git.is_repository());
+        assert!(app.git.entries().is_empty());
+        assert_eq!(
+            app.notifications.current().map(|n| n.message.as_str()),
+            Some("Not a Git repository")
+        );
+    }
+
+    /// Saving is the commonest way the working tree changes from inside the
+    /// editor, so the panel has to be right afterwards without being asked.
+    #[test]
+    fn saving_a_file_puts_it_in_the_git_panel() {
+        let repo = crate::git::testing::TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+
+        let mut app = App::fixture_in(repo.path());
+        execute_command(&mut app, Command::GitRefresh);
+        assert!(app.git.entries().is_empty(), "the tree starts clean");
+
+        app.open_path(&repo.path().join("a.txt"), None).unwrap();
+        execute_command(&mut app, Command::InsertChar('x'));
+        execute_command(&mut app, Command::Save);
+
+        assert_eq!(app.git.entries().len(), 1, "{:?}", app.git.entries());
+        assert_eq!(
+            app.git.entries()[0].worktree,
+            crate::git::models::Change::Modified
+        );
+    }
+
+    #[test]
+    fn creating_a_file_from_the_explorer_shows_it_as_untracked() {
+        let repo = crate::git::testing::TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+
+        let mut app = App::fixture_in(repo.path());
+        execute_command(&mut app, Command::GitRefresh);
+        execute_command(
+            &mut app,
+            Command::ApplyFileOp(
+                FileOp::CreateFile {
+                    parent: repo.path().to_path_buf(),
+                },
+                "new.rs".to_string(),
+            ),
+        );
+
+        let entries = app.git.entries();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(entries[0].path, Path::new("new.rs"));
+        assert_eq!(entries[0].worktree, crate::git::models::Change::Untracked);
+    }
+
+    #[test]
+    fn deleting_a_tracked_file_shows_it_as_deleted() {
+        let repo = crate::git::testing::TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+
+        let mut app = App::fixture_in(repo.path());
+        execute_command(&mut app, Command::GitRefresh);
+        execute_command(&mut app, Command::DeletePath(repo.path().join("a.txt")));
+
+        assert_eq!(app.git.entries().len(), 1);
+        assert_eq!(
+            app.git.entries()[0].worktree,
+            crate::git::models::Change::Deleted
+        );
+    }
+
+    #[test]
+    fn the_git_panel_selection_moves_and_stays_inside_the_list() {
+        let mut app = app();
+        app.sidebar.mode = SidebarMode::Git;
+        app.focus = FocusTarget::GitPanel;
+        app.git_rows = 2;
+
+        execute_command(&mut app, Command::MoveSidebarSelection(1));
+        assert_eq!(app.git.selected, 1);
+        // Four entries, two rows: selecting the last one scrolls the panel.
+        execute_command(&mut app, Command::MoveSidebarSelection(1));
+        execute_command(&mut app, Command::MoveSidebarSelection(1));
+        assert_eq!(app.git.selected, 3);
+        assert_eq!(app.git.scroll, 2);
+        // And it stops at the end rather than wrapping.
+        execute_command(&mut app, Command::MoveSidebarSelection(1));
+        assert_eq!(app.git.selected, 3);
     }
 
     #[test]

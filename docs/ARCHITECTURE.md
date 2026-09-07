@@ -166,7 +166,9 @@ highlight-from-scratch equals highlight-after-random-edits.
 
 ## 8. Concurrency
 
-`std::thread` + `mpsc`, no async runtime (ADR-002). Long git operations get a `JobId`;
+`std::thread` + `mpsc`, no async runtime (ADR-002). Reading `git status` is not one of
+the long operations: it is a local read taken on the UI thread, on demand, after
+anything that changes the tree (ADR-030). Long git operations get a `JobId`;
 the UI shows `Pushing…` and the worker replies with
 `AppEvent::GitJobDone(JobId, Result<Output, GitError>)`. Every git subprocess runs with
 `GIT_TERMINAL_PROMPT=0`, `GIT_OPTIONAL_LOCKS=0` and `-c core.pager=cat` plus a timeout,

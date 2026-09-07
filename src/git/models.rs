@@ -1,1 +1,176 @@
 //! Repository status, file entries, branches.
+//!
+//! The shapes here are what `parser.rs` produces and what `ui/git.rs` draws.
+//! They know nothing about subprocesses or about ratatui, so the parser is
+//! testable against recorded `git` output and the panel is testable against
+//! hand-built status values.
+
+use std::path::PathBuf;
+
+use thiserror::Error;
+
+/// One side of a porcelain-v2 `XY` pair.
+///
+/// The letters are git's own (`M`, `A`, `D`, `R`, `C`, `T`, `U`), with two
+/// additions that are not letters in the pair itself: `Unmodified` is the `.`
+/// git prints for "nothing happened on this side", and `Untracked` is the `?`
+/// record, which has no pair at all and is folded in here so that a row on
+/// screen is always two columns wide (SPEC §30).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Change {
+    Unmodified,
+    Modified,
+    Added,
+    Deleted,
+    Renamed,
+    Copied,
+    TypeChanged,
+    Unmerged,
+    Untracked,
+}
+
+impl Change {
+    /// Reads one column of an `XY` pair. `None` is a code git does not define,
+    /// which the parser treats as a malformed record rather than guessing.
+    pub fn from_code(code: char) -> Option<Self> {
+        Some(match code {
+            '.' | ' ' => Self::Unmodified,
+            'M' => Self::Modified,
+            'A' => Self::Added,
+            'D' => Self::Deleted,
+            'R' => Self::Renamed,
+            'C' => Self::Copied,
+            'T' => Self::TypeChanged,
+            'U' => Self::Unmerged,
+            '?' => Self::Untracked,
+            _ => return None,
+        })
+    }
+
+    /// The character the panel shows. `Unmodified` is a blank rather than a
+    /// dot: the column is there to be read at a glance, and `git status`
+    /// itself leaves it empty.
+    pub fn symbol(self) -> char {
+        match self {
+            Self::Unmodified => ' ',
+            Self::Modified => 'M',
+            Self::Added => 'A',
+            Self::Deleted => 'D',
+            Self::Renamed => 'R',
+            Self::Copied => 'C',
+            Self::TypeChanged => 'T',
+            Self::Unmerged => 'U',
+            Self::Untracked => '?',
+        }
+    }
+
+    pub fn is_change(self) -> bool {
+        self != Self::Unmodified
+    }
+}
+
+/// One line of `git status`, as the two sides git reports it in.
+///
+/// `index` is what is staged and `worktree` is what is not — the same split as
+/// the `XY` pair of `git status --short`. Phase 11 stages and unstages by
+/// reading exactly these two fields, which is why the entry keeps both rather
+/// than collapsing them into one "status" the way the Phase 1 mock did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileEntry {
+    /// Repository-relative, as git printed it.
+    pub path: PathBuf,
+    /// Where a renamed or copied entry came from.
+    pub original_path: Option<PathBuf>,
+    pub index: Change,
+    pub worktree: Change,
+}
+
+impl FileEntry {
+    /// The two-column `XY` field, index side first (SPEC §30).
+    pub fn codes(&self) -> String {
+        format!("{}{}", self.index.symbol(), self.worktree.symbol())
+    }
+
+    /// A file both sides changed, which git refuses to stage until it is
+    /// resolved.
+    pub fn is_conflicted(&self) -> bool {
+        self.index == Change::Unmerged || self.worktree == Change::Unmerged
+    }
+
+    /// The change a row is coloured by: a conflict first, then whatever is not
+    /// yet staged, and the staged side only when the worktree agrees with it.
+    pub fn primary(&self) -> Change {
+        if self.is_conflicted() {
+            return Change::Unmerged;
+        }
+        if self.worktree.is_change() {
+            return self.worktree;
+        }
+        self.index
+    }
+}
+
+/// What `# branch.head` said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Head {
+    Branch(String),
+    /// No branch: a checkout of a commit, a tag, or a rebase in progress.
+    Detached,
+}
+
+/// The whole answer to one `git status --porcelain=v2 --branch`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RepoStatus {
+    /// `None` until a status has been read; `Some(Head::Detached)` on a
+    /// detached HEAD.
+    pub head: Option<Head>,
+    /// The short object name of `HEAD`, or `None` before the first commit.
+    pub oid: Option<String>,
+    pub upstream: Option<String>,
+    pub ahead: usize,
+    pub behind: usize,
+    pub entries: Vec<FileEntry>,
+    /// Whether `MAX_ENTRIES` cut the list short.
+    pub truncated: bool,
+}
+
+impl RepoStatus {
+    /// What the panel title and the status bar call the current head.
+    pub fn head_label(&self) -> &str {
+        match &self.head {
+            Some(Head::Branch(name)) => name,
+            Some(Head::Detached) => "detached",
+            None => "no branch",
+        }
+    }
+
+    pub fn is_clean(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn conflicts(&self) -> usize {
+        self.entries.iter().filter(|e| e.is_conflicted()).count()
+    }
+}
+
+/// Everything that can go wrong between the editor and the `git` binary.
+///
+/// `NotInstalled` and `NotARepository` are states rather than failures — the
+/// panel says so and the editor carries on — which is why they are separate
+/// variants instead of one string: `App` decides what to show from the variant
+/// and never by matching on a message (SPEC §28, §45).
+#[derive(Debug, Error)]
+pub enum GitError {
+    #[error("Git is not installed")]
+    NotInstalled,
+    #[error("Not a Git repository")]
+    NotARepository,
+    #[error("git {command} failed: {message}")]
+    Failed { command: String, message: String },
+    #[error("git {command} did not finish in {seconds}s")]
+    TimedOut { command: String, seconds: u64 },
+    #[error("could not run git: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("could not read git output: {0}")]
+    Parse(String),
+}

@@ -65,6 +65,10 @@ pub struct Theme {
     pub git_added: Color,
     pub git_deleted: Color,
     pub git_untracked: Color,
+    pub git_renamed: Color,
+    /// A conflicted file, which is the one git state the user has to act on
+    /// before anything else works — so it is the one that is not orange.
+    pub git_conflict: Color,
 
     pub info: Color,
     pub warning: Color,
@@ -135,6 +139,8 @@ impl Default for Theme {
             git_added: Color::Indexed(114),
             git_deleted: Color::Indexed(203),
             git_untracked: Color::Indexed(245),
+            git_renamed: Color::Indexed(140),
+            git_conflict: Color::Indexed(196),
 
             info: Color::Indexed(75),
             warning: Color::Indexed(215),

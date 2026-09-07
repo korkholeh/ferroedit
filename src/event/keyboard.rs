@@ -281,6 +281,14 @@ pub static BINDINGS: &[Binding] = &[
     explorer(KeyCode::F(2), Command::RenamePrompt, "F2"),
     explorer(KeyCode::Delete, Command::DeletePrompt, "Delete"),
     explorer(KeyCode::F(5), Command::ExplorerRefresh, "F5"),
+    // --- git panel --------------------------------------------------------
+    // `F5` is "show me what is really there" in whichever panel has focus.
+    sidebar(
+        FocusTarget::GitPanel,
+        KeyCode::F(5),
+        Command::GitRefresh,
+        "F5",
+    ),
 ];
 
 /// Keys of a dialog that types (SPEC §40).

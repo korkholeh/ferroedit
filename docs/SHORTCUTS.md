@@ -95,6 +95,7 @@ The changed-files list. It gains its own keys with the Git actions of Phase 11.
 |---|---|
 | `Up` | Move the sidebar selection up |
 | `Down` | Move the sidebar selection down |
+| `F5` | Re-read the repository status |
 
 ## Find bar
 
@@ -202,6 +203,7 @@ Every item is a command, and the *Shortcut* column is the same lookup the menu i
 | View | Focus Explorer | — | — |
 | View | Focus Git | — | — |
 | View | Focus Editor | — | — |
+| Git | Refresh | `F5` | Git panel |
 | Git | Stage All *(not implemented yet)* | — | — |
 | Git | Commit… *(not implemented yet)* | — | — |
 | Git | Pull *(not implemented yet)* | — | — |

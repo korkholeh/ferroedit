@@ -77,6 +77,11 @@ fn run(cli: &Cli) -> Result<()> {
         app.clipboard.outward_name()
     );
     open_cli_files(&mut app, cli);
+    // The git panel is drawn from a status, and a status is a subprocess: it
+    // runs once here, before the first frame, and after that only when
+    // something has changed (SPEC §30).
+    let root = app.workspace.root().to_path_buf();
+    app.git.discover(&root);
     let theme = Theme::default();
 
     // The hook goes in before the guard so a panic inside `TerminalGuard::new`
@@ -146,6 +151,7 @@ fn sync_editor_view(app: &mut App, rects: &LayoutRects) -> bool {
     // selection only has to be corrected when a command moves it, so a changed
     // sidebar height needs no redraw of its own.
     app.explorer_rows = rects.explorer.height.saturating_sub(1);
+    app.git_rows = rects.git_panel.height.saturating_sub(1);
 
     let view = EditorView {
         width: rects.editor.width,

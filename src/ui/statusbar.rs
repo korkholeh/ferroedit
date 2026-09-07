@@ -51,7 +51,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         Some(_) => " (plain)",
         None => "",
     };
-    let branch = app.git.branch.as_deref().unwrap_or("no branch");
+    let branch = app.git.branch_label();
     // One-based, and counted in user-perceived characters rather than in chars
     // or cells, because that is the number a human arrives at (SPEC §38).
     let line = document.map_or(1, |d| d.cursor().line + 1);

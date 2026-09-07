@@ -27,7 +27,7 @@ binary, over SSH, with no runtime dependencies.
 
 ## Status
 
-**Pre-alpha — Phase 8 (search and replace).** `ferroedit file.txt` opens, edits
+**Pre-alpha — Phase 10 (Git status).** `ferroedit file.txt` opens, edits
 and saves a real file: rope-backed buffer, grapheme-correct cursor movement, a viewport
 that scrolls both ways, and line endings written back the way they were found.
 `ferroedit new.txt` starts an empty buffer and creates the file on the first `Ctrl+S`.
@@ -69,9 +69,20 @@ and `Alt+A` replaces every hit as a single undo step. `F3` works with the bar cl
 Everything on the bar is clickable, and all of it is on the Search menu too — which is
 the way out for terminals that swallow Alt.
 
-Opening a file from *outside* the workspace is still the command line's job: `Ctrl+O`
-and Save As need a dialog that browses rather than one that takes a name. See
-[docs/PROGRESS.md](docs/PROGRESS.md) and
+Every menu entry and every shortcut runs a real command, and
+[docs/SHORTCUTS.md](docs/SHORTCUTS.md) is generated from the keymap itself rather than
+written beside it. `Ctrl+O` opens a path from outside the workspace and File → Save As…
+writes the current buffer somewhere else, keeping its undo history.
+
+The Git panel is real, and it is the system `git` you already have: FerroEdit runs
+`git status --porcelain=v2`, never a bundled reimplementation, so your config, your
+ignore rules and your rename detection are the ones that apply. The sidebar shows the
+branch, how far ahead of or behind its upstream it is, and every changed file in git's
+own two-column form — `M` for modified, `A` for added, `D` for deleted, `R` for renamed,
+`U` for a conflict and `?` for untracked. It refreshes itself after a save, a create, a
+rename or a delete, and `F5` re-reads it after something changed the tree from outside.
+A directory that is not a repository simply says so. Staging, committing, pulling and
+pushing are the next phase. See [docs/PROGRESS.md](docs/PROGRESS.md) and
 [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ```bash

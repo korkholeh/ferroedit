@@ -106,6 +106,92 @@ mod tests {
     }
 
     #[test]
+    fn the_git_panel_draws_the_two_column_code_of_every_change() {
+        let screen = draw(&app(), 80, 24).join("\n");
+        // The fixture holds one file in each of the four states, in the `XY`
+        // form of SPEC §30: index column first, worktree column second.
+        assert!(screen.contains(" M src/main.rs"), "{screen}");
+        assert!(screen.contains("A  src/ui/theme.rs"), "{screen}");
+        assert!(screen.contains(" D src/old.rs"), "{screen}");
+        assert!(screen.contains(" ? src/new.rs"), "{screen}");
+        assert!(
+            screen.contains("Git — main (4)"),
+            "the count is in the title"
+        );
+    }
+
+    #[test]
+    fn a_workspace_that_is_not_a_repository_says_so_in_the_panel() {
+        let mut app = app();
+        app.git = crate::app::git::GitState::default();
+        app.git.availability = crate::app::git::GitAvailability::NotARepository;
+        // Wide enough for the sidebar to reach its maximum, where the sentence
+        // fits on one row; the narrow case is the test below.
+        let screen = draw(&app, 130, 24).join("\n");
+        // The wording is SPEC §28's, not a paraphrase of it.
+        assert!(screen.contains("Not a Git repository"), "{screen}");
+        assert!(!screen.contains("Git — "), "there is no branch to name");
+    }
+
+    /// End to end, with no fixture anywhere: a real repository, read by the
+    /// real `git`, drawn by the real panel.
+    #[test]
+    fn the_panel_draws_the_status_of_a_repository_on_disk() {
+        let repo = crate::git::testing::TestRepo::new();
+        repo.write("tracked.rs", "fn main() {}\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+        repo.write("tracked.rs", "fn main() { }\n");
+        repo.write("loose.rs", "// new\n");
+
+        let mut app = App::fixture_in(repo.path());
+        app.git.discover(repo.path());
+        let screen = draw(&app, 130, 24).join("\n");
+
+        assert!(screen.contains("Git — main (2)"), "{screen}");
+        assert!(screen.contains(" M tracked.rs"), "{screen}");
+        assert!(screen.contains(" ? loose.rs"), "{screen}");
+    }
+
+    #[test]
+    fn a_sidebar_too_narrow_for_the_message_wraps_it_rather_than_cutting_it() {
+        let mut app = app();
+        app.git = crate::app::git::GitState::default();
+        app.git.availability = crate::app::git::GitAvailability::NotARepository;
+        let screen = draw(&app, 60, 20).join("\n");
+        assert!(screen.contains("Not a Git"), "{screen}");
+        assert!(screen.contains("repository"), "the tail is on the next row");
+    }
+
+    #[test]
+    fn a_repository_with_nothing_changed_says_the_tree_is_clean() {
+        let mut app = app();
+        app.git.status.entries.clear();
+        let screen = draw(&app, 80, 24).join("\n");
+        assert!(screen.contains("working tree clean"), "{screen}");
+        assert!(screen.contains("Git — main"), "the branch is still named");
+    }
+
+    #[test]
+    fn a_git_command_that_failed_puts_its_reason_where_the_list_was() {
+        let mut app = app();
+        app.git.availability =
+            crate::app::git::GitAvailability::Unavailable("Git is not installed".into());
+        app.git.status.entries.clear();
+        let screen = draw(&app, 130, 24).join("\n");
+        assert!(screen.contains("Git is not installed"), "{screen}");
+    }
+
+    #[test]
+    fn the_status_bar_names_the_branch_and_says_when_there_is_no_repository() {
+        let mut app = app();
+        assert!(draw(&app, 80, 24)[23].contains("main"));
+        app.git = crate::app::git::GitState::default();
+        app.git.availability = crate::app::git::GitAvailability::NotARepository;
+        assert!(draw(&app, 80, 24)[23].contains("no repository"));
+    }
+
+    #[test]
     fn the_gutter_numbers_the_editor_lines() {
         let screen = draw(&app(), 80, 24).join("\n");
         assert!(screen.contains(" 1  fn main() {"));

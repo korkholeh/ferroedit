@@ -1,6 +1,6 @@
 # Current Phase
 
-Phase 10 — Git status (not started)
+Phase 11 — Git actions (not started)
 
 ## Completed
 
@@ -350,9 +350,51 @@ Phase 10 — Git status (not started)
     acceptance as a test rather than as a paragraph.
   - 444 tests (was 426).
 
+- **Phase 10 — Git status**
+  - `git/models.rs`, `git/parser.rs`, `git/service.rs`: the shapes, the parser and the
+    subprocess, in that order and each testable without the next. `mock_git` is gone —
+    nothing on screen is invented data any more.
+  - `GitService::discover` runs `git rev-parse --show-toplevel`, so opening a
+    subdirectory of a project still lists the whole repository's paths. Every failure of
+    it is reported as "not a repository": that is what it means in all but pathological
+    cases, and the real message is logged.
+  - Every invocation goes through one `run`, with `GIT_TERMINAL_PROMPT=0` (a credential
+    prompt fails loudly instead of hanging on a terminal the TUI owns),
+    `GIT_OPTIONAL_LOCKS=0` (reading status does not fight the git in the next window),
+    `-c core.pager=cat`, a closed stdin, and a ten-second kill timer. Both pipes are
+    drained on threads of their own, so a status too large for the pipe buffer cannot
+    deadlock against the wait (ADR-030).
+  - Arguments are passed as arguments, never as a shell string (SPEC §29), so a file
+    called `; rm -rf ~` is a file name.
+  - The parser reads `--porcelain=v2 --branch -z` as **bytes** (ADR-032): the branch
+    headers, the four record types (`1` ordinary, `2` rename/copy with its original path
+    in a second field, `u` unmerged, `?` untracked), `# branch.ab` for ahead/behind, and
+    `(initial)` and `(detached)` as the states they are rather than as names. Ignored
+    files and future record types are skipped; a record whose *shape* is broken is an
+    error rather than a guess.
+  - The panel draws git's own `XY` pair — index column, worktree column — with the file
+    count in the title next to the branch and its `↑`/`↓` (ADR-031). Paths are elided
+    from the left, so the file name survives a sidebar sixteen cells wide. A directory
+    that is no repository says `Not a Git repository`, wrapped rather than clipped, in
+    SPEC §28's own words; a clean tree says so; a failed command puts its own first line
+    there.
+  - The status refreshes itself after a save, a create, a rename, a delete and a Save
+    As, and `F5` in the panel (or Git → Refresh) re-runs discovery as well, so a
+    `git init` in another window does not need a restart. Outside a repository the
+    refresh is not even a subprocess.
+  - The git panel keeps a selection and a scroll of its own now that the list can be
+    longer than the four to ten rows the layout gives it; `git_rows` is mirrored out of
+    the frame next to `explorer_rows` (ADR-010).
+  - Phase 10's acceptance as a test: a repository is built with a modified, a deleted, a
+    staged, a renamed, an untracked and a conflicted file, and the panel's codes are
+    asserted equal to what `git status --short` prints for the same tree. `TestRepo`
+    isolates every fixture repository from the machine's global and system config, so a
+    developer who signs commits gets what CI gets.
+  - 489 tests (was 444), including the pty check below.
+
 ## In progress
 
-- Nothing. Phase 9 is closed.
+- Nothing. Phase 10 is closed.
 
 ## Known issues
 
@@ -446,11 +488,52 @@ Phase 10 — Git status (not started)
   the column arithmetic after it can be off on those terminals. ADR-004 chose this over
   per-terminal special-casing.
 
+- **The status is read in the foreground.** It is a local read and takes milliseconds,
+  but it happens on the UI thread, so the frame that triggers it waits for it — bounded
+  by the ten-second kill timer, which is the pathological case (a held index lock) and
+  not the normal one. The worker thread arrives in Phase 11 with the operations that
+  genuinely cannot block: pull, push, fetch (ADR-030).
+- **Nothing watches the filesystem.** A `git checkout` in another terminal shows up on
+  the next save, file operation or `F5`, not by itself. Same trade as the explorer's,
+  and the watcher is Phase 14 for both.
+- **The panel has no keys of its own beyond `F5`.** Selecting a row does nothing yet:
+  staging, unstaging and opening the selected file are Phase 11 and Phase 13. The four
+  Git menu entries are still `Unimplemented` for the same reason.
+- **A rename shows only its new path.** The original is parsed and kept on the entry;
+  there is nowhere in a sixteen-column sidebar to draw `old -> new`, and the diff viewer
+  of Phase 13 is where it has somewhere to go.
+- **Untracked directories collapse to one row.** `--untracked-files=normal` reports
+  `dir/` rather than every file under it, which is what `git status` shows and what
+  keeps a fresh `target/` from being ten thousand rows — but the count in the title is
+  then a count of rows, not of files.
+- **Ignored files are never listed**, and submodule state (the `sub` field of a v2
+  record) is parsed past rather than shown.
+- **Five thousand changed files is the cap.** Past it the title says `(5000+)` and the
+  list stops; a status that large is a mass rewrite, and the panel stopped being
+  browsable thousands of rows earlier (ADR-032).
+- **The selection is an index, not a path.** A refresh that removes rows above the
+  selected one moves the selection to a different file rather than following the file it
+  was on.
+- **A path that is not UTF-8 is exact on unix and lossy anywhere else.** The bytes are
+  the name on the platforms the MVP targets; the fallback exists so the module compiles
+  elsewhere, not because it is right there.
+- **Discovery happens before the first frame.** Startup therefore waits for one
+  `rev-parse` and one `status` — milliseconds in practice, and the same ten-second worst
+  case as any other invocation.
+
 ## Manual checks performed
 
 Phase 2 through Phase 8 acceptance were verified by driving the real binary in a pty
 (the Phase 1 harness: fork a pty, set `TIOCSWINSZ`, write key and mouse bytes, replay
 the output through a minimal terminal emulator).
+
+### Phase 10
+
+- **The panel against this repository.** `ferroedit .` in a 110×24 pty, with the working
+  tree mid-phase: the sidebar drew `Git — main (17)`, then ` M docs/ROADMAP.md`,
+  ` M docs/SHORTCUTS.md`, ` M src/app/mod.rs`, ` M …c/commands/execute.rs` — the elision
+  keeping the file name — and the status bar's right-hand readout ended in `main`. The
+  codes matched what `git status --short` printed in the shell beside it.
 
 ### Phase 8
 
@@ -664,22 +747,21 @@ reporting.
 
 ## Next
 
-- Phase 10: git status. `GitService`, repo detection, the `--porcelain=v2 -z --branch`
-  parser with fixtures, and the sidebar drawn from it. `mock_git` in `app/mod.rs` is the
-  last invented data on screen and is what this phase removes.
-- The four Git menu entries are still `Unimplemented`; they are Phase 11's actions, not
-  Phase 10's status, so the list stays at five until then.
-- The help screen behind Help → Shortcuts is Phase 14. It has an obvious source now —
-  `docs::shortcuts_markdown()` is the same text, and a scrollable pane over it would be
-  the fifth entry closed.
-- The dialog's third body is still a *list*, and Phase 12's branch picker is what will
-  settle ADR-019. Open… did not need one (ADR-029): it has a file tree behind it, and a
-  branch picker will not.
-- Phase 9 was verified by the test suite and by `--dump-shortcuts`, not in the pty
-  harness: nothing it added draws a new kind of frame — Open, Save As and About are the
-  Phase 6 dialog with different text in it. The dialogs' *behaviour* under a real
-  terminal is therefore still only as checked as Phase 6 left it.
-- Still not checked by hand in the real target terminals (iTerm2, Ghostty, Terminal.app,
-  tmux, plain ssh). Unchanged from every phase so far.
+- Phase 11: git actions. Stage, unstage, commit, pull and push — and the worker thread
+  they are the reason for. `AppEvent` gains its first non-terminal variant, the four
+  `Unimplemented` Git menu entries get their commands, and `FileEntry`'s index/worktree
+  split (already parsed, already drawn) is what stage and unstage act on.
+- The panel's own keys come with those actions: a row that can be staged is a row worth
+  selecting, and `Enter` on one should open the file.
+- `GitService` has `status` and nothing else. `commit`, `pull`, `push`, `branches`,
+  `switch_branch`, `merge` and `diff` are named in SPEC §29 and arrive with the phases
+  that need them; `run` is already the one place their env, their argument handling and
+  their timeout live.
+- A filesystem watcher would close both the explorer's refresh gap and the git panel's.
+  It is one dependency and one thread, and it is still Phase 14 rather than a phase of
+  its own.
+- Phase 10 was checked in the pty harness (above) as well as by the suite. What is still
+  unchecked by hand, as after every phase: the real target terminals — iTerm2, Ghostty,
+  Terminal.app, tmux, plain ssh.
 - The CI `targets` job has still not been seen green — x86_64 musl has not been linked
   anywhere.
