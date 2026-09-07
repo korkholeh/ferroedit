@@ -1,7 +1,7 @@
 # Current Phase
 
-Phase 14 — Polish (in progress: help screen, status bar, watcher, undo budget and
-external reload done)
+Phase 14 — Polish (in progress: help screen, status bar, watcher, undo budget,
+external reload and job cancellation done)
 
 ## Completed
 
@@ -610,13 +610,26 @@ external reload done)
     and the root canonicalised to nothing: no tree, no repository, and nothing for the
     watcher to watch. Found by the first smoke test of the reload, which is exactly the
     case a pty harness reaches and a unit test with `tempdir` paths never does.
-  - 665 tests (was 641), including the pty checks below.
+  - **A running git job can be stopped** (ADR-044), closing the Phase 11 known issue.
+    `Esc` in the git panel, and Git ▸ Cancel, set a watermark on the job ids: everything
+    outstanding at that moment is cancelled, and anything submitted after it is not.
+  - The job in git's hands has its subprocess killed on the same 2 ms poll that already
+    watches the timeout, so a `git push` blocked on a socket stops in milliseconds
+    instead of at the two-minute timer. The jobs queued behind it are answered without
+    being run, which is the other half of the value: stopping a stuck push is worth
+    little if the three things behind it happen anyway, minutes later.
+  - Every cancelled job still comes back through the same door as a finished one, so the
+    panel's queue is only ever shortened by an answer. `JobOutcome` now carries a typed
+    `JobFailure` rather than a string, because `Push failed: cancelled` would be the
+    editor blaming git for doing as it was told; it reads `Push cancelled`, in the
+    information colour.
+  - 674 tests (was 641), including the pty checks below.
 
 ## In progress
 
-- Phase 14. The help screen, the responsive status bar, the watcher, the undo budget and
-  reloading a buffer whose file changed have landed; the error-message pass, the README
-  screenshot and the release binaries have not.
+- Phase 14. The help screen, the responsive status bar, the watcher, the undo budget,
+  reloading a buffer whose file changed and cancelling a running job have landed; the
+  error-message pass, the README screenshot and the release binaries have not.
 
 ## Known issues
 
@@ -718,10 +731,6 @@ external reload done)
   by the ten-second kill timer, which is the pathological case (a held index lock) and
   not the normal one. Everything that *writes* runs on the worker (ADR-033); the read
   did not move, and a `git status` behind a held lock is still a pause.
-- **A job cannot be cancelled.** There is no Esc that stops a push against an
-  unreachable host; the two-minute timer is what ends it. The `JobId` that would let one
-  be addressed is already there, and a cancel is a kill of a subprocess the worker does
-  not currently keep a handle to.
 - **The status is re-read after every job, in the foreground.** Staging three files in
   three keystrokes is three `git status` runs. They are milliseconds each and they are
   correct; they are not batched.
@@ -1152,8 +1161,6 @@ reporting.
 
 Phase 14 continues. What is left of it, roughly in order of how much it is worth:
 
-- Cancelling a running job is worth doing when a second one wants it: the `JobId`
-  exists, but the worker keeps no handle to the child it spawned.
 - A diff of a conflicted file is now a view rather than a question (ADR-036), but it is
   a combined diff drawn with a one-column reader — the honest fix is a parser that reads
   both marker columns.

@@ -1203,3 +1203,56 @@ the dirty marker's cell in the tab bar rather than taking one of its own; a stal
 nearly always a modified one, and the tab bar is already short of cells. Without a
 watcher — the best-effort case ADR-040 leaves open — none of this runs on its own, and
 `F5` in the editor is the manual door to all of it.
+
+---
+
+## ADR-044: A cancel is a watermark on the job ids, and it kills the child
+
+**Decision.** `GitWorker` holds an `AtomicU64` saying "every job below this id is
+cancelled", shared with its thread. `Esc` in the git panel — and Git ▸ Cancel — sets it to
+the next id, which is exactly the set of jobs outstanding at that moment. The thread
+checks it before starting each job, so a queued one is answered without being run, and
+again on the same 2 ms poll that watches the timeout, so a running one has its subprocess
+killed. Every cancelled job still comes back as an outcome, reported as `Push cancelled`
+rather than `Push failed:`.
+
+**Why.** The worker runs one job at a time and in order (ADR-033), which is right for the
+index lock and wrong for a `git push` against an unreachable host: the two-minute network
+timer is the only thing that ends it, and everything the user does in those two minutes
+queues behind it. Half the value of cancelling is stopping the push; the other half is
+that the three things behind it do not then happen anyway, minutes later, against a
+repository the user has moved on from.
+
+A watermark rather than a flag per job because "cancel" has exactly one meaning here —
+stop what is outstanding — and outstanding is precisely "submitted before now". One
+number answers for the job in git's hands and for the queue behind it, and a job
+submitted *after* the cancel has a higher id and is untouched, so pressing Esc and
+pushing again does the obvious thing instead of racing a flag that has to be reset.
+
+It is an atomic rather than a message because a cancel sent down the job channel would
+queue behind the job it is meant to stop, which is the one place it can never arrive.
+
+Killing is the only way to stop the case that matters. A `git push` blocked on a socket
+is not going to notice a polite request, and the kill path already exists for the
+timeout — cancellation reuses it and differs only in which error it produces. Checking it
+on the timeout's own poll means a cancel costs at most one `POLL` and no new thread.
+
+The cancel token travels on the `GitService` copy the job already carries, so a status
+read on the UI thread simply has `None` and nothing to check. That is what turned the
+free `run`/`run_with`/`run_os` helpers into methods: the token has to reach the wait, and
+threading it through as a parameter at twelve call sites would have been twelve chances
+to forget it.
+
+Cancellation is not a failure. `JobOutcome` carries a `JobFailure` rather than a `String`
+so the difference is in the type: `Push failed: cancelled` would be the editor blaming
+git for doing as it was told, and a job that stopped without a word would be a keystroke
+the user has to guess about.
+
+**Consequence.** A killed git leaves the repository in whatever state it had reached —
+a partial fetch, a half-written index lock — and nothing here cleans that up; the status
+re-read after every job is what reports it, and it is the same state a `Ctrl+C` in a
+shell would leave. `GitState::cancel` returns how many jobs it asked about and does *not*
+shorten the queue: the panel's idea of what is outstanding is only ever changed by an
+answer. Cancel is bound only in the git panel, because `Esc` in the editor closes the
+find bar; the menu entry is the door from everywhere else, and it advertises the key
+because the menu reads its labels out of the bindings (ADR-008).
