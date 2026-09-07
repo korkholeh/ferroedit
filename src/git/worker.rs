@@ -243,19 +243,16 @@ fn worker_loop(jobs: &Receiver<Task>, events: &Sender<AppEvent>, cancelled_below
 
 /// The half of a failure worth showing under the job's own name.
 ///
+/// Cancellation is the one outcome that is not a failure at all (ADR-044); the
+/// rest keep only `GitError::reason`, which is the half about what went wrong.
 /// `App` reports a failure as `Push failed: …`, so git's own `git push failed:`
 /// prefix would say it twice — and it would say `git reset failed` for what the
-/// user asked for as an unstage. The variant's *reason* is the half that is
-/// about what went wrong; the half about which subprocess ran is already in the
-/// log.
+/// user asked for as an unstage. The half about which subprocess ran is already
+/// in the log.
 fn failure(err: GitError) -> JobFailure {
     match err {
         GitError::Cancelled => JobFailure::Cancelled,
-        GitError::Failed { message, .. } => JobFailure::Failed(message),
-        GitError::TimedOut { seconds, .. } => {
-            JobFailure::Failed(format!("it did not finish in {seconds}s"))
-        }
-        other => JobFailure::Failed(other.to_string()),
+        other => JobFailure::Failed(other.reason()),
     }
 }
 

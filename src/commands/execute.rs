@@ -6,6 +6,7 @@ use std::time::Instant;
 use crate::app::dialog::DialogState;
 use crate::app::diff::{DiffState, HORIZONTAL_STEP};
 use crate::app::focus::FocusTarget;
+use crate::app::git::NotStarted;
 use crate::app::help::HelpState;
 use crate::app::input_field::InputField;
 use crate::app::search::SearchField;
@@ -135,7 +136,7 @@ pub fn execute_command(app: &mut App, command: Command) {
         Command::PrevTab => step_tab(app, -1),
         Command::CloseTab => match app.active_tab {
             Some(index) => close_tab(app, index),
-            None => app.notifications.info("No tab to close"),
+            None => app.notifications.warning("No tab to close"),
         },
         Command::CloseTabAt(index) => close_tab(app, index),
         Command::CloseTabDiscarding(index) => remove_tab(app, index),
@@ -838,7 +839,7 @@ fn undo_redo(app: &mut App, undo: bool) {
     tab.follow_cursor(view);
     if !moved {
         let what = if undo { "undo" } else { "redo" };
-        app.notifications.info(format!("Nothing to {what}"));
+        app.notifications.warning(format!("Nothing to {what}"));
     }
 }
 
@@ -850,7 +851,7 @@ fn undo_redo(app: &mut App, undo: bool) {
 /// carries on — a copy failing must never cost the user their edit (ADR-005).
 fn copy_selection(app: &mut App, cut: bool) {
     let Some(text) = app.active().and_then(|tab| tab.document.selected_text()) else {
-        app.notifications.info("Nothing selected");
+        app.notifications.warning("Nothing selected");
         return;
     };
     let chars = text.chars().count();
@@ -879,7 +880,7 @@ fn paste(app: &mut App) {
         Ok(text) => execute_command(app, Command::InsertText(text)),
         Err(err) => {
             log::debug!("nothing to paste: {err}");
-            app.notifications.info("The clipboard is empty");
+            app.notifications.warning("The clipboard is empty");
         }
     }
 }
@@ -909,7 +910,7 @@ fn follow_explorer(app: &mut App) {
 /// expanded them would be two trees.
 fn explorer_activate(app: &mut App) {
     let Some(row) = app.sidebar.selected_row() else {
-        app.notifications.info("The explorer is empty");
+        app.notifications.warning("The explorer is empty");
         return;
     };
     let (path, is_dir) = (row.path.clone(), row.kind.is_dir());
@@ -1014,7 +1015,7 @@ fn open_and_report(app: &mut App, path: &Path) {
         }
         Err(err) => {
             log::error!("could not open {}: {err}", path.display());
-            app.notifications.error(format!("{err}"));
+            app.notifications.error(format!("Failed to open: {err}"));
         }
     }
 }
@@ -1092,7 +1093,7 @@ fn show_about(app: &mut App) {
 fn prompt_rename(app: &mut App) {
     let Some(path) = app.sidebar.selected_row().map(|row| row.path.clone()) else {
         app.notifications
-            .warning("Select something in the explorer first");
+            .warning("Nothing selected in the explorer");
         return;
     };
     let return_focus = dialog_return_focus(app);
@@ -1102,7 +1103,7 @@ fn prompt_rename(app: &mut App) {
 fn prompt_delete(app: &mut App) {
     let Some(row) = app.sidebar.selected_row() else {
         app.notifications
-            .warning("Select something in the explorer first");
+            .warning("Nothing selected in the explorer");
         return;
     };
     let (path, is_dir) = (row.path.clone(), row.kind.is_dir());
@@ -1171,7 +1172,7 @@ fn open_typed_path(app: &mut App, base: &Path, typed: &str) {
     };
     if path.is_dir() {
         app.notifications
-            .error(format!("{} is a directory", display_name(&path)));
+            .warning(format!("{} is a directory", display_name(&path)));
         return;
     }
     open_and_report(app, &path);
@@ -1193,14 +1194,14 @@ fn save_tab_as(app: &mut App, index: usize, base: &Path, typed: &str) {
     }
     if path.is_dir() {
         app.notifications
-            .error(format!("{} is a directory", display_name(&path)));
+            .warning(format!("{} is a directory", display_name(&path)));
         return;
     }
     // Two tabs at one path would be two histories over one file, and the second
     // save would silently undo the first (SPEC §11).
     if let Some(other) = app.tabs.iter().position(|tab| tab.is_at(&path)) {
         if other != index {
-            app.notifications.error(format!(
+            app.notifications.warning(format!(
                 "{} is already open in another tab",
                 display_name(&path)
             ));
@@ -1236,7 +1237,7 @@ fn resolve_typed_path(base: &Path, typed: &str) -> Option<PathBuf> {
 fn delete_path(app: &mut App, path: &Path) {
     if let Err(err) = filesystem::delete(path) {
         log::error!("could not delete {}: {err}", path.display());
-        app.notifications.error(format!("{err}"));
+        app.notifications.error(format!("Failed to delete: {err}"));
         return;
     }
     let parent = path.parent().map(Path::to_path_buf);
@@ -1376,7 +1377,8 @@ fn prompt_branch(app: &mut App, merge: bool) {
         Ok(branches) => branches,
         Err(err) => {
             log::error!("could not list branches: {err}");
-            app.notifications.error(format!("{err}"));
+            app.notifications
+                .error(format!("Could not list branches: {}", err.reason()));
             return;
         }
     };
@@ -1384,7 +1386,7 @@ fn prompt_branch(app: &mut App, merge: bool) {
     // one means something different in each case.
     let choosable = branches.iter().filter(|b| merge != b.is_head).count();
     if choosable == 0 {
-        app.notifications.info(if merge {
+        app.notifications.warning(if merge {
             "No other branch to merge"
         } else {
             "No branches yet — commit something first"
@@ -1424,7 +1426,8 @@ fn git_create_branch(app: &mut App, name: &str) {
 /// dialog's second button.
 fn git_stage_conflicted(app: &mut App) {
     let Some(entry) = app.git.selected_entry() else {
-        app.notifications.info("Nothing selected in the Git panel");
+        app.notifications
+            .warning("Nothing selected in the Git panel");
         return;
     };
     start_git_job(app, GitJob::Stage(vec![entry.path.clone()]));
@@ -1464,7 +1467,8 @@ fn has_conflict_markers(app: &App, path: &Path) -> bool {
 /// workspace's, which matters when the editor was opened in a subdirectory.
 fn git_open_selected(app: &mut App) {
     let Some(entry) = app.git.selected_entry() else {
-        app.notifications.info("Nothing selected in the Git panel");
+        app.notifications
+            .warning("Nothing selected in the Git panel");
         return;
     };
     let Some(root) = app.git.root() else {
@@ -1476,7 +1480,7 @@ fn git_open_selected(app: &mut App) {
         Ok(()) => app.notifications.info(format!("Opened {}", path.display())),
         Err(err) => {
             log::error!("could not open {}: {err}", path.display());
-            app.notifications.error(format!("{err}"));
+            app.notifications.error(format!("Failed to open: {err}"));
         }
     }
 }
@@ -1484,7 +1488,8 @@ fn git_open_selected(app: &mut App) {
 /// Stages or unstages the selected file (SPEC §31).
 fn git_stage_selected(app: &mut App, stage: bool) {
     let Some(entry) = app.git.selected_entry() else {
-        app.notifications.info("Nothing selected in the Git panel");
+        app.notifications
+            .warning("Nothing selected in the Git panel");
         return;
     };
     // `git add` on a conflicted file is git's way of saying "I resolved this",
@@ -1550,7 +1555,7 @@ fn prompt_commit(app: &mut App) {
     let operation = app.git.status.operation;
     let staged = app.git.staged_count();
     if staged == 0 && !operation.is_some_and(Operation::finished_by_commit) {
-        app.notifications.info(match operation {
+        app.notifications.warning(match operation {
             Some(operation) => format!(
                 "Nothing staged — finish the {} with `{}`",
                 operation.noun(),
@@ -1581,7 +1586,10 @@ fn git_commit(app: &mut App, message: &str) {
 fn start_git_job(app: &mut App, job: GitJob) {
     match app.git.start(job) {
         Ok(progress) => app.notifications.info(progress),
-        Err(why) => app.notifications.error(why),
+        // No repository is the state the user is in and nothing was attempted;
+        // a missing worker is the editor failing at something it promised.
+        Err(NotStarted::NoRepository(summary)) => app.notifications.warning(summary),
+        Err(NotStarted::NoWorker(why)) => app.notifications.error(why),
     }
 }
 
@@ -1592,7 +1600,7 @@ fn start_git_job(app: &mut App, job: GitJob) {
 /// produced no word at all would look like one that did not register.
 fn cancel_git_jobs(app: &mut App) {
     match app.git.cancel() {
-        0 => app.notifications.info("Nothing to cancel"),
+        0 => app.notifications.warning("Nothing to cancel"),
         1 => app.notifications.info("Cancelling…"),
         n => app
             .notifications
@@ -1644,7 +1652,7 @@ fn open_diff(app: &mut App) {
         .iter()
         .any(|entry| entry.path == path && entry.worktree == Change::Untracked)
     {
-        app.notifications.info(format!(
+        app.notifications.warning(format!(
             "{} is untracked — stage it to see a diff",
             path.display()
         ));
@@ -1670,7 +1678,7 @@ fn diff_target(app: &mut App, root: &Path) -> Option<PathBuf> {
         Some(entry) => Some(entry.path.clone()),
         None => {
             app.notifications
-                .info("Nothing to diff — select a changed file");
+                .warning("Nothing to diff — select a changed file");
             None
         }
     }
@@ -1707,13 +1715,14 @@ fn read_diff(app: &mut App, path: &Path, side: DiffSide) -> Option<crate::git::D
     match repo.diff(path, side) {
         Ok(diff) if diff.is_empty() => {
             app.notifications
-                .info(format!("{} {}", side.nothing(), path.display()));
+                .warning(format!("{} {}", side.nothing(), path.display()));
             None
         }
         Ok(diff) => Some(diff),
         Err(err) => {
             log::error!("could not diff {}: {err}", path.display());
-            app.notifications.error(format!("Diff failed: {err}"));
+            app.notifications
+                .error(format!("Diff failed: {}", err.reason()));
             None
         }
     }
@@ -1756,7 +1765,7 @@ fn reread_diff(app: &mut App, quiet: bool) {
         Ok(diff) if diff.is_empty() => {
             if !quiet {
                 app.notifications
-                    .info(format!("{} {}", side.nothing(), path.display()));
+                    .warning(format!("{} {}", side.nothing(), path.display()));
             }
             close_diff(app);
         }
@@ -1772,7 +1781,8 @@ fn reread_diff(app: &mut App, quiet: bool) {
             // stale, and a pane that vanished would be worse than one that is.
             log::error!("could not re-read the diff of {}: {err}", path.display());
             if !quiet {
-                app.notifications.error(format!("Diff failed: {err}"));
+                app.notifications
+                    .error(format!("Diff failed: {}", err.reason()));
             }
         }
     }
@@ -3180,6 +3190,72 @@ mod tests {
     /// macOS a temporary directory is a symlink into `/private`.
     fn root_of(dir: &tempfile::TempDir) -> PathBuf {
         std::fs::canonicalize(dir.path()).unwrap()
+    }
+
+    /// ADR-046: a command the editor declined is a warning, every time.
+    ///
+    /// Worth a test rather than a paragraph because the colour is the part of a
+    /// status line a reader takes in without reading it, and what this replaced
+    /// was fifteen call sites each deciding it on its own — "Nothing to undo"
+    /// in the same blue as "Saved main.rs".
+    #[test]
+    fn a_command_that_changed_nothing_warns() {
+        use crate::app::notifications::NotificationKind::Warning;
+
+        fn declined(mut app: App, command: Command) -> String {
+            let named = format!("{command:?}");
+            execute_command(&mut app, command);
+            let notification = app
+                .notifications
+                .current()
+                .expect("a declined command says so");
+            assert_eq!(
+                notification.kind, Warning,
+                "{named}: {}",
+                notification.message
+            );
+            notification.message.clone()
+        }
+
+        let no_tabs = || {
+            let mut app = App::fixture();
+            app.tabs.clear();
+            app.active_tab = None;
+            app
+        };
+        let no_changes = || {
+            let mut app = App::fixture();
+            app.git.status.entries.clear();
+            app
+        };
+
+        assert_eq!(declined(no_tabs(), Command::CloseTab), "No tab to close");
+        assert_eq!(declined(no_tabs(), Command::Save), "No file to save");
+        assert_eq!(declined(App::fixture(), Command::Undo), "Nothing to undo");
+        assert_eq!(declined(App::fixture(), Command::Redo), "Nothing to redo");
+        assert_eq!(declined(App::fixture(), Command::Copy), "Nothing selected");
+        assert_eq!(
+            declined(App::fixture(), Command::Paste),
+            "The clipboard is empty"
+        );
+        assert_eq!(
+            declined(no_changes(), Command::GitStage),
+            "Nothing selected in the Git panel"
+        );
+        assert_eq!(
+            declined(App::fixture(), Command::GitCancel),
+            "Nothing to cancel"
+        );
+
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(
+            declined(App::fixture_in(empty.path()), Command::ExplorerActivate),
+            "The explorer is empty"
+        );
+        assert_eq!(
+            declined(App::fixture_in(empty.path()), Command::RenamePrompt),
+            "Nothing selected in the explorer"
+        );
     }
 
     /// A workspace with something in every shape the explorer has to handle.

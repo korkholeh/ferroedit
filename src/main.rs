@@ -232,7 +232,7 @@ fn open_cli_files(app: &mut App, cli: &Cli) {
             }
             Err(err) => {
                 log::error!("could not open {}: {err}", path.display());
-                app.notifications.error(format!("{err}"));
+                app.notifications.error(format!("Failed to open: {err}"));
             }
         }
     }

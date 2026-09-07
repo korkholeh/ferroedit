@@ -12,6 +12,20 @@ use crate::event::AppEvent;
 use crate::git::models::{FileEntry, GitError, RepoStatus};
 use crate::git::{GitJob, GitService, GitWorker, JobId, JobOutcome};
 
+/// Why a job never reached the worker.
+///
+/// Two variants and not one string, for the reason `GitAvailability` has three:
+/// the caller decides what to say from the variant and never by matching on a
+/// message (SPEC §45). They are also different *kinds* of message — there is
+/// no repository is a state the user is in and nothing was attempted, while a
+/// missing worker is the editor failing at something it promised (ADR-046).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotStarted {
+    /// The panel's own summary — `Not a Git repository`, or whatever git said.
+    NoRepository(String),
+    NoWorker(&'static str),
+}
+
 /// What the panel has to say for itself.
 ///
 /// The three failure states are kept apart because the panel says different
@@ -112,12 +126,14 @@ impl GitState {
     /// The `Err` is a sentence for the status bar, not a failure to handle:
     /// there are exactly two, and both mean "this cannot be started", not
     /// "this went wrong".
-    pub fn start(&mut self, job: GitJob) -> Result<&'static str, String> {
+    pub fn start(&mut self, job: GitJob) -> Result<&'static str, NotStarted> {
         let Some(repo) = self.repo.clone() else {
-            return Err(self.summary());
+            return Err(NotStarted::NoRepository(self.summary()));
         };
         let Some(worker) = self.worker.as_mut() else {
-            return Err("Git operations need the worker thread".to_string());
+            return Err(NotStarted::NoWorker(
+                "Git operations need the worker thread",
+            ));
         };
         let progress = job.progress();
         match worker.submit(job.clone(), repo) {
@@ -125,7 +141,7 @@ impl GitState {
                 self.running.push_back((id, job));
                 Ok(progress)
             }
-            None => Err("The git worker has stopped".to_string()),
+            None => Err(NotStarted::NoWorker("The git worker has stopped")),
         }
     }
 
@@ -420,7 +436,8 @@ mod tests {
         git.discover(dir.path());
         assert_eq!(
             git.start(GitJob::StageAll),
-            Err("Not a Git repository".to_string())
+            Err(NotStarted::NoRepository("Not a Git repository".to_string())),
+            "nothing was attempted, so this is the state and not a failure"
         );
 
         let repo = TestRepo::new();
@@ -428,7 +445,9 @@ mod tests {
         git.discover(repo.path());
         assert_eq!(
             git.start(GitJob::StageAll),
-            Err("Git operations need the worker thread".to_string()),
+            Err(NotStarted::NoWorker(
+                "Git operations need the worker thread"
+            )),
             "a panel with no worker refuses rather than spawning one"
         );
         assert_eq!(git.busy(), None);

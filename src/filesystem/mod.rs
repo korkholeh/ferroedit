@@ -15,6 +15,13 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+/// These are written to stand alone on the status bar, unlike
+/// `DocumentError`: three of the four are complaints about a typed *name*
+/// rather than about a path, and `Could not create foo.txt: foo.txt already
+/// exists` would say the name twice to add a verb nobody needed (ADR-046).
+/// The one that is a bare `{path}: {source}` fragment — `Io` — is the only one
+/// `delete` can produce, which is why that call site is the one that supplies
+/// `Failed to delete: `.
 #[derive(Debug, Error)]
 pub enum FsError {
     #[error("{path}: {source}")]

@@ -282,3 +282,74 @@ pub enum GitError {
     #[error("cancelled")]
     Cancelled,
 }
+
+impl GitError {
+    /// The half of the message that is about what went wrong, without the
+    /// `git <command> failed:` half that says which subprocess ran.
+    ///
+    /// Every caller already names the thing the *user* asked for — `Push
+    /// failed: …`, `Diff failed: …` — so `Display` sandwiched inside one of
+    /// those reads `Diff failed: git diff failed: fatal: …`, which says it
+    /// twice and names a command the user never typed. `git reset` would be
+    /// worse still: the user asked to unstage.
+    ///
+    /// It is a fragment on purpose, and starts lowercase, because the sentence
+    /// around it supplies the verb.
+    pub fn reason(&self) -> String {
+        match self {
+            Self::Failed { message, .. } => message.clone(),
+            Self::TimedOut { seconds, .. } => format!("it did not finish in {seconds}s"),
+            other => other.to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The status bar reads `Diff failed: fatal: …`, not `Diff failed: git
+    /// diff failed: fatal: …`. Every caller already names what the user asked
+    /// for, so `Display`'s own prefix is the sentence said twice.
+    #[test]
+    fn a_failure_reason_drops_gits_own_prefix() {
+        let failed = GitError::Failed {
+            command: "diff".into(),
+            message: "fatal: bad revision".into(),
+        };
+        assert_eq!(failed.to_string(), "git diff failed: fatal: bad revision");
+        assert_eq!(failed.reason(), "fatal: bad revision");
+        assert_eq!(
+            format!("Diff failed: {}", failed.reason()),
+            "Diff failed: fatal: bad revision"
+        );
+    }
+
+    /// A timeout has no message of git's to quote, so it gets a fragment that
+    /// reads as the tail of whatever sentence it lands in.
+    #[test]
+    fn a_timeout_reads_as_the_tail_of_the_sentence_it_lands_in() {
+        let timed_out = GitError::TimedOut {
+            command: "push".into(),
+            seconds: 120,
+        };
+        assert_eq!(
+            format!("Push failed: {}", timed_out.reason()),
+            "Push failed: it did not finish in 120s"
+        );
+    }
+
+    /// Everything else is already the whole reason, and says the same thing
+    /// standing alone as it does embedded.
+    #[test]
+    fn the_other_variants_are_their_own_reason() {
+        for err in [
+            GitError::NotInstalled,
+            GitError::NotARepository,
+            GitError::Conflicted,
+            GitError::Cancelled,
+        ] {
+            assert_eq!(err.reason(), err.to_string());
+        }
+    }
+}
