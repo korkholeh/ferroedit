@@ -1256,3 +1256,48 @@ shorten the queue: the panel's idea of what is outstanding is only ever changed 
 answer. Cancel is bound only in the git panel, because `Esc` in the editor closes the
 find bar; the menu entry is the door from everywhere else, and it advertises the key
 because the menu reads its labels out of the bindings (ADR-008).
+
+---
+
+## ADR-045: The diff classifier is a state machine, because the format is one
+
+**Decision.** `Diff::parse` carries two pieces of state per file — how many marker
+columns its hunks have, and whether a hunk has begun — instead of classifying each line
+by its first byte. The column count is read out of the hunk header (`@@@ … @@@` is two),
+a body line is an addition if *any* of its columns holds a `+` and a removal if any holds
+a `-`, and a `diff --git` / `diff --cc` / `diff --combined` line resets both. The diff
+records the parent count it saw; the viewer's title says `[worktree, merge]` when there is
+more than one. `* Unmerged path <file>` — what `git diff --cached` prints for a conflicted
+file — is `Meta`.
+
+**Why.** ADR-036 made a conflicted file's diff a view rather than a question, and the
+view was wrong. `git diff` of an unmerged path is a **combined** diff, with one marker
+column per parent of the stopped merge, so the two sides of the conflict are printed
+` +ours` and `+ theirs`. A one-column reader called the first of those context: the line
+a user opened the viewer to look at was the one line it declined to colour, and the `+5`
+in the title was a `+4`.
+
+Two columns also make the ambiguity that the old ordering papered over real rather than
+theoretical. `--- a/file` is a file header; `--- x` is a line removed from both parents
+whose own text begins `- `. They are the same bytes. What separates them is position —
+a file header comes before its file's first hunk and contents come after — which is
+exactly the state a one-line classifier does not keep. Reading the column count out of
+the hunk header rather than out of `diff --cc` is the same argument: the header is where
+git spells the number out, and it spells out three for an octopus without needing a
+second rule.
+
+`+` is answered before `-` only to have an answer at all. A combined row cannot hold
+both: a `-` marks a line missing from the result and a `+` marks one that is in it.
+
+The parent count reaches the title because the columns do not announce themselves. A
+reader who has not been told that `+ theirs` is "added against the first parent" will
+read it as an ordinary addition of a line beginning with a space, and a viewer that
+knows the difference and keeps it is the one thing worse than not knowing.
+
+**Consequence.** The classifier is per-`parse` state and not a free function, so nothing
+else can classify one line in isolation and get it right — which is the point, and is why
+`classify` is gone. A combined diff's `+`/`−` summary counts result lines rather than
+changed ones, so a conflict of one line reads `+5 −0`: that is what the output holds, and
+inventing a smaller number would be summarising a diff we do not otherwise interpret. The
+staged side of a conflicted file is still one dim line saying there is nothing to diff —
+git's own answer, and a truer one than an empty pane.

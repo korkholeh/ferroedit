@@ -1,7 +1,7 @@
 # Current Phase
 
 Phase 14 — Polish (in progress: help screen, status bar, watcher, undo budget,
-external reload and job cancellation done)
+external reload, job cancellation and the combined-diff parser done)
 
 ## Completed
 
@@ -623,13 +623,30 @@ external reload and job cancellation done)
     `JobFailure` rather than a string, because `Push failed: cancelled` would be the
     editor blaming git for doing as it was told; it reads `Push cancelled`, in the
     information colour.
-  - 674 tests (was 641), including the pty checks below.
+  - **A conflicted file's diff is read with both of its marker columns** (ADR-045),
+    closing the known issue ADR-036 left behind. `git diff` of an unmerged path is a
+    *combined* diff — one column per parent of the stopped merge — so the two sides of
+    the conflict are printed ` +ours` and `+ theirs`, and a one-column reader called the
+    first of those context. The line a user opens the viewer to look at was the one line
+    it declined to colour.
+  - The classifier is now a small state machine per file: the column count comes out of
+    the hunk header (`@@@ … @@@` is two, and an octopus adds a `@` per parent), and a
+    body line is an addition if *any* of its columns holds a `+`. It also keeps whether a
+    hunk has begun, which is the only thing that separates the file header `--- a/file`
+    from a line removed from both parents whose own text starts `- ` — the same bytes, in
+    different places.
+  - The title says `[worktree, merge]` when what is on screen has more than one parent,
+    because the columns do not announce themselves. `git diff --cached` of a conflicted
+    file answers `* Unmerged path f.txt`, which is now drawn dim as git talking about the
+    file rather than as a line of it.
+  - 681 tests (was 674), including the pty check below.
 
 ## In progress
 
 - Phase 14. The help screen, the responsive status bar, the watcher, the undo budget,
-  reloading a buffer whose file changed and cancelling a running job have landed; the
-  error-message pass, the README screenshot and the release binaries have not.
+  reloading a buffer whose file changed, cancelling a running job and the combined-diff
+  parser have landed; the error-message pass, the README screenshot and the release
+  binaries have not.
 
 ## Known issues
 
@@ -801,6 +818,25 @@ external reload and job cancellation done)
 Phase 2 through Phase 8 acceptance were verified by driving the real binary in a pty
 (the Phase 1 harness: fork a pty, set `TIOCSWINSZ`, write key and mouse bytes, replay
 the output through a minimal terminal emulator).
+
+### Phase 14 — the diff of a conflicted file
+
+Same harness, at 100x30, over a scratch repository whose `main` and `other` change the
+same line of a three-line file, merged so that it stops.
+
+- **`F6` `F6` `d` on `UU f.txt`.** The title reads `Diff — f.txt [worktree, merge] +5 −0`
+  and the pane holds the combined diff git printed: `diff --cc f.txt`, an `index` with
+  two blobs in it, `@@@ -1,3 -1,3 +1,7 @@@`, and the seven body lines.
+- **All five conflict lines are green.** The emitted SGR is `38;5;114` — `git_added` —
+  for `++<<<<<<< HEAD`, ` +OURS`, `++=======`, `+ THEIRS` and `++>>>>>>> other`, and
+  `38;5;252` — the ordinary foreground — for `  one` and `  three`. Before this, ` +OURS`
+  was drawn as context: 252, the same as the lines nobody was looking at.
+- **The staged side says why it is empty.** `s` toggles to `Diff — f.txt [staged] +0 −0`
+  with one line, `* Unmerged path f.txt`, in `38;5;245` — dim, because it is git talking
+  about the file rather than a line of it.
+- `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test`
+  (with and without `native-clipboard`) — all clean, 681 tests, zero warnings.
 
 ### Phase 14 — watcher, git operations, undo budget
 
@@ -1161,9 +1197,6 @@ reporting.
 
 Phase 14 continues. What is left of it, roughly in order of how much it is worth:
 
-- A diff of a conflicted file is now a view rather than a question (ADR-036), but it is
-  a combined diff drawn with a one-column reader — the honest fix is a parser that reads
-  both marker columns.
 - What is still unchecked by hand, as after every phase: the real target terminals —
   iTerm2, Ghostty, Terminal.app, tmux, plain ssh.
 - The CI `targets` job has still not been seen green — x86_64 musl has not been linked
