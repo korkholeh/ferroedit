@@ -51,8 +51,8 @@ src/
   cli.rs                  # arg parsing, `+42 file.rs`
   terminal.rs             # RAII TerminalGuard + panic hook
   docs.rs                 # renders docs/SHORTCUTS.md from the tables (ADR-028)
-  app/       mod.rs focus.rs tabs.rs dialog.rs input_field.rs notifications.rs
-             search.rs workspace.rs
+  app/       mod.rs focus.rs tabs.rs dialog.rs diff.rs input_field.rs
+             notifications.rs search.rs workspace.rs
   event/     mod.rs keyboard.rs mouse.rs
   commands/  mod.rs execute.rs
   ui/        mod.rs layout.rs menu.rs tabs.rs editor.rs explorer.rs field.rs
@@ -60,7 +60,7 @@ src/
   editor/    mod.rs document.rs cursor.rs selection.rs history.rs search.rs
              coords.rs viewport.rs clipboard.rs
   filesystem/ mod.rs tree.rs      # file operations; lazy, ignore-aware tree
-  git/       mod.rs service.rs parser.rs models.rs worker.rs
+  git/       mod.rs service.rs parser.rs models.rs diff.rs worker.rs
   syntax/    mod.rs highlighter.rs cache.rs
   config/    mod.rs settings.rs
 ```

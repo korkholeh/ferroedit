@@ -880,3 +880,59 @@ their short name, because `git switch origin/topic` would detach `HEAD` while
 `git switch topic` creates the local branch that clicking that row means. Deleting a
 branch is still not possible from the editor — SPEC §33 says it can wait, and it is the
 one branch operation that loses work.
+
+---
+
+## ADR-037: The diff viewer is a pane over the editor, and it dies with its focus
+
+**Decision.** The unified diff of SPEC §36 is drawn as a bordered pane occupying the
+editor's rect, with its own `FocusTarget::Diff` and a pager's keys. It is neither a
+dialog nor a split: it covers the editor rather than shrinking it, and it is closed
+automatically as soon as focus moves to another pane — one rule, enforced once, at the
+end of `execute_command`. Which file it shows is the git panel's selected row while that
+panel has focus, and the active tab's file everywhere else; which side it shows is the
+worktree's when anything is unstaged and the index's when nothing is, with `s` to swap
+and the title always naming the side. The diff itself is read in the foreground and
+classified once into line kinds; the viewer re-reads itself on every status refresh.
+
+**Why.** A diff wants width — eighty columns of context and a `+` column that lines up —
+and the editor pane is the only place in this layout that has it. A dialog would have
+been narrower and modal, and a diff is something a user reads *while* deciding what to
+stage. A split would have squeezed the document to half a screen for a pane that is only
+open for a few seconds.
+
+Covering the editor is what forces the focus rule. A pane the user cannot see is a pane
+the user is typing behind, so the viewer cannot outlive the focus that opened it. Putting
+that check at the end of the one mutation entry point (ARCHITECTURE invariant 3) means no
+individual command has to remember it: `CycleFocus`, a click on the explorer, opening a
+file from the git panel and every future focus-mover are covered by the same three lines.
+The menu and dialogs are the exception, because they draw *over* the viewer and hand
+focus back when they close.
+
+Foreground, like the status and the branch list, for the reason ADR-030 gave: a `git
+diff` of one path is a local read that finishes in milliseconds, and a pane that opened
+empty and filled in later would be one that scrolls under the reader. The write
+operations are on the worker because they take the index lock; a read of one path does
+not.
+
+Classifying lines when they are read rather than when they are drawn is ARCHITECTURE
+invariant 4 applied to one more derived view. It also puts the one subtle rule —
+`--- a/x` and `+++ b/x` are the file header, not a removal and an addition — in a place
+with tests rather than in a renderer.
+
+Choosing the side automatically is what makes one key useful. "What did I change?" is the
+question, and its answer is the unstaged diff right up until the moment there is nothing
+unstaged left, when it becomes the staged one. Guessing wrong costs one keystroke, and
+the title says what was guessed.
+
+**Consequence.** An untracked file has no diff at all: git has nothing to compare it
+with, so the viewer says why instead of opening blank — `--no-index` against a null
+device would show it, at the price of a platform-specific path and an exit status that
+means "they differ". A conflicted file's combined diff is shown as git writes it, but the
+colouring reads only the first marker column, so a line removed from one parent reads as
+context. The automatic re-read costs one extra `git diff` per save while the viewer is
+open, and it is what makes staging the file on screen close the pane it emptied rather
+than leave a change that is no longer there. A diff over `MAX_LINES` is cut with `(cut)`
+in the title, the ADR-027 rule for one more unbounded thing. And ADR-031's rename has
+somewhere to go at last: git's own `rename from` / `rename to` lines are in the header
+the viewer draws.

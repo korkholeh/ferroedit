@@ -22,8 +22,8 @@ Phases are ordered by dependency, not by importance. Each phase ends green on
 | 10 | Git status: `GitService`, porcelain=v2 parser, sidebar, non-repo state | Status matches `git status` on fixture repos | ✅ done |
 | 11 | Git actions: worker thread, stage/unstage, commit, pull, push | A push never blocks the UI; prompt failures are actionable | ✅ done |
 | 12 | Branches + merge: picker, switch, create, merge, conflict display | A branch switches from the picker; a conflicted merge is finished in the editor | ✅ done |
-| 13 | Diff viewer: read-only unified diff with +/− coloring | ⬜ next |
-| 14 | Polish: help screen, small-terminal layout, error pass, profiling, release binaries | SPEC §60 acceptance list passes end to end | ⬜ |
+| 13 | Diff viewer: read-only unified diff with +/− coloring | `d` in the panel shows the selected file's diff, worktree or staged, and follows it as it changes | ✅ done |
+| 14 | Polish: help screen, small-terminal layout, error pass, profiling, release binaries | SPEC §60 acceptance list passes end to end | ⬜ next |
 
 ## Explicitly out of MVP scope
 

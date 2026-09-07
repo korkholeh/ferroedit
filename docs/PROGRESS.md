@@ -1,6 +1,6 @@
 # Current Phase
 
-Phase 13 — Diff viewer (not started)
+Phase 13 — Diff viewer (complete)
 
 ## Completed
 
@@ -442,6 +442,40 @@ Phase 13 — Diff viewer (not started)
     command that starts a job is asserted to return while `git.busy()` is still `Some`.
   - 522 tests (was 489), including the pty checks below.
 
+- **Phase 13 — Diff viewer**
+  - `GitService::diff` runs `git diff` (or `git diff --cached`) for one path, with
+    `--no-color` and `--no-ext-diff` passed rather than inherited: a user with
+    `color.ui = always` would otherwise get escape sequences drawn as text, and
+    `diff.external` is somebody else's program writing somebody else's format.
+  - `git/diff.rs` classifies each line once, when it is read — header, hunk, addition,
+    removal, context, meta — so `ui/diff.rs` reads colours out of the state the way
+    every other renderer does (ARCHITECTURE invariant 4). `--- a/x` and `+++ b/x` are
+    headers and not a change, which is the one classification order that matters.
+  - The viewer is a pane over the editor, not a split and not a dialog: a diff wants
+    the width, and the editor behind it is not being typed into while it is up. It
+    closes as soon as another pane takes focus, enforced in one place at the end of
+    `execute_command` (ADR-037).
+  - Which file: the git panel's selected row while the panel has focus, and the file
+    being edited anywhere else — the Git menu's Diff, pressed mid-edit, means "this
+    one". Which side: what has not been staged when there is any, and what has been
+    when there is not, with `s` to see the other one and the title always saying which
+    is on screen.
+  - An untracked file says why it has no diff instead of opening empty, and a diff
+    that has nothing in it never opens a pane at all.
+  - The viewer follows the file it is showing: every `git status` refresh re-reads it,
+    so staging what is on screen closes it rather than leaving a change that is no
+    longer unstaged. `F5` is the manual form.
+  - A pager's keys — arrows, `PageUp`/`PageDown`, `Space`, `Home`/`End`, `Left`/`Right`
+    by eight columns for lines wider than the pane, `Esc` to close — and the wheel over
+    it scrolls it. Nothing types: an unbound letter in a read-only pane does nothing.
+  - Long lines scroll sideways rather than wrapping, with tabs expanded and wide
+    characters split by an edge drawn as the cells they occupy — the editor's own rule,
+    because a diff whose `+` and `−` stopped lining up is a diff nobody can read.
+  - `MAX_LINES` caps a diff at 5000 lines with `(cut)` in the title, the ADR-027
+    reason: a generated file's rewrite is a diff nobody reads and megabytes nobody
+    asked to allocate.
+  - 599 tests (was 556), including the pty checks below.
+
 - **Phase 12 — Branches and merge**
   - `DialogBody::List` (ADR-035) — the variant ADR-019 left open and ADR-029 deferred,
     with the rule they set: a list body earns its place only when no pane behind the
@@ -493,7 +527,7 @@ Phase 13 — Diff viewer (not started)
 
 ## In progress
 
-- Nothing. Phase 12 is closed.
+- Nothing. Phase 13 is closed.
 
 ## Known issues
 
@@ -626,9 +660,25 @@ Phase 13 — Diff viewer (not started)
 - **Nothing watches the filesystem.** A `git checkout` in another terminal shows up on
   the next save, file operation or `F5`, not by itself. Same trade as the explorer's,
   and the watcher is Phase 14 for both.
-- **A rename shows only its new path.** The original is parsed and kept on the entry;
-  there is nowhere in a sixteen-column sidebar to draw `old -> new`, and the diff viewer
-  of Phase 13 is where it has somewhere to go.
+- **A rename shows only its new path** in the panel, as ADR-031 said it would; the
+  diff viewer's header is where `old -> new` is now readable, because git writes it
+  there itself.
+- **An untracked file has no diff.** git has nothing to compare it with until it is
+  staged, and `git diff --no-index /dev/null <path>` — which would show it as one big
+  addition — exits non-zero by design and needs a platform-specific null path. The
+  viewer says why instead of opening empty.
+- **A conflicted file's combined diff is coloured by its first column only.** git
+  writes two columns of markers for a merge (`++`, ` -`), so a line removed from one
+  parent reads as context here. The text is git's own and correct; the colour is a
+  simplification.
+- **The viewer is one file at a time.** There is no whole-repository diff and no
+  hunk-level staging: SPEC §36 asks for a read-only unified diff and that is what this
+  is.
+- **The diff is re-read on every status refresh while it is open**, which is one extra
+  subprocess per save. It is a local read of one path, and the alternative is a pane
+  that says something that stopped being true.
+- **Five thousand lines is the cap**, and a diff cut there says `(cut)` in its title
+  with no way to see the rest from inside the editor.
 - **Untracked directories collapse to one row.** `--untracked-files=normal` reports
   `dir/` rather than every file under it, which is what `git status` shows and what
   keeps a fresh `target/` from being ten thousand rows — but the count in the title is
@@ -653,6 +703,31 @@ Phase 13 — Diff viewer (not started)
 Phase 2 through Phase 8 acceptance were verified by driving the real binary in a pty
 (the Phase 1 harness: fork a pty, set `TIOCSWINSZ`, write key and mouse bytes, replay
 the output through a minimal terminal emulator).
+
+### Phase 13
+
+Same harness, at 100x30. A scratch repository with `a.txt` committed and then changed,
+and an untracked `new.txt`.
+
+- **The pane.** `Ctrl+B` into the git panel, `d`:
+  `┌ Diff — a.txt [worktree] +2 −1 ────┐` over the editor, with `diff --git a/a.txt
+  b/a.txt` and `index 4cb29ea..6addb9b 100644` dim, `@@ -1,3 +1,4 @@` in cyan, `-two`
+  red, `+TWO` and `+four` green, ` one` and ` three` plain — and `1/10` in the bottom
+  right. The focus readout said `Diff`; the document behind it was gone.
+- **Nothing to scroll.** A ten-line diff in a twenty-six-row pane does not move under
+  `Down`, which is the clamp doing its job.
+- **A diff worth scrolling.** Sixty changed lines, each ninety characters wide:
+  `PageDown` moved the readout to `26/125`, `End` to the last window (`+line 35
+  changed …` at the top), `Home` back to `1/125`, and `Right` twice slid the text
+  sixteen cells left (`xt b/a.txt`, `762eb2 100644`) with the border staying put.
+- **The other side.** `s` with nothing staged: the title stayed `[worktree]` and the
+  status bar said `Nothing staged in a.txt`. After `Space` staged the file, `d` opened
+  `[staged]` and `s` there said `No unstaged changes in a.txt` — each side reports its
+  own emptiness rather than blanking the pane.
+- **An untracked file.** `d` on ` ? new.txt`: no pane, and
+  `new.txt is untracked — stage it to see a diff` on the status bar.
+- **Closing.** `Esc` put focus back on the git panel and the document reappeared
+  underneath.
 
 ### Phase 12
 
@@ -923,21 +998,20 @@ reporting.
 
 ## Next
 
-- Phase 13: the diff viewer. A read-only unified diff from `git diff -- <path>`, with
-  `+`/`−` colouring, for the row the panel's selection is on. It is the last of SPEC §29's
-  named operations that is still missing, and it is what a rename finally has somewhere to
-  show `old -> new` in (ADR-031).
-- A diff of a conflicted file is also what would let the marker check of ADR-036 become a
-  view rather than a question.
-- Cancelling a running job is worth doing when a second one wants it: the `JobId` exists,
-  but the worker keeps no handle to the child it spawned.
+- Phase 14 — polish. The help screen is the one menu entry still wired to
+  `Unimplemented`, and `docs/SHORTCUTS.md` is already generated from the tables it would
+  show.
+- A filesystem watcher would close the explorer's refresh gap, the git panel's and now
+  the viewer's. It is one dependency and one thread, and it is the largest single
+  improvement left in Phase 14.
 - `REBASE_HEAD` and `CHERRY_PICK_HEAD` are the same one-line check as `MERGE_HEAD`, and
   the panel says nothing about either.
-- A filesystem watcher would close both the explorer's refresh gap and the git panel's.
-  It is one dependency and one thread, and it is still Phase 14 rather than a phase of
-  its own.
-- Phase 10 was checked in the pty harness (above) as well as by the suite. What is still
-  unchecked by hand, as after every phase: the real target terminals — iTerm2, Ghostty,
-  Terminal.app, tmux, plain ssh.
+- Cancelling a running job is worth doing when a second one wants it: the `JobId`
+  exists, but the worker keeps no handle to the child it spawned.
+- A diff of a conflicted file is now a view rather than a question (ADR-036), but it is
+  a combined diff drawn with a one-column reader — the honest fix is a parser that reads
+  both marker columns.
+- What is still unchecked by hand, as after every phase: the real target terminals —
+  iTerm2, Ghostty, Terminal.app, tmux, plain ssh.
 - The CI `targets` job has still not been seen green — x86_64 musl has not been linked
   anywhere.

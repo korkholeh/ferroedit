@@ -27,7 +27,7 @@ binary, over SSH, with no runtime dependencies.
 
 ## Status
 
-**Pre-alpha — Phase 12 (Branches and merge).** `ferroedit file.txt` opens, edits
+**Pre-alpha — Phase 13 (Diff viewer).** `ferroedit file.txt` opens, edits
 and saves a real file: rope-backed buffer, grapheme-correct cursor movement, a viewport
 that scrolls both ways, and line endings written back the way they were found.
 `ferroedit new.txt` starts an empty buffer and creates the file on the first `Ctrl+S`.
@@ -104,7 +104,15 @@ A merge that conflicts is a state the editor can finish. The panel title reads
 until the last conflict is gone, which is the moment people get lost. `Enter` on a
 conflicted row opens the file with git's markers in it, you resolve it in the editor,
 `Ctrl+S`, then `Space` stages it as resolved and `c` commits the merge. Staging a file
-that still has `<<<<<<<` in it asks first. See [docs/PROGRESS.md](docs/PROGRESS.md) and
+that still has `<<<<<<<` in it asks first.
+
+`d` in the panel — or Git → Diff, which diffs the file you are editing — opens the
+unified diff over the editor, read-only and coloured: additions green, removals red,
+hunk headers cyan. It shows what you have not staged yet, or what you have when there is
+nothing left unstaged, and the title says which; `s` swaps sides. It scrolls like a
+pager, sideways too for lines wider than the pane, and it follows the file it is showing
+— staging what is on screen closes it rather than leaving a diff that is no longer true.
+`Esc` puts you back where you were. See [docs/PROGRESS.md](docs/PROGRESS.md) and
 [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ```bash
