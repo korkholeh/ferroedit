@@ -78,13 +78,22 @@ case $bump in
     ;;
 esac
 
-[ "$version" != "$current" ] || die "already at $current; there is nothing to bump"
-
 tag="v$version"
 git rev-parse -q --verify "refs/tags/$tag" >/dev/null &&
   die "$tag already exists; a released version is not re-cut"
 
-echo "ferroedit $current -> $version  ($tag)"
+# Asking for the version already in Cargo.toml is not a mistake when no tag
+# names it yet: it is the first release, and any later one whose bump was made
+# by hand. There is simply nothing to commit, so the tag goes on HEAD — after
+# the same gate, because what must never happen is tagging something red.
+if [ "$version" = "$current" ]; then
+  bump_needed=false
+  echo "ferroedit is already at $version; tagging HEAD as $tag"
+else
+  bump_needed=true
+  echo "ferroedit $current -> $version  ($tag)"
+fi
+
 if $dry_run; then
   echo "dry run: nothing was changed"
   exit 0
@@ -98,20 +107,22 @@ fi
 restore() { git checkout --quiet -- Cargo.toml Cargo.lock 2>/dev/null || true; }
 trap restore ERR INT TERM
 
-awk -v version="$version" '
-  /^\[package\]/  { in_package = 1 }
-  /^\[/ && !/^\[package\]/ { in_package = 0 }
-  in_package && /^version *= *"/ && !done {
-    print "version = \"" version "\""
-    done = 1
-    next
-  }
-  { print }
-' Cargo.toml > Cargo.toml.bump && mv Cargo.toml.bump Cargo.toml
+if $bump_needed; then
+  awk -v version="$version" '
+    /^\[package\]/  { in_package = 1 }
+    /^\[/ && !/^\[package\]/ { in_package = 0 }
+    in_package && /^version *= *"/ && !done {
+      print "version = \"" version "\""
+      done = 1
+      next
+    }
+    { print }
+  ' Cargo.toml > Cargo.toml.bump && mv Cargo.toml.bump Cargo.toml
 
-# Rewrites the `ferroedit` entry in Cargo.lock, which is the only other place
-# the version is written down.
-cargo check --quiet --all-features
+  # Rewrites the `ferroedit` entry in Cargo.lock, which is the only other place
+  # the version is written down.
+  cargo check --quiet --all-features
+fi
 
 echo "--- fmt"
 cargo fmt --all -- --check
@@ -122,13 +133,20 @@ cargo test --all-features --quiet
 
 trap - ERR INT TERM
 
-git add Cargo.toml Cargo.lock
-git commit --quiet -m "chore(release): $tag"
+if $bump_needed; then
+  git add Cargo.toml Cargo.lock
+  git commit --quiet -m "chore(release): $tag"
+  made="Committed and tagged"
+  undo="git tag -d $tag && git reset --hard HEAD~1"
+else
+  made="Tagged"
+  undo="git tag -d $tag"
+fi
 git tag -a "$tag" -m "FerroEdit $tag"
 
 cat <<MSG
 
-Committed and tagged $tag. Nothing has been pushed.
+$made $tag. Nothing has been pushed.
 
   git push origin main $tag
 
@@ -138,5 +156,5 @@ one of them is in.
 
 To undo instead:
 
-  git tag -d $tag && git reset --hard HEAD~1
+  $undo
 MSG
