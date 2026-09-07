@@ -7,6 +7,11 @@
 //! cost the hundred thousand bytes that were typed plus one small header per
 //! word — not a hundred thousand copies of the file.
 //!
+//! O(edited bytes) is still unbounded over a long enough session, so the undo
+//! stack has a byte budget and drops its oldest steps to stay inside it
+//! (ADR-042). The newest step is never dropped: an editor that cannot undo the
+//! thing that just happened is worse than one that uses the memory.
+//!
 //! This module knows nothing about a rope. It records what happened and hands
 //! transactions back; `Document` is what applies and inverts them.
 
@@ -22,6 +27,15 @@ use crate::editor::cursor::Cursor;
 /// Long enough that ordinary typing is one step per word, short enough that
 /// coming back to the keyboard after a pause starts a new one.
 pub const COALESCE_WINDOW: Duration = Duration::from_millis(500);
+
+/// How much the undo stack may hold before its oldest steps are dropped
+/// (ADR-042).
+///
+/// Sixteen megabytes is sixteen million characters of *edited* text, which no
+/// typing session reaches — the point is the session that pastes and rewrites
+/// for hours, where O(edited bytes) stops being a promise and becomes a leak.
+/// The redo stack is fed from this one, so the pair is bounded by twice it.
+pub const MAX_UNDO_BYTES: usize = 16 * 1024 * 1024;
 
 /// One rope mutation, kept together with the text that inverts it.
 ///
@@ -53,7 +67,6 @@ impl EditOperation {
         self.text().chars().count()
     }
 
-    #[cfg(test)]
     fn heap_bytes(&self) -> usize {
         match self {
             Self::Insert { text, .. } | Self::Delete { text, .. } => text.capacity(),
@@ -79,7 +92,6 @@ pub struct Transaction {
 }
 
 impl Transaction {
-    #[cfg(test)]
     fn heap_bytes(&self) -> usize {
         self.ops.capacity() * std::mem::size_of::<EditOperation>()
             + self
@@ -87,6 +99,14 @@ impl Transaction {
                 .iter()
                 .map(EditOperation::heap_bytes)
                 .sum::<usize>()
+    }
+
+    /// What keeping this step costs, its own place on the stack included.
+    ///
+    /// A million one-character steps are a million headers, and a budget that
+    /// counted only the text they hold would not see them.
+    fn weight(&self) -> usize {
+        std::mem::size_of::<Self>() + self.heap_bytes()
     }
 }
 
@@ -113,6 +133,15 @@ pub struct History {
     /// `undo.len()` as of the last save, when that state is still reachable.
     /// `None` means the file on disk matches no state on the stack.
     saved: Option<usize>,
+    /// What the undo stack currently weighs, kept as steps are pushed, merged
+    /// and popped rather than recomputed: the budget is checked after every
+    /// keystroke and walking the whole stack to do it would be O(steps) per
+    /// character.
+    undo_bytes: usize,
+    /// The budget itself. A field rather than the constant read directly, so
+    /// the tests for the trimming can use a small one instead of allocating
+    /// tens of megabytes to reach the real one.
+    budget: usize,
 }
 
 impl Default for History {
@@ -134,6 +163,19 @@ impl History {
             grouped: false,
             pending_before: Cursor::default(),
             saved: Some(0),
+            undo_bytes: 0,
+            budget: MAX_UNDO_BYTES,
+        }
+    }
+
+    /// The same, with a smaller budget. Test-only: nothing in the editor sets
+    /// one, and a configurable undo budget is not a setting anybody has asked
+    /// for.
+    #[cfg(test)]
+    fn with_budget(budget: usize) -> Self {
+        Self {
+            budget,
+            ..Self::new()
         }
     }
 
@@ -184,15 +226,50 @@ impl History {
         } else if self.open && single && self.can_merge(&op, now) {
             self.merge(op, now);
         } else {
-            self.undo.push(Transaction {
+            let transaction = Transaction {
                 ops: vec![op],
                 cursor_before: self.pending_before,
                 cursor_after: self.pending_before,
                 at: now,
-            });
+            };
+            self.undo_bytes += transaction.weight();
+            self.undo.push(transaction);
         }
         self.open = single;
         self.grouped = self.depth > 0;
+        self.trim();
+    }
+
+    /// Drops the oldest steps until the stack is inside its budget (ADR-042).
+    ///
+    /// The newest step always survives, however large it is: undoing the paste
+    /// that just happened is the one thing undo must always be able to do.
+    fn trim(&mut self) {
+        if self.undo_bytes <= self.budget {
+            return;
+        }
+        let mut freed = 0;
+        let mut dropped = 0;
+        for transaction in &self.undo[..self.undo.len().saturating_sub(1)] {
+            if self.undo_bytes - freed <= self.budget {
+                break;
+            }
+            freed += transaction.weight();
+            dropped += 1;
+        }
+        if dropped == 0 {
+            return;
+        }
+        log::debug!("undo history: dropping {dropped} step(s), freeing {freed} bytes");
+        self.undo.drain(..dropped);
+        self.undo_bytes -= freed;
+        // `saved` is a stack *height*, so every one of them moves down by what
+        // was dropped — and a save point below the new floor is gone, because
+        // the state it named can no longer be undone back to.
+        self.saved = match self.saved {
+            Some(at) if at >= dropped => Some(at - dropped),
+            _ => None,
+        };
     }
 
     /// Adds an operation to the open transaction — the forced case, inside one
@@ -201,11 +278,13 @@ impl History {
         let Some(last) = self.undo.last_mut() else {
             return;
         };
+        let before = last.weight();
         last.at = now;
         match last.ops.last_mut() {
             Some(prev) if mergeable(prev, &op) => merge_into(prev, op),
             _ => last.ops.push(op),
         }
+        self.undo_bytes = self.undo_bytes + last.weight() - before;
     }
 
     fn can_merge(&self, op: &EditOperation, now: Instant) -> bool {
@@ -222,10 +301,12 @@ impl History {
         let Some(last) = self.undo.last_mut() else {
             return;
         };
+        let before = last.weight();
         last.at = now;
         if let Some(prev) = last.ops.last_mut() {
             merge_into(prev, op);
         }
+        self.undo_bytes = self.undo_bytes + last.weight() - before;
     }
 
     /// Ends the open transaction, so the next operation starts a new undo step.
@@ -241,7 +322,11 @@ impl History {
     /// megabyte paste must not be copied to undo it.
     pub fn take_undo(&mut self) -> Option<Transaction> {
         self.seal();
-        self.undo.pop()
+        let taken = self.undo.pop();
+        if let Some(transaction) = taken.as_ref() {
+            self.undo_bytes = self.undo_bytes.saturating_sub(transaction.weight());
+        }
+        taken
     }
 
     pub fn push_redo(&mut self, transaction: Transaction) {
@@ -256,8 +341,10 @@ impl History {
     /// Puts a redone transaction back on the undo stack, sealed: a keystroke
     /// after a redo is a new step, not an extension of the redone one.
     pub fn push_undo(&mut self, transaction: Transaction) {
+        self.undo_bytes += transaction.weight();
         self.undo.push(transaction);
         self.open = false;
+        self.trim();
     }
 
     // --- save point --------------------------------------------------------
@@ -295,13 +382,15 @@ impl History {
     #[cfg(test)]
     pub fn memory_bytes(&self) -> usize {
         let stack = |transactions: &[Transaction]| {
-            std::mem::size_of_val(transactions)
-                + transactions
-                    .iter()
-                    .map(Transaction::heap_bytes)
-                    .sum::<usize>()
+            transactions.iter().map(Transaction::weight).sum::<usize>()
         };
         stack(&self.undo) + stack(&self.redo)
+    }
+
+    /// What the undo stack weighs, as the budget counts it.
+    #[cfg(test)]
+    pub fn undo_bytes(&self) -> usize {
+        self.undo_bytes
     }
 }
 
@@ -401,6 +490,14 @@ mod tests {
         EditOperation::Delete {
             at: CharIdx(at),
             text: text.to_string(),
+        }
+    }
+
+    /// One insert of a whole string — a paste, which is never coalesced.
+    fn paste(at: usize, text: String) -> EditOperation {
+        EditOperation::Insert {
+            at: CharIdx(at),
+            text,
         }
     }
 
@@ -609,6 +706,107 @@ mod tests {
             history.memory_bytes() < typed * 64,
             "history held {} bytes for {typed} typed characters",
             history.memory_bytes()
+        );
+        // Nowhere near the budget, which is the point of where it is set: a
+        // real typing session never meets it (ADR-042).
+        assert!(history.undo_bytes() < MAX_UNDO_BYTES / 4);
+    }
+
+    /// The accounting the budget is enforced against has to track what the
+    /// stacks actually hold, or the budget is a number about nothing.
+    #[test]
+    fn the_running_weight_matches_a_full_recount() {
+        let mut history = History::new();
+        let recount =
+            |history: &History| history.undo.iter().map(Transaction::weight).sum::<usize>();
+        for i in 0..200 {
+            type_text(&mut history, i * 4, "word");
+            assert_eq!(history.undo_bytes(), recount(&history), "after {i} words");
+        }
+        // Coalescing into an open transaction, a paste, and popping.
+        history.record(paste(800, "a large paste ".repeat(64)));
+        assert_eq!(history.undo_bytes(), recount(&history));
+        history.take_undo();
+        assert_eq!(history.undo_bytes(), recount(&history));
+        history.push_undo(Transaction {
+            ops: vec![EditOperation::Insert {
+                at: CharIdx(0),
+                text: "back".to_string(),
+            }],
+            cursor_before: Cursor::default(),
+            cursor_after: Cursor::default(),
+            at: Instant::now(),
+        });
+        assert_eq!(history.undo_bytes(), recount(&history));
+    }
+
+    /// The pathological session the budget exists for: pastes that never stop.
+    #[test]
+    fn the_oldest_steps_are_dropped_once_the_budget_is_reached() {
+        const BUDGET: usize = 16 * 1024;
+        let mut history = History::with_budget(BUDGET);
+        let chunk = "x".repeat(1024);
+        for i in 0..64 {
+            history.record(paste(i * chunk.len(), chunk.clone()));
+        }
+        assert!(
+            history.undo_bytes() <= BUDGET,
+            "held {} bytes",
+            history.undo_bytes()
+        );
+        assert!(history.undo_depth() >= 8, "{}", history.undo_depth());
+        // What is left is the *newest* steps: the last paste is still there to
+        // be undone.
+        let last = history.take_undo().expect("a step to undo");
+        assert_eq!(last.ops[0].len_chars(), chunk.len());
+    }
+
+    /// A single step larger than the whole budget is still undoable: dropping
+    /// it would mean a paste that cannot be taken back.
+    #[test]
+    fn the_newest_step_survives_however_large_it_is() {
+        const BUDGET: usize = 1024;
+        let mut history = History::with_budget(BUDGET);
+        history.record(paste(0, "y".repeat(BUDGET * 4)));
+        assert_eq!(history.undo_depth(), 1);
+        assert!(history.undo_bytes() > BUDGET);
+        assert!(history.take_undo().is_some());
+    }
+
+    /// The save point is a stack height, so dropping the bottom of the stack
+    /// moves it — and a save point below the new floor is gone, because the
+    /// state it named can no longer be undone back to.
+    #[test]
+    fn dropping_steps_moves_the_save_point_or_loses_it() {
+        const BUDGET: usize = 16 * 1024;
+        let chunk = "z".repeat(1024);
+        let fill = |history: &mut History, from: usize, to: usize| {
+            for i in from..to {
+                history.record(paste(i * chunk.len(), chunk.clone()));
+            }
+        };
+
+        let mut history = History::with_budget(BUDGET);
+        fill(&mut history, 0, 4);
+        history.mark_saved();
+        assert!(history.at_saved_point());
+        fill(&mut history, 4, 64);
+        assert!(
+            !history.at_saved_point(),
+            "the saved state was dropped, so nothing may look clean"
+        );
+
+        // A save point above the floor survives, moved down by what went.
+        let mut history = History::with_budget(BUDGET);
+        fill(&mut history, 0, 64);
+        history.mark_saved();
+        let depth = history.undo_depth();
+        assert_eq!(history.saved, Some(depth));
+        history.record(paste(0, chunk.clone()));
+        assert!(
+            history.saved.is_some_and(|at| at < depth),
+            "{:?}",
+            history.saved
         );
     }
 }
