@@ -9,11 +9,11 @@ use crate::app::focus::FocusTarget;
 use crate::app::help::HelpState;
 use crate::app::input_field::InputField;
 use crate::app::search::SearchField;
-use crate::app::tabs::active_after_close;
+use crate::app::tabs::{active_after_close, Stale};
 use crate::app::{App, EditorView, LastClick, SidebarMode};
 use crate::commands::{Command, FileOp, MENUS};
 use crate::editor::coords::VisualCol;
-use crate::editor::document::Document;
+use crate::editor::document::{DiskState, Document};
 use crate::filesystem;
 use crate::filesystem::watcher::FsChange;
 use crate::git::diff::DiffSide;
@@ -143,6 +143,12 @@ pub fn execute_command(app: &mut App, command: Command) {
                 remove_tab(app, index);
             }
         }
+
+        Command::Reload => reload_active(app),
+        Command::ReloadTab(index) => {
+            reload_tab(app, index, false);
+        }
+        Command::KeepBuffer(index) => keep_buffer(app, index),
 
         Command::ScrollEditor(delta) => {
             if let Some(tab) = app.active_mut() {
@@ -308,6 +314,14 @@ pub fn execute_command(app: &mut App, command: Command) {
         app.diff = None;
         app.help = None;
     }
+
+    // A file that moved under a modified buffer has a question attached to it,
+    // and the moment to ask it is not the moment the watcher reported it: the
+    // tab it belongs to may not be the one on screen, and a dialog may already
+    // be open. Asking here, once every command has run, is the same single
+    // check the two covering panes are closed by — so the question follows the
+    // tab, and arrives when there is a screen free to put it on (ADR-043).
+    prompt_stale(app);
 }
 
 /// Opens the help screen on the key tables (SPEC §6).
@@ -534,6 +548,11 @@ fn save_tab(app: &mut App, index: usize) -> bool {
     let title = tab.document.title().to_string();
     match outcome {
         Ok(()) => {
+            // Whatever the file was before, it is the buffer now: a save
+            // answers the "changed on disk" question by overwriting it.
+            if let Some(tab) = app.tabs.get_mut(index) {
+                tab.mark_stale(None);
+            }
             // What was just written is a change git has an opinion about.
             refresh_git(app);
             app.notifications.info(format!("Saved {title}"));
@@ -545,6 +564,147 @@ fn save_tab(app: &mut App, index: usize) -> bool {
             false
         }
     }
+}
+
+// --- files that changed underneath (ADR-043) --------------------------------
+
+/// Re-reads one tab from disk, reporting either outcome.
+///
+/// `quiet` is what the silent path uses: a clean buffer that is re-read because
+/// its file changed has nothing to announce beyond the text itself, and the
+/// status bar is where the answers to the user's *own* commands go. A reload
+/// the user asked for says so.
+///
+/// Returns whether the buffer is now what is on disk.
+fn reload_tab(app: &mut App, index: usize, quiet: bool) -> bool {
+    let Some(tab) = app.tabs.get_mut(index) else {
+        app.notifications.warning("No file to reload");
+        return false;
+    };
+    let outcome = tab.document.reload();
+    let title = tab.document.title().to_string();
+    match outcome {
+        Ok(()) => {
+            tab.mark_stale(None);
+            // The pane was scrolled for a document that may have been longer,
+            // and the caret has just been clamped into a different one.
+            let view = app.editor_view;
+            app.tabs[index].follow_cursor(view);
+            if !quiet {
+                app.notifications.info(format!("Reloaded {title}"));
+            }
+            true
+        }
+        Err(err) => {
+            log::error!("reload failed: {err}");
+            // The buffer is untouched, so the tab is exactly as stale as it
+            // was — but the user asked and deserves the reason.
+            app.notifications.error(format!("Failed to reload: {err}"));
+            false
+        }
+    }
+}
+
+/// The File menu's Reload: re-reads the active tab, asking first when there is
+/// something in it that is not on disk.
+fn reload_active(app: &mut App) {
+    let Some(index) = app.active_tab else {
+        app.notifications.warning("No file to reload");
+        return;
+    };
+    let Some(tab) = app.tabs.get(index) else {
+        return;
+    };
+    if !tab.document.is_dirty() {
+        reload_tab(app, index, false);
+        return;
+    }
+    let gone = tab.document.disk_state() == DiskState::Gone;
+    let title = tab.document.title().to_string();
+    let return_focus = dialog_return_focus(app);
+    open_dialog(
+        app,
+        DialogState::file_changed(index, &title, gone, return_focus),
+    );
+}
+
+/// The "Keep Mine" answer: the buffer stands, and the question is not asked
+/// again until the file moves once more.
+fn keep_buffer(app: &mut App, index: usize) {
+    if let Some(tab) = app.tabs.get_mut(index) {
+        tab.mark_stale(None);
+    }
+}
+
+/// Looks at every open tab after something changed in the workspace (ADR-043).
+///
+/// A clean buffer is re-read where it stands: everything in it is also on disk,
+/// so there is nothing a prompt could protect. A modified one is marked and
+/// left alone — the buffer is the only copy of the user's work, and no
+/// filesystem event is allowed to spend it.
+fn check_open_files(app: &mut App) {
+    let view = app.editor_view;
+    for index in 0..app.tabs.len() {
+        let tab = &app.tabs[index];
+        let state = tab.document.disk_state();
+        if matches!(state, DiskState::Same | DiskState::Untracked) {
+            app.tabs[index].mark_stale(None);
+            continue;
+        }
+        if tab.document.is_dirty() || state == DiskState::Gone {
+            let stale = match state {
+                DiskState::Gone => Stale::Gone,
+                _ => Stale::Changed,
+            };
+            let news = app.tabs[index].mark_stale(Some(stale));
+            // A file that vanished under a clean buffer has no question to ask
+            // — nothing would be lost by keeping it and there is nothing to
+            // reload from — so it is said once and marked, not prompted.
+            if news && !app.tabs[index].document.is_dirty() {
+                let title = app.tabs[index].document.title().to_string();
+                app.tabs[index].asked = true;
+                app.notifications
+                    .warning(format!("{title} is gone from disk"));
+            }
+            continue;
+        }
+        let tab = &mut app.tabs[index];
+        if tab.document.reload().is_err() {
+            // Unreadable now — a partial write, or a file replaced by a
+            // directory. It is not this tab's last word: the next event over
+            // the same path tries again.
+            tab.mark_stale(Some(Stale::Changed));
+            continue;
+        }
+        tab.mark_stale(None);
+        tab.follow_cursor(view);
+        log::info!("reloaded {} after an external change", tab.document.title());
+    }
+}
+
+/// Asks about the active tab's file, once, when there is a screen free for it.
+///
+/// Only the active tab: a dialog is modal, and one that spoke for a background
+/// tab would be a question about a document the user cannot see. The others
+/// keep their mark in the tab bar and are asked about when they come forward.
+fn prompt_stale(app: &mut App) {
+    if app.dialog.is_some() || app.should_quit {
+        return;
+    }
+    let Some(index) = app.active_tab else { return };
+    let Some(tab) = app.tabs.get(index) else {
+        return;
+    };
+    let (Some(stale), false) = (tab.stale, tab.asked) else {
+        return;
+    };
+    let title = tab.document.title().to_string();
+    let return_focus = dialog_return_focus(app);
+    app.tabs[index].asked = true;
+    open_dialog(
+        app,
+        DialogState::file_changed(index, &title, stale == Stale::Gone, return_focus),
+    );
 }
 
 /// Quits, or asks first when something would be lost by it.
@@ -1182,6 +1342,10 @@ fn refresh_git(app: &mut App) {
 fn external_change(app: &mut App, change: FsChange) {
     if change.worktree {
         refresh_tree(app, None);
+        // The panes were the visible half of this gap and the buffers were the
+        // other one: an explorer that had caught up while the document it was
+        // pointing at had not is what ADR-043 exists to close.
+        check_open_files(app);
     }
     if change.repository {
         refresh_git(app);
@@ -3786,6 +3950,258 @@ mod tests {
         assert!(app.dialog.is_none(), "a rebase is not committed from here");
         let said = app.notifications.current().unwrap().message.clone();
         assert!(said.contains("git rebase --continue"), "{said}");
+    }
+
+    // --- buffers whose files moved (ADR-043) -------------------------------
+
+    /// The change the watcher would report, without a watcher in the test.
+    fn worktree_changed(app: &mut App) {
+        execute_command(
+            app,
+            Command::ExternalChange(FsChange {
+                worktree: true,
+                repository: true,
+            }),
+        );
+    }
+
+    /// The gap ADR-040 made visible and did not close: the panes caught up and
+    /// the document did not. A clean buffer has nothing to lose, so it follows
+    /// its file without asking.
+    #[test]
+    fn a_clean_tab_follows_its_file() {
+        let dir = project();
+        let mut app = App::fixture_in(dir.path());
+        let path = dir.path().join("README.md");
+        app.open_path(&path, None).unwrap();
+
+        std::fs::write(&path, "# rewritten elsewhere\n").unwrap();
+        worktree_changed(&mut app);
+
+        assert_eq!(
+            app.active().unwrap().document.line(0),
+            "# rewritten elsewhere"
+        );
+        assert!(app.dialog.is_none(), "nothing to ask about");
+        assert!(app.tabs[0].stale.is_none());
+    }
+
+    /// The other half of the same rule: a buffer with unsaved work in it is
+    /// the only copy of that work, and no filesystem event may spend it.
+    #[test]
+    fn a_modified_tab_is_asked_about_rather_than_replaced() {
+        let dir = project();
+        let mut app = App::fixture_in(dir.path());
+        let path = dir.path().join("README.md");
+        app.open_path(&path, None).unwrap();
+        execute_command(&mut app, Command::InsertText("mine\n".into()));
+
+        std::fs::write(&path, "# rewritten elsewhere\n").unwrap();
+        worktree_changed(&mut app);
+
+        assert_eq!(app.tabs[0].stale, Some(Stale::Changed));
+        assert!(
+            app.active().unwrap().document.line(0).starts_with("mine"),
+            "the buffer is untouched"
+        );
+        let dialog = app.dialog.as_ref().expect("a question");
+        assert!(dialog.prompt().contains("changed on disk"), "{dialog:?}");
+        assert_eq!(
+            dialog.command_at(0),
+            Some(Command::KeepBuffer(0)),
+            "the answer that does nothing is the default"
+        );
+        assert_eq!(dialog.command_at(1), Some(Command::ReloadTab(0)));
+    }
+
+    /// The watcher reports every burst in the workspace. Without this the same
+    /// question would re-open on every build for as long as the tab stayed
+    /// unresolved.
+    #[test]
+    fn the_same_change_is_only_asked_about_once() {
+        let dir = project();
+        let mut app = App::fixture_in(dir.path());
+        let path = dir.path().join("README.md");
+        app.open_path(&path, None).unwrap();
+        execute_command(&mut app, Command::InsertText("mine\n".into()));
+        std::fs::write(&path, "# theirs\n").unwrap();
+
+        worktree_changed(&mut app);
+        assert!(app.dialog.is_some());
+        execute_command(&mut app, Command::DialogCancel);
+
+        // Something else in the workspace moves; this file did not.
+        std::fs::write(dir.path().join("other.txt"), "x\n").unwrap();
+        worktree_changed(&mut app);
+        assert!(app.dialog.is_none(), "the question is not re-opened");
+        assert_eq!(
+            app.tabs[0].stale,
+            Some(Stale::Changed),
+            "but it is still marked"
+        );
+    }
+
+    #[test]
+    fn keeping_the_buffer_settles_the_tab() {
+        let dir = project();
+        let mut app = App::fixture_in(dir.path());
+        let path = dir.path().join("README.md");
+        app.open_path(&path, None).unwrap();
+        execute_command(&mut app, Command::InsertText("mine\n".into()));
+        std::fs::write(&path, "# theirs\n").unwrap();
+        worktree_changed(&mut app);
+
+        execute_command(&mut app, Command::DialogActivate);
+        assert!(app.dialog.is_none());
+        assert!(app.tabs[0].stale.is_none(), "answered");
+        assert!(app.active().unwrap().document.line(0).starts_with("mine"));
+    }
+
+    #[test]
+    fn reloading_from_the_question_takes_the_file_and_can_be_undone() {
+        let dir = project();
+        let mut app = App::fixture_in(dir.path());
+        let path = dir.path().join("README.md");
+        app.open_path(&path, None).unwrap();
+        execute_command(&mut app, Command::InsertText("mine\n".into()));
+        std::fs::write(&path, "# theirs\n").unwrap();
+        worktree_changed(&mut app);
+
+        execute_command(&mut app, Command::DialogMove(1));
+        execute_command(&mut app, Command::DialogActivate);
+        assert!(app.dialog.is_none());
+        assert!(app.tabs[0].stale.is_none());
+        assert_eq!(app.active().unwrap().document.line(0), "# theirs");
+
+        execute_command(&mut app, Command::Undo);
+        assert!(
+            app.active().unwrap().document.line(0).starts_with("mine"),
+            "a reload the user did not mean is not the one thing that cannot be taken back"
+        );
+    }
+
+    /// A file that vanished under a clean buffer has no question attached to
+    /// it: nothing would be lost by keeping it, and there is nothing to reload
+    /// from. It is said once.
+    #[test]
+    fn a_file_that_vanished_under_a_clean_tab_is_said_once() {
+        let dir = project();
+        let mut app = App::fixture_in(dir.path());
+        let path = dir.path().join("README.md");
+        app.open_path(&path, None).unwrap();
+
+        std::fs::remove_file(&path).unwrap();
+        worktree_changed(&mut app);
+
+        assert!(app.dialog.is_none());
+        assert_eq!(app.tabs[0].stale, Some(Stale::Gone));
+        assert_eq!(
+            app.notifications.current().unwrap().message,
+            "README.md is gone from disk"
+        );
+        assert_eq!(
+            app.active().unwrap().document.line(0),
+            "# project",
+            "the buffer is the last copy and is kept"
+        );
+    }
+
+    /// A modified tab whose file is gone *is* asked about — but with one
+    /// answer, because there is nothing to reload from.
+    #[test]
+    fn a_modified_tab_whose_file_is_gone_is_offered_only_its_buffer() {
+        let dir = project();
+        let mut app = App::fixture_in(dir.path());
+        let path = dir.path().join("README.md");
+        app.open_path(&path, None).unwrap();
+        execute_command(&mut app, Command::InsertText("mine\n".into()));
+
+        std::fs::remove_file(&path).unwrap();
+        worktree_changed(&mut app);
+
+        let dialog = app.dialog.as_ref().expect("a question");
+        assert!(dialog.prompt().contains("gone from disk"), "{dialog:?}");
+        assert_eq!(dialog.buttons.len(), 1, "nothing to reload from");
+    }
+
+    /// A save is an answer to the question too: whatever the file was, it is
+    /// the buffer now.
+    #[test]
+    fn saving_over_the_change_settles_the_tab() {
+        let dir = project();
+        let mut app = App::fixture_in(dir.path());
+        let path = dir.path().join("README.md");
+        app.open_path(&path, None).unwrap();
+        execute_command(&mut app, Command::InsertText("mine\n".into()));
+        std::fs::write(&path, "# theirs\n").unwrap();
+        worktree_changed(&mut app);
+        execute_command(&mut app, Command::DialogCancel);
+
+        execute_command(&mut app, Command::Save);
+        assert!(app.tabs[0].stale.is_none());
+        assert!(
+            std::fs::read_to_string(&path).unwrap().starts_with("mine"),
+            "and the file is what the buffer was"
+        );
+    }
+
+    /// Only the active tab is asked about: a modal question over a document
+    /// the user cannot see is a question about nothing.
+    #[test]
+    fn a_background_tab_is_marked_and_asked_about_when_it_comes_forward() {
+        let dir = project();
+        let mut app = App::fixture_in(dir.path());
+        let readme = dir.path().join("README.md");
+        app.open_path(&readme, None).unwrap();
+        execute_command(&mut app, Command::InsertText("mine\n".into()));
+        app.open_path(&dir.path().join("src/main.rs"), None)
+            .unwrap();
+        assert_eq!(app.active_tab, Some(1));
+
+        std::fs::write(&readme, "# theirs\n").unwrap();
+        worktree_changed(&mut app);
+        assert!(app.dialog.is_none(), "the tab on screen did not move");
+        assert_eq!(app.tabs[0].stale, Some(Stale::Changed));
+
+        execute_command(&mut app, Command::PrevTab);
+        let dialog = app.dialog.as_ref().expect("asked once it is in front");
+        assert_eq!(dialog.command_at(0), Some(Command::KeepBuffer(0)));
+    }
+
+    /// `F5` in the editor is the same "show me what is really there" the two
+    /// panels bind it to, and it asks before it spends anything.
+    #[test]
+    fn reload_asks_only_when_there_is_something_to_lose() {
+        let dir = project();
+        let mut app = App::fixture_in(dir.path());
+        let path = dir.path().join("README.md");
+        app.open_path(&path, None).unwrap();
+        std::fs::write(&path, "# theirs\n").unwrap();
+
+        execute_command(&mut app, Command::Reload);
+        assert!(app.dialog.is_none(), "a clean buffer has nothing to lose");
+        assert_eq!(app.active().unwrap().document.line(0), "# theirs");
+        assert_eq!(
+            app.notifications.current().unwrap().message,
+            "Reloaded README.md",
+            "a reload the user asked for says so"
+        );
+
+        execute_command(&mut app, Command::InsertText("mine\n".into()));
+        execute_command(&mut app, Command::Reload);
+        assert!(app.dialog.is_some(), "and a modified one is asked about");
+    }
+
+    #[test]
+    fn reload_with_no_tab_open_says_so() {
+        let dir = project();
+        let mut app = App::fixture_in(dir.path());
+        execute_command(&mut app, Command::Reload);
+        assert!(app.dialog.is_none());
+        assert_eq!(
+            app.notifications.current().unwrap().message,
+            "No file to reload"
+        );
     }
 
     /// The watcher's whole point: a change made outside the editor is on

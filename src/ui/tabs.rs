@@ -12,6 +12,11 @@ use crate::ui::theme::Theme;
 /// not, so a tab does not change width the moment the file is edited.
 const DIRTY: &str = "●";
 const CLEAN: &str = " ";
+/// The file underneath moved and the buffer has not followed it (ADR-043). It
+/// takes the same cell as the dirty marker rather than one of its own: a stale
+/// tab is nearly always a modified one, and the stronger of the two facts is
+/// the one worth a cell in a tab bar that is already short of them.
+const STALE: &str = "!";
 /// The close button. `×` rather than a heavier glyph because it has to read as
 /// a control at one cell in a 256-colour palette.
 const CLOSE: &str = "×";
@@ -32,17 +37,14 @@ pub fn render(frame: &mut Frame, app: &App, rects: &LayoutRects, theme: &Theme) 
         } else {
             theme.tab_inactive
         };
-        let dirty = tab.document.is_dirty();
+        let (marker, colour) = match (tab.stale.is_some(), tab.document.is_dirty()) {
+            (true, _) => (STALE, Some(theme.warning)),
+            (false, true) => (DIRTY, Some(theme.tab_dirty)),
+            (false, false) => (CLEAN, None),
+        };
         let spans = vec![
             Span::styled(format!(" {} ", tab.document.title()), style),
-            Span::styled(
-                if dirty { DIRTY } else { CLEAN },
-                if dirty {
-                    style.fg(theme.tab_dirty)
-                } else {
-                    style
-                },
-            ),
+            Span::styled(marker, colour.map_or(style, |c| style.fg(c))),
             Span::styled(" ", style),
             Span::styled(CLOSE, style.fg(theme.tab_close)),
             Span::styled(" ", style),
@@ -121,6 +123,25 @@ mod tests {
         // The tab after the one that changed has not moved.
         let at = |row: &str, needle: &str| row.find(needle).map(|i| row[..i].chars().count());
         assert_eq!(at(&clean, "editor.rs"), at(&dirty, "editor.rs"));
+    }
+
+    /// A file that moved under the buffer takes the marker cell, because it is
+    /// the stronger of the two facts about the tab (ADR-043).
+    #[test]
+    fn a_stale_tab_says_so_where_the_dirty_marker_goes() {
+        let mut app = App::fixture();
+        app.tabs[1].stale = Some(crate::app::tabs::Stale::Changed);
+        let row = tab_bar_row(&app, 100);
+        assert!(row.contains(STALE), "{row}");
+        assert!(
+            !row.contains(DIRTY),
+            "the only modified tab is the stale one: {row}"
+        );
+        assert_eq!(
+            row.chars().count(),
+            tab_bar_row(&App::fixture(), 100).chars().count(),
+            "and the bar is the same width either way"
+        );
     }
 
     #[test]

@@ -204,6 +204,17 @@ pub enum Command {
     /// dialog's "Save".
     SaveAndCloseTab(usize),
 
+    /// Re-reads the active tab from disk, asking first when it has unsaved
+    /// changes (ADR-043). The File menu's Reload.
+    Reload,
+    /// Re-reads one tab whatever is in it — the "Changed on disk" dialog's
+    /// Reload, and what the silent reload of a clean buffer runs. The step is
+    /// undoable, so this is not the one-way door its name suggests.
+    ReloadTab(usize),
+    /// Keeps a buffer that has diverged from its file, and stops asking about
+    /// it — the same dialog's Keep Mine.
+    KeepBuffer(usize),
+
     /// Scrolls the editor viewport without moving the cursor — the wheel.
     ScrollEditor(i16),
 
@@ -416,6 +427,9 @@ impl Command {
             Self::CloseTabAt(_) => "Close a tab".into(),
             Self::CloseTabDiscarding(_) => "Close a tab without saving".into(),
             Self::SaveAndCloseTab(_) => "Save a tab and close it".into(),
+            Self::Reload => "Re-read the active file from disk".into(),
+            Self::ReloadTab(_) => "Re-read a tab from disk".into(),
+            Self::KeepBuffer(_) => "Keep the buffer that has changed on disk".into(),
 
             Self::ScrollEditor(delta) => {
                 step(*delta, "Scroll the editor down", "Scroll the editor up")
@@ -571,6 +585,7 @@ pub static MENUS: &[MenuDef] = &[
             item("Open…", Command::OpenPrompt),
             item("Save", Command::Save),
             item("Save As…", Command::SaveAsPrompt),
+            item("Reload", Command::Reload),
             item("Close Tab", Command::CloseTab),
             item("Quit", Command::Quit),
         ],

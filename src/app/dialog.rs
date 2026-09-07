@@ -115,6 +115,36 @@ impl DialogState {
         )
     }
 
+    /// Asked when a file changed underneath a buffer that has unsaved changes
+    /// (ADR-043).
+    ///
+    /// Keep Mine is the default because it is the answer that does nothing:
+    /// the question is asked by a filesystem event rather than by the user, so
+    /// it can arrive mid-keystroke, and the reflex `Enter` must not be the one
+    /// that throws away what was being typed. Reloading is still undoable, and
+    /// the message says so — but an undo the user has to think of is worse than
+    /// a default that never needed one.
+    pub fn file_changed(index: usize, title: &str, gone: bool, return_focus: FocusTarget) -> Self {
+        let message = if gone {
+            format!("{title} is gone from disk, and this tab has unsaved changes.")
+        } else {
+            format!("{title} changed on disk, and this tab has unsaved changes.")
+        };
+        let mut buttons = vec![DialogButton::new(
+            "Keep Mine",
+            Some(Command::KeepBuffer(index)),
+        )];
+        // Nothing to reload from when the file is gone: the buffer is the only
+        // copy left, and saving it is what puts it back.
+        if !gone {
+            buttons.push(DialogButton::new(
+                "Reload (undoable)",
+                Some(Command::ReloadTab(index)),
+            ));
+        }
+        Self::confirm("Changed on disk", message, buttons, return_focus)
+    }
+
     /// Asked before anything is removed from disk (SPEC §20).
     ///
     /// A directory goes with everything inside it, so the question says so

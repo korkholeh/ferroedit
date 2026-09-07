@@ -12,6 +12,19 @@ use crate::editor::document::Document;
 use crate::editor::viewport::Viewport;
 use crate::syntax::cache::{Disabled, HighlightCache};
 
+/// A file that moved under a buffer the editor could not simply re-read
+/// (ADR-043).
+///
+/// Only a tab with unsaved changes ever carries one: a clean buffer is reloaded
+/// where it stands, because there is nothing in it that is not also on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stale {
+    /// Somebody else wrote to the file.
+    Changed,
+    /// It is not there any more.
+    Gone,
+}
+
 /// One open editor tab: a document and where the pane is scrolled to.
 ///
 /// The scroll offset lives here rather than on `App` so that switching back to
@@ -24,6 +37,16 @@ pub struct Tab {
     /// caches is this document's, and it dies with the tab the way the history
     /// does.
     pub highlights: HighlightCache,
+    /// What happened to the file underneath, when it is something the editor
+    /// has not resolved. Drawn in the tab bar and answered by a prompt.
+    pub stale: Option<Stale>,
+    /// Whether the user has already been asked about the current `stale`.
+    ///
+    /// The watcher reports every burst in the workspace, so without this the
+    /// same question would be re-opened on every build, every checkout and
+    /// every save of an unrelated file for as long as the tab stayed
+    /// unresolved. It resets only when the state itself changes.
+    pub asked: bool,
 }
 
 impl Tab {
@@ -32,7 +55,22 @@ impl Tab {
             document,
             viewport: Viewport::default(),
             highlights: HighlightCache::default(),
+            stale: None,
+            asked: false,
         }
+    }
+
+    /// Records what happened to the file, and whether it is worth asking about.
+    ///
+    /// Returns true when this is news — a state the tab was not already in — so
+    /// the caller can ask once rather than once per filesystem event.
+    pub fn mark_stale(&mut self, stale: Option<Stale>) -> bool {
+        if self.stale == stale {
+            return false;
+        }
+        self.stale = stale;
+        self.asked = false;
+        true
     }
 
     /// Re-colours the lines the viewport is over, if anything moved.

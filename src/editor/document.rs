@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use ropey::{Rope, RopeSlice};
 use thiserror::Error;
@@ -77,6 +78,57 @@ impl DocumentError {
     }
 }
 
+/// What the file looked like the last time the buffer and the disk agreed
+/// (ADR-043).
+///
+/// Modification time *and* length, because neither is enough on its own: a
+/// filesystem with one-second timestamps hides a rewrite inside the same
+/// second, and a rewrite that keeps the length is exactly what a one-character
+/// change by another editor is. Together they miss only a same-second edit that
+/// also preserves the length, which is a narrower gap than reading the file
+/// back on every event to compare it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DiskStamp {
+    /// `None` on a filesystem that does not report one — the length is then
+    /// the whole of the comparison rather than a reason to give up on it.
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+impl DiskStamp {
+    /// Reads the stamp of a path, or `None` when it cannot be stat'd.
+    ///
+    /// A failure here is not an error to report: it means the next comparison
+    /// has nothing to compare against, and a buffer with no stamp is simply one
+    /// the editor makes no claim about.
+    fn of(path: &Path) -> Option<Self> {
+        std::fs::metadata(path)
+            .ok()
+            .map(|metadata| Self::from_metadata(&metadata))
+    }
+
+    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        Self {
+            modified: metadata.modified().ok(),
+            len: metadata.len(),
+        }
+    }
+}
+
+/// How the buffer stands against the file it came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskState {
+    /// No path, or no stamp to compare against: a new file that has never been
+    /// saved, and a buffer built from text in memory.
+    Untracked,
+    /// The file is what the editor last read or wrote.
+    Same,
+    /// Somebody else has written to it.
+    Changed,
+    /// It is no longer there.
+    Gone,
+}
+
 /// One open file: the text, where it came from, where the caret is in it, and
 /// what is selected.
 ///
@@ -104,6 +156,10 @@ pub struct Document {
     /// they compare a number instead. Two consumers, two mechanisms, and
     /// neither can starve the other.
     revision: u64,
+    /// What the file was when the buffer and the disk last agreed, which is
+    /// the moment it was opened, reloaded or saved. `None` for a buffer with no
+    /// file behind it yet (ADR-043).
+    disk: Option<DiskStamp>,
     /// Lowest line whose *text* may have changed since the highlight cache
     /// last looked, or `usize::MAX` when nothing has.
     ///
@@ -132,6 +188,7 @@ impl Document {
             tab_width: DEFAULT_TAB_WIDTH,
             history: History::new(),
             revision: 0,
+            disk: None,
             // A document nothing has highlighted yet is stale from its first
             // line, which is also what makes a freshly opened file get parsed.
             dirty_from: 0,
@@ -144,11 +201,15 @@ impl Document {
     /// `fs::read_to_string`, is what lets a binary or Latin-1 file be reported
     /// as such instead of arriving as a lossy mess the user might then save.
     pub fn open(path: &Path) -> Result<Self, DocumentError> {
-        let bytes = std::fs::read(path).map_err(|err| DocumentError::io(path, err))?;
-        let text = String::from_utf8(bytes).map_err(|_| DocumentError::NotUtf8 {
-            path: path.display().to_string(),
-        })?;
-        let document = Self::from_text(&text, Some(path.to_path_buf()));
+        // The stamp is taken *before* the read, not after: a writer that
+        // finishes between the two would otherwise be recorded as the state the
+        // buffer holds, and the change would never be noticed. Taken first, the
+        // worst case is a change reported that has already been read, which
+        // costs a reload of text that is already right.
+        let disk = DiskStamp::of(path);
+        let text = read_utf8(path)?;
+        let mut document = Self::from_text(&text, Some(path.to_path_buf()));
+        document.disk = disk;
         log::info!(
             "opened {} ({} bytes, {} lines, {})",
             path.display(),
@@ -186,7 +247,94 @@ impl Document {
             .map_err(|err| DocumentError::io(&path, err))?;
         self.dirty = false;
         self.history.mark_saved();
+        // What is on disk is now what is in the buffer, so the watcher's report
+        // of this very write is a change the editor already knows about.
+        self.disk = DiskStamp::of(&path);
         log::info!("saved {} ({} bytes)", path.display(), self.len_bytes());
+        Ok(())
+    }
+
+    /// How the buffer stands against the file it came from (ADR-043).
+    ///
+    /// One `stat`, and nothing is read: this is asked about every open tab on
+    /// every burst of filesystem events, and reading each file back to compare
+    /// it would make a `cargo build` in the next terminal cost the size of the
+    /// working set.
+    pub fn disk_state(&self) -> DiskState {
+        let (Some(path), Some(stamp)) = (self.path.as_deref(), self.disk) else {
+            return DiskState::Untracked;
+        };
+        match std::fs::metadata(path) {
+            Ok(metadata) => {
+                if DiskStamp::from_metadata(&metadata) == stamp {
+                    DiskState::Same
+                } else {
+                    DiskState::Changed
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => DiskState::Gone,
+            // Something is there and cannot be stat'd — a directory whose
+            // permissions changed under the editor. There is nothing to say
+            // about it that a reload prompt would help with.
+            Err(err) => {
+                log::debug!("cannot stat {}: {err}", path.display());
+                DiskState::Untracked
+            }
+        }
+    }
+
+    /// Re-reads the file, replacing the buffer with what is on disk.
+    ///
+    /// It is one undo step rather than a new document (ADR-043): a reload the
+    /// user did not mean is otherwise the one action in the editor that cannot
+    /// be taken back, and the byte budget on the stack is what keeps the cost
+    /// of holding both versions bounded (ADR-042).
+    ///
+    /// The caret keeps its line and column, clamped to whatever the file now
+    /// has — the same rule an undo restores a cursor by, and for the same
+    /// reason: a position that no longer exists must not be a panic.
+    pub fn reload(&mut self) -> Result<(), DocumentError> {
+        let path = self.path.clone().ok_or(DocumentError::NoPath)?;
+        let disk = DiskStamp::of(&path);
+        let text = read_utf8(&path)?;
+        let line_ending = LineEnding::detect(&text);
+        let normalised: Cow<'_, str> = match line_ending {
+            LineEnding::Lf => Cow::Borrowed(text.as_str()),
+            LineEnding::Crlf => Cow::Owned(text.replace("\r\n", "\n")),
+        };
+
+        let cursor = self.cursor;
+        // Nothing may merge into the step before this one, and nothing may
+        // merge into it afterwards: a reload is one action, and it is not
+        // typing.
+        self.history.seal();
+        self.history.begin_edit(cursor);
+        self.remove(0..self.rope.len_chars());
+        if !normalised.is_empty() {
+            self.touch(0);
+            self.rope.insert(0, &normalised);
+            self.history.record(EditOperation::Insert {
+                at: CharIdx(0),
+                text: normalised.into_owned(),
+            });
+        }
+        self.history.end_edit(cursor);
+        self.history.seal();
+
+        self.line_ending = line_ending;
+        self.disk = disk;
+        self.restore_cursor(cursor);
+        // The buffer is what is on disk again, so this is the save point —
+        // which is also what makes an undo of the reload report as dirty.
+        self.dirty = false;
+        self.history.mark_saved();
+        log::info!(
+            "reloaded {} ({} bytes, {} lines, {})",
+            path.display(),
+            self.len_bytes(),
+            self.line_count(),
+            line_ending.label()
+        );
         Ok(())
     }
 
@@ -847,6 +995,15 @@ impl Document {
         self.cursor.column = coords::snap(&self.cursor_line(), cursor.column.min(len));
         self.remember_column();
     }
+}
+
+/// Reads a file as UTF-8, reporting a binary or Latin-1 one as such rather than
+/// letting it arrive as a lossy mess the user might then save (SPEC §17).
+fn read_utf8(path: &Path) -> Result<String, DocumentError> {
+    let bytes = std::fs::read(path).map_err(|err| DocumentError::io(path, err))?;
+    String::from_utf8(bytes).map_err(|_| DocumentError::NotUtf8 {
+        path: path.display().to_string(),
+    })
 }
 
 /// Splits a rope line into its text and whether it was newline-terminated.
@@ -1688,5 +1845,140 @@ mod tests {
         let typed = document.revision();
         document.undo();
         assert!(document.revision() > typed, "undo changes the buffer too");
+    }
+
+    // --- what is on disk (ADR-043) -----------------------------------------
+
+    /// A stamp is mtime *and* length, and a test that rewrites a file inside
+    /// one timestamp tick would be comparing lengths alone. Every fixture here
+    /// changes the length too, which is what a real edit does.
+    fn on_disk(text: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        std::fs::write(&path, text).unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn a_buffer_with_no_file_behind_it_makes_no_claim_about_disk() {
+        assert_eq!(doc("hello").disk_state(), DiskState::Untracked);
+    }
+
+    #[test]
+    fn a_file_nobody_has_touched_reads_as_the_one_that_was_opened() {
+        let (_dir, path) = on_disk("one\ntwo\n");
+        let document = Document::open(&path).unwrap();
+        assert_eq!(document.disk_state(), DiskState::Same);
+    }
+
+    #[test]
+    fn a_file_written_by_somebody_else_reads_as_changed() {
+        let (_dir, path) = on_disk("one\ntwo\n");
+        let document = Document::open(&path).unwrap();
+        std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
+        assert_eq!(document.disk_state(), DiskState::Changed);
+    }
+
+    #[test]
+    fn a_file_that_was_removed_reads_as_gone() {
+        let (_dir, path) = on_disk("one\n");
+        let document = Document::open(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(document.disk_state(), DiskState::Gone);
+    }
+
+    #[test]
+    fn saving_makes_the_buffer_what_the_file_is_again() {
+        let (_dir, path) = on_disk("one\n");
+        let mut document = Document::open(&path).unwrap();
+        document.insert_text("longer text\n");
+        assert_eq!(document.disk_state(), DiskState::Same, "nobody else wrote");
+        document.save().unwrap();
+        assert_eq!(
+            document.disk_state(),
+            DiskState::Same,
+            "the editor's own write is not somebody else's"
+        );
+    }
+
+    #[test]
+    fn a_reload_takes_the_file_and_settles_the_comparison() {
+        let (_dir, path) = on_disk("one\ntwo\n");
+        let mut document = Document::open(&path).unwrap();
+        std::fs::write(&path, "rewritten by another editor\n").unwrap();
+        assert_eq!(document.disk_state(), DiskState::Changed);
+
+        document.reload().unwrap();
+        assert_eq!(text(&document), "rewritten by another editor\n");
+        assert_eq!(document.disk_state(), DiskState::Same);
+        assert!(!document.is_dirty(), "the buffer is the file");
+    }
+
+    #[test]
+    fn a_reload_is_one_undo_step_that_gives_the_edits_back() {
+        let (_dir, path) = on_disk("one\n");
+        let mut document = Document::open(&path).unwrap();
+        document.insert_text("mine and only mine\n");
+        let mine = text(&document);
+        std::fs::write(&path, "theirs\n").unwrap();
+
+        document.reload().unwrap();
+        assert_eq!(text(&document), "theirs\n");
+
+        assert!(document.undo(), "a reload is undoable");
+        assert_eq!(text(&document), mine, "the unsaved work comes back");
+        assert!(document.is_dirty(), "and it is unsaved again");
+        assert!(document.redo());
+        assert_eq!(text(&document), "theirs\n");
+    }
+
+    #[test]
+    fn a_reload_of_a_shorter_file_keeps_the_caret_inside_it() {
+        let (_dir, path) = on_disk("one\ntwo\nthree\nfour\n");
+        let mut document = Document::open(&path).unwrap();
+        document.goto_line(4);
+        document.move_cursor(Motion::End, 10);
+        std::fs::write(&path, "1\n").unwrap();
+
+        document.reload().unwrap();
+        let cursor = document.cursor_position();
+        assert!(cursor.line < document.line_count(), "{cursor:?}");
+        assert!(cursor.column <= char_len(&document.line(cursor.line)));
+    }
+
+    #[test]
+    fn a_reload_follows_the_line_ending_the_file_now_has() {
+        let (_dir, path) = on_disk("one\ntwo\n");
+        let mut document = Document::open(&path).unwrap();
+        assert_eq!(document.line_ending(), LineEnding::Lf);
+
+        std::fs::write(&path, "one\r\ntwo\r\nthree\r\n").unwrap();
+        document.reload().unwrap();
+        assert_eq!(document.line_ending(), LineEnding::Crlf);
+        assert!(
+            !text(&document).contains('\r'),
+            "and no carriage return reaches the buffer"
+        );
+    }
+
+    #[test]
+    fn a_reload_of_a_file_that_is_gone_leaves_the_buffer_alone() {
+        let (_dir, path) = on_disk("one\n");
+        let mut document = Document::open(&path).unwrap();
+        document.insert_text("mine\n");
+        let mine = text(&document);
+        std::fs::remove_file(&path).unwrap();
+
+        assert!(document.reload().is_err());
+        assert_eq!(text(&document), mine, "nothing was spent on the failure");
+        assert!(document.is_dirty());
+    }
+
+    #[test]
+    fn a_reload_of_a_buffer_with_no_file_is_an_error_and_not_a_panic() {
+        assert!(matches!(
+            Document::from_text("x", None).reload(),
+            Err(DocumentError::NoPath)
+        ));
     }
 }

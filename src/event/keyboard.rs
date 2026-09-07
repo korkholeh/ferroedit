@@ -252,6 +252,10 @@ pub static BINDINGS: &[Binding] = &[
     editor(KeyCode::Backspace, Command::Backspace, "Backspace"),
     editor(KeyCode::Delete, Command::Delete, "Delete"),
     editor(KeyCode::Tab, Command::InsertChar('\t'), "Tab"),
+    // `F5` is "show me what is really there" in whichever pane has focus, and
+    // in the editor what is really there is the file (ADR-043). It asks first
+    // when the buffer holds something the file does not.
+    editor(KeyCode::F(5), Command::Reload, "F5"),
     // --- sidebar ----------------------------------------------------------
     sidebar(
         FocusTarget::Explorer,

@@ -72,6 +72,7 @@ The document pane. Every motion here also has a `Shift` form that extends the se
 | `Backspace` | Delete the cluster before the cursor |
 | `Delete` | Delete the cluster after the cursor |
 | `Tab` | Insert a tab |
+| `F5` | Re-read the active file from disk |
 
 ## Explorer
 
@@ -225,6 +226,7 @@ Every item is a command, and the *Shortcut* column is the same lookup the menu i
 | File | Open… | `Ctrl+O` | anywhere |
 | File | Save | `Ctrl+S` | anywhere |
 | File | Save As… | — | — |
+| File | Reload | `F5` | Editor |
 | File | Close Tab | `Ctrl+W` | anywhere |
 | File | Quit | `Ctrl+Q` | anywhere |
 | Edit | Undo | `Ctrl+Z` | Editor |
