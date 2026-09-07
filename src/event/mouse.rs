@@ -108,6 +108,13 @@ fn left_click(app: &App, rects: &LayoutRects, at: Position) -> Option<Command> {
     if let Some(index) = menu_title_at(rects, at) {
         return Some(Command::MenuOpen(index));
     }
+    // The help screen covers the body — tabs, sidebar and editor alike — so it
+    // is tested before any of them. The menu bar above it is still reachable,
+    // which is how the screen is closed with the mouse: opening a menu moves
+    // focus, and the screen closes with it (ADR-038).
+    if rects.help.is_some_and(|help| help.contains(at)) {
+        return Some(Command::FocusPane(FocusTarget::Help));
+    }
     // The close button is inside the tab, so it has to be tested first or a
     // click on the × would only select the tab it is trying to close.
     if let Some(index) = rects.tab_closes.iter().position(|r| r.contains(at)) {
@@ -261,6 +268,9 @@ fn sidebar_scroll(app: &App, mode: SidebarMode) -> usize {
 }
 
 fn scroll(rects: &LayoutRects, at: Position, delta: i16) -> Option<Command> {
+    if rects.help.is_some_and(|help| help.contains(at)) {
+        return Some(Command::HelpScroll(delta));
+    }
     if rects.diff.is_some_and(|diff| diff.contains(at)) {
         return Some(Command::DiffScroll(delta));
     }
@@ -758,6 +768,60 @@ mod tests {
         assert_eq!(
             hit_test(&app, &rects, wheel(MouseEventKind::ScrollUp, x, y)),
             Some(Command::DiffScroll(-3))
+        );
+    }
+
+    /// The screen covers the body, tab bar and sidebar included, so nothing
+    /// under it is clickable while it is open (ADR-038).
+    fn app_with_help() -> App {
+        use crate::app::help::HelpState;
+
+        let mut app = app();
+        app.help = Some(HelpState::new(FocusTarget::Editor));
+        app.focus = FocusTarget::Help;
+        app
+    }
+
+    #[test]
+    fn clicking_the_help_screen_focuses_it_and_not_what_is_under_it() {
+        let app = app_with_help();
+        let rects = rects(&app);
+        let help = rects.help.expect("the screen is open");
+        for target in [help, rects.explorer, rects.tab_bar, rects.editor] {
+            let (x, y) = centre(target);
+            assert_eq!(
+                hit_test(&app, &rects, click(x, y)),
+                Some(Command::FocusPane(FocusTarget::Help)),
+                "a click at {x},{y} reached past the screen"
+            );
+        }
+    }
+
+    /// The menu bar is above the body, so it stays reachable — which is how
+    /// the screen is dismissed with the mouse alone.
+    #[test]
+    fn the_menu_bar_is_still_clickable_over_the_help_screen() {
+        let app = app_with_help();
+        let rects = rects(&app);
+        let (x, y) = centre(rects.menu_titles[0]);
+        assert_eq!(
+            hit_test(&app, &rects, click(x, y)),
+            Some(Command::MenuOpen(0))
+        );
+    }
+
+    #[test]
+    fn the_wheel_over_the_help_screen_scrolls_it() {
+        let app = app_with_help();
+        let rects = rects(&app);
+        let (x, y) = centre(rects.help.expect("the screen is open"));
+        assert_eq!(
+            hit_test(&app, &rects, wheel(MouseEventKind::ScrollDown, x, y)),
+            Some(Command::HelpScroll(3))
+        );
+        assert_eq!(
+            hit_test(&app, &rects, wheel(MouseEventKind::ScrollUp, x, y)),
+            Some(Command::HelpScroll(-3))
         );
     }
 

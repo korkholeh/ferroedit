@@ -100,6 +100,11 @@ pub struct LayoutRects {
     pub tab_overflow_left: Option<Rect>,
     pub tab_overflow_right: Option<Rect>,
     pub editor: Rect,
+    /// The help screen, when one is open (SPEC §6). The whole body — the
+    /// sidebar as well as the editor — because it is a screen and not a pane,
+    /// and a key table squeezed into a 40-column editor is not readable
+    /// (ADR-038). Everything under it must be hit-tested after it.
+    pub help: Option<Rect>,
     /// The diff viewer, when one is open (SPEC §36). It *is* the editor rect:
     /// the viewer covers the pane rather than splitting it, so a hit test that
     /// finds it must be made before the editor's own (ADR-037).
@@ -186,6 +191,7 @@ pub fn compute(area: Rect, app: &App) -> LayoutRects {
         tab_overflow_left: bar.overflow_left,
         tab_overflow_right: bar.overflow_right,
         editor,
+        help: app.help.as_ref().map(|_| body),
         diff: app.diff.as_ref().map(|_| editor),
         search,
         status_bar,

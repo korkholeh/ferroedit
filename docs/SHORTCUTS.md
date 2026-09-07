@@ -16,6 +16,7 @@ These resolve whatever has focus, except behind a dialog: a modal window binds i
 | Keys | Action |
 |---|---|
 | `Ctrl+Q` | Quit, asking first when a tab has unsaved changes |
+| `F1` | Show the keyboard shortcuts |
 | `F6` | Cycle focus: editor → explorer → git panel |
 | `F10` | Open the menu bar |
 | `Ctrl+B` | Switch the sidebar between explorer and git |
@@ -123,6 +124,20 @@ The read-only unified diff (SPEC §36), drawn over the editor pane. It closes as
 | `F5` | Re-read the diff |
 | `s` | Show the other side: staged or unstaged |
 
+## Help screen
+
+This screen (SPEC §6). A pager over the same tables, so its keys are the diff viewer's — two read-only panes that scrolled differently would be two things to remember instead of one.
+
+| Keys | Action |
+|---|---|
+| `Esc` / `q` / `F1` | Close the help screen |
+| `Up` | Scroll up a line |
+| `Down` | Scroll down a line |
+| `PageUp` | Scroll up a page |
+| `PageDown` / `Space` | Scroll down a page |
+| `Home` | Go to the first line |
+| `End` | Go to the last line |
+
 ## Find bar
 
 Open from `Ctrl+F` or `Ctrl+H`, and *not* modal: `Ctrl+S` still saves and the menu still opens while the caret is in it.
@@ -145,7 +160,7 @@ Open from `Ctrl+F` or `Ctrl+H`, and *not* modal: `Ctrl+S` still saves and the me
 
 ## Menu
 
-While a menu is open. The items themselves are further down, under *Menu bar*.
+While a menu is open. The items themselves are the menu bar's own, along the top of the screen.
 
 | Keys | Action |
 |---|---|
@@ -243,7 +258,7 @@ Every item is a command, and the *Shortcut* column is the same lookup the menu i
 | Git | New Branch… | — | — |
 | Git | Merge… | `m` | Git panel |
 | Git | Diff | `d` | Git panel |
-| Help | Shortcuts *(not implemented yet)* | — | — |
+| Help | Shortcuts | `F1` | anywhere |
 | Help | About | — | — |
 
 ## Mouse

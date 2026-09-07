@@ -5,6 +5,7 @@ pub mod dialog;
 pub mod diff;
 pub mod focus;
 pub mod git;
+pub mod help;
 pub mod input_field;
 pub mod notifications;
 pub mod search;
@@ -17,6 +18,7 @@ use dialog::DialogState;
 use diff::DiffState;
 use focus::FocusTarget;
 use git::GitState;
+use help::HelpState;
 use notifications::Notifications;
 use search::SearchState;
 pub use tabs::Tab;
@@ -152,6 +154,9 @@ pub struct App {
     /// over the editor pane, so `execute_command` closes it as soon as another
     /// pane takes focus (ADR-037).
     pub diff: Option<DiffState>,
+    /// The help screen, when one is open (SPEC §6). Drawn over the whole body,
+    /// so like the diff viewer it cannot outlive its own focus (ADR-038).
+    pub help: Option<HelpState>,
     pub last_click: Option<LastClick>,
     /// Size of the editor pane in the last drawn frame.
     pub editor_view: EditorView,
@@ -167,6 +172,11 @@ pub struct App {
     /// reason as `git_rows`: a diff is longer than its pane and paging through
     /// it needs the pane's height.
     pub diff_rows: u16,
+    /// Rows and columns the help screen could show in the last drawn frame.
+    /// The width matters as well as the height here, because a note wraps: the
+    /// lines are laid out against it, and so is the scroll.
+    pub help_rows: u16,
+    pub help_cols: u16,
     pub should_quit: bool,
 }
 
@@ -190,11 +200,14 @@ impl App {
             search: SearchState::default(),
             dialog: None,
             diff: None,
+            help: None,
             last_click: None,
             editor_view: EditorView::default(),
             explorer_rows: 0,
             git_rows: 0,
             diff_rows: 0,
+            help_rows: 0,
+            help_cols: 0,
             should_quit: false,
             workspace,
         }

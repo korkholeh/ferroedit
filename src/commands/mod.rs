@@ -298,6 +298,15 @@ pub enum Command {
     /// The Help menu's About entry: a message dialog with the version in it.
     ShowAbout,
 
+    /// The Help menu's Shortcuts entry, and `F1`: the key tables on screen
+    /// (SPEC §6). A pager, like the diff viewer, over `docs::sections()`.
+    ShowHelp,
+    HelpClose,
+    HelpScroll(i16),
+    HelpScrollPage(i16),
+    HelpHome,
+    HelpEnd,
+
     MenuOpen(usize),
     MenuClose,
     MenuNextMenu,
@@ -306,11 +315,6 @@ pub enum Command {
     MenuPrevItem,
     MenuActivate,
     MenuActivateItem(usize),
-
-    /// A menu entry or shortcut that is wired up but whose feature lands in a
-    /// later phase. Surfacing it as a notification is better than a key that
-    /// silently does nothing.
-    Unimplemented(&'static str),
 }
 
 impl Command {
@@ -475,6 +479,13 @@ impl Command {
             Self::Save => "Save the active file".into(),
             Self::ShowAbout => "About FerroEdit".into(),
 
+            Self::ShowHelp => "Show the keyboard shortcuts".into(),
+            Self::HelpClose => "Close the help screen".into(),
+            Self::HelpScroll(delta) => step(*delta, "Scroll down a line", "Scroll up a line"),
+            Self::HelpScrollPage(delta) => step(*delta, "Scroll down a page", "Scroll up a page"),
+            Self::HelpHome => "Go to the first line".into(),
+            Self::HelpEnd => "Go to the last line".into(),
+
             Self::MenuOpen(_) => "Open the menu bar".into(),
             Self::MenuClose => "Close the menu".into(),
             Self::MenuNextMenu => "Next menu".into(),
@@ -483,8 +494,6 @@ impl Command {
             Self::MenuPrevItem => "Previous item".into(),
             Self::MenuActivate => "Activate the item".into(),
             Self::MenuActivateItem(_) => "Activate an item".into(),
-
-            Self::Unimplemented(what) => format!("{what} — not implemented yet"),
         }
     }
 }
@@ -501,6 +510,7 @@ fn pane_name(target: FocusTarget) -> &'static str {
         FocusTarget::Dialog => "dialog",
         FocusTarget::Search => "find bar",
         FocusTarget::Diff => "diff viewer",
+        FocusTarget::Help => "help screen",
     }
 }
 
@@ -533,9 +543,10 @@ pub struct MenuDef {
 
 /// Menu bar contents (SPEC §6, §24).
 ///
-/// Every entry resolves to a real command except the Help screen, which is
-/// Phase 14; `docs/SHORTCUTS.md` is generated from this table and says so, so
-/// the list cannot quietly grow.
+/// Every entry resolves to a real command. The help screen was the last one
+/// that did not, and it landed in Phase 14 — with it went the `Unimplemented`
+/// placeholder itself, so a menu entry that does nothing is now a thing the
+/// type system has no way to express (ADR-038).
 ///
 /// There is deliberately no shortcut column here: the menu reads the key labels
 /// out of `event::keyboard::BINDINGS`, so an entry can never advertise a key
@@ -612,7 +623,7 @@ pub static MENUS: &[MenuDef] = &[
     MenuDef {
         title: "Help",
         items: &[
-            item("Shortcuts", Command::Unimplemented("Shortcuts")),
+            item("Shortcuts", Command::ShowHelp),
             item("About", Command::ShowAbout),
         ],
     },

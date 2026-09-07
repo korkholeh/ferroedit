@@ -161,6 +161,10 @@ fn sync_editor_view(app: &mut App, rects: &LayoutRects) -> bool {
     // Two rows of border, like the dialog's; paging through a diff is measured
     // against what is left.
     app.diff_rows = rects.diff.map_or(0, |diff| diff.height.saturating_sub(2));
+    // The help screen wraps its notes, so its width is geometry the scroll
+    // depends on as much as its height is (ADR-038).
+    app.help_rows = rects.help.map_or(0, |help| help.height.saturating_sub(2));
+    app.help_cols = rects.help.map_or(0, |help| help.width.saturating_sub(2));
 
     let view = EditorView {
         width: rects.editor.width,

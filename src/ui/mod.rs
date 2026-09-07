@@ -6,6 +6,7 @@ pub mod editor;
 pub mod explorer;
 pub mod field;
 pub mod git;
+pub mod help;
 pub mod layout;
 pub mod menu;
 pub mod search;
@@ -49,6 +50,10 @@ pub fn render(frame: &mut Frame, app: &App, rects: &LayoutRects, theme: &Theme) 
     // Over the editor, because that is the pane it replaces while it is open.
     if let Some(area) = rects.diff {
         diff::render(frame, app, area, theme);
+    }
+    // Over the whole body, sidebar included: it is a screen, not a pane.
+    if let Some(area) = rects.help {
+        help::render(frame, app, area, theme);
     }
     search::render(frame, app, rects, theme);
     statusbar::render(frame, app, rects.status_bar, theme);

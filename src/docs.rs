@@ -1,4 +1,5 @@
-//! `docs/SHORTCUTS.md`, generated from the tables it documents (ADR-028).
+//! `docs/SHORTCUTS.md`, and the help screen, generated from the tables they
+//! document (ADR-028, ADR-038).
 //!
 //! Phase 9's anti-drift rule: the keymap and the menu bar are data, so the
 //! document describing them is rendered from that data rather than written
@@ -11,6 +12,10 @@
 //! cannot know (typing, the mouse, terminal limits) is prose held in this file,
 //! so the generated document is the whole document and not a fragment somebody
 //! has to splice.
+//!
+//! Phase 14 added a second reader: `app::help` renders the same sections into
+//! the help screen. Both go through `sections()`, so a binding shown on screen
+//! and a binding written to the file are the same row of the same table.
 
 use std::fmt::Write as _;
 
@@ -56,6 +61,13 @@ const SECTIONS: &[(Option<FocusTarget>, &str, &str)] = &[
          and nothing here types.",
     ),
     (
+        Some(FocusTarget::Help),
+        "Help screen",
+        "This screen (SPEC §6). A pager over the same tables, so its keys are the \
+         diff viewer's — two read-only panes that scrolled differently would be \
+         two things to remember instead of one.",
+    ),
+    (
         Some(FocusTarget::Search),
         "Find bar",
         "Open from `Ctrl+F` or `Ctrl+H`, and *not* modal: `Ctrl+S` still saves and \
@@ -64,8 +76,8 @@ const SECTIONS: &[(Option<FocusTarget>, &str, &str)] = &[
     (
         Some(FocusTarget::Menu),
         "Menu",
-        "While a menu is open. The items themselves are further down, under \
-         *Menu bar*.",
+        "While a menu is open. The items themselves are the menu bar's own, \
+         along the top of the screen.",
     ),
     (
         Some(FocusTarget::Dialog),
@@ -75,6 +87,55 @@ const SECTIONS: &[(Option<FocusTarget>, &str, &str)] = &[
          the list's; a dialog with no list ignores the latter two.",
     ),
 ];
+
+/// One row of a key table: every key bound to a command, and what it does.
+///
+/// The keys are the labels the keymap carries, so a row can never advertise a
+/// key that is not bound — that is the whole point of generating both readers
+/// from the table instead of writing either by hand.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelpRow {
+    pub keys: Vec<&'static str>,
+    pub action: String,
+}
+
+impl HelpRow {
+    /// ``Ctrl+Tab / Ctrl+PageDown`` — the key column, in both readers.
+    pub fn key_label(&self) -> String {
+        self.keys.join(" / ")
+    }
+}
+
+/// One key table: the heading it is drawn under, the sentence explaining when
+/// its keys apply, and its rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelpSection {
+    pub heading: &'static str,
+    pub note: &'static str,
+    pub rows: Vec<HelpRow>,
+}
+
+/// Every key table, in reading order, with the empty ones dropped.
+///
+/// The one shared source for `docs/SHORTCUTS.md` and the help screen. A section
+/// with no bindings is left out rather than drawn as a heading over nothing.
+pub fn sections() -> Vec<HelpSection> {
+    let mut sections: Vec<HelpSection> = SECTIONS
+        .iter()
+        .map(|(focus, heading, note)| HelpSection {
+            heading,
+            note,
+            rows: rows_for(BINDINGS, *focus),
+        })
+        .collect();
+    sections.push(HelpSection {
+        heading: "Dialog with a text field",
+        note: INPUT_DIALOG_NOTE,
+        rows: rows_for(INPUT_BINDINGS, Some(FocusTarget::Dialog)),
+    });
+    sections.retain(|section| !section.rows.is_empty());
+    sections
+}
 
 const HEADER: &str = "\
 # Keyboard shortcuts
@@ -146,22 +207,9 @@ const LIMITS: &str = "\
 pub fn shortcuts_markdown() -> String {
     let mut out = String::from(HEADER);
 
-    for (focus, heading, note) in SECTIONS {
-        let rows = rows_for(BINDINGS, *focus);
-        if rows.is_empty() {
-            continue;
-        }
-        let _ = write!(out, "\n## {heading}\n\n{note}\n\n");
-        write_table(&mut out, &rows);
-    }
-
-    let input_rows = rows_for(INPUT_BINDINGS, Some(FocusTarget::Dialog));
-    if !input_rows.is_empty() {
-        let _ = write!(
-            out,
-            "\n## Dialog with a text field\n\n{INPUT_DIALOG_NOTE}\n\n"
-        );
-        write_table(&mut out, &input_rows);
+    for section in sections() {
+        let _ = write!(out, "\n## {}\n\n{}\n\n", section.heading, section.note);
+        write_table(&mut out, &section.rows);
     }
 
     let _ = write!(out, "\n{TYPING}");
@@ -176,43 +224,42 @@ pub fn shortcuts_markdown() -> String {
 /// Grouping by command rather than by key is what turns the two entries for
 /// "next tab" into one row reading ``Ctrl+Tab` / `Ctrl+PageDown``, which is how
 /// a reader wants to see them and how the menu already shows them.
-fn rows_for(
-    table: &'static [Binding],
-    focus: Option<FocusTarget>,
-) -> Vec<(Vec<&'static str>, String)> {
-    let mut rows: Vec<(Vec<&'static str>, String)> = Vec::new();
+fn rows_for(table: &'static [Binding], focus: Option<FocusTarget>) -> Vec<HelpRow> {
+    let mut rows: Vec<HelpRow> = Vec::new();
     let mut commands: Vec<&'static Command> = Vec::new();
     for binding in table.iter().filter(|b| b.focus == focus) {
         match commands.iter().position(|c| *c == &binding.command) {
             Some(index) => {
-                let labels = &mut rows[index].0;
-                if !labels.contains(&binding.label) {
-                    labels.push(binding.label);
+                let keys = &mut rows[index].keys;
+                if !keys.contains(&binding.label) {
+                    keys.push(binding.label);
                 }
             }
             None => {
                 commands.push(&binding.command);
-                rows.push((vec![binding.label], binding.command.description()));
+                rows.push(HelpRow {
+                    keys: vec![binding.label],
+                    action: binding.command.description(),
+                });
             }
         }
     }
     rows
 }
 
-fn write_table(out: &mut String, rows: &[(Vec<&str>, String)]) {
+fn write_table(out: &mut String, rows: &[HelpRow]) {
     out.push_str("| Keys | Action |\n|---|---|\n");
-    for (labels, description) in rows {
-        let keys: Vec<String> = labels.iter().map(|label| format!("`{label}`")).collect();
-        let _ = writeln!(out, "| {} | {description} |", keys.join(" / "));
+    for row in rows {
+        let keys: Vec<String> = row.keys.iter().map(|key| format!("`{key}`")).collect();
+        let _ = writeln!(out, "| {} | {} |", keys.join(" / "), row.action);
     }
 }
 
 /// The menu bar, with the key each entry advertises.
 ///
 /// The shortcut column is `shortcut_for`, the same lookup the renderer does, so
-/// this table cannot claim a key the menu does not show. An entry whose feature
-/// has not landed says so rather than being left out — the gaps are the phase
-/// plan, and hiding them would make the document look finished.
+/// this table cannot claim a key the menu does not show. Every entry resolves
+/// to a real command since Phase 14; there is no longer a placeholder to mark.
 fn write_menus(out: &mut String) {
     out.push_str(
         "\n## Menu bar\n\nEvery item is a command, and the *Shortcut* column is the same \
@@ -229,13 +276,9 @@ fn write_menus(out: &mut String) {
                 None => "—",
                 Some(b) => b.focus.map_or("anywhere", section_name),
             };
-            let pending = match item.command {
-                Command::Unimplemented(_) => " *(not implemented yet)*",
-                _ => "",
-            };
             let _ = writeln!(
                 out,
-                "| {} | {}{pending} | {shortcut} | {scope} |",
+                "| {} | {} | {shortcut} | {scope} |",
                 menu.title, item.label
             );
         }
@@ -292,32 +335,36 @@ mod tests {
         }
     }
 
-    /// Phase 9's acceptance: every menu entry resolves to a real command except
-    /// the ones whose feature is a later phase, and those are named here so
-    /// that a new gap cannot be added quietly.
-    #[test]
-    fn the_only_unimplemented_menu_entries_are_the_ones_still_owed() {
-        let pending: Vec<&str> = MENUS
-            .iter()
-            .flat_map(|menu| menu.items)
-            .filter(|item| matches!(item.command, Command::Unimplemented(_)))
-            .map(|item| item.label)
-            .collect();
-        assert_eq!(
-            pending,
-            vec!["Shortcuts"],
-            "the Git entries landed in Phase 11; the help screen is Phase 14"
-        );
-    }
-
     #[test]
     fn keys_bound_to_one_command_share_a_row() {
         let rows = rows_for(BINDINGS, None);
-        let (keys, description) = rows
+        let row = rows
             .iter()
-            .find(|(_, description)| description == "Next tab")
+            .find(|row| row.action == "Next tab")
             .expect("next tab is a global binding");
-        assert_eq!(keys, &vec!["Ctrl+Tab", "Ctrl+PageDown"]);
-        assert_eq!(description, "Next tab");
+        assert_eq!(row.keys, vec!["Ctrl+Tab", "Ctrl+PageDown"]);
+        assert_eq!(row.key_label(), "Ctrl+Tab / Ctrl+PageDown");
+    }
+
+    /// The help screen and the file read the same tables, so a section that is
+    /// in one is in the other.
+    #[test]
+    fn every_section_with_bindings_is_offered_to_both_readers() {
+        let document = shortcuts_markdown();
+        let sections = sections();
+        assert!(
+            sections
+                .iter()
+                .any(|s| s.heading == "Dialog with a text field"),
+            "the input dialog's table is one of the sections"
+        );
+        for section in sections {
+            assert!(
+                document.contains(&format!("## {}", section.heading)),
+                "{} is a section with rows but no heading in the document",
+                section.heading
+            );
+            assert!(!section.rows.is_empty(), "empty sections are dropped");
+        }
     }
 }

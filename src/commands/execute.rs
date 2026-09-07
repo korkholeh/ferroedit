@@ -6,6 +6,7 @@ use std::time::Instant;
 use crate::app::dialog::DialogState;
 use crate::app::diff::{DiffState, HORIZONTAL_STEP};
 use crate::app::focus::FocusTarget;
+use crate::app::help::HelpState;
 use crate::app::input_field::InputField;
 use crate::app::search::SearchField;
 use crate::app::tabs::active_after_close;
@@ -260,6 +261,25 @@ pub fn execute_command(app: &mut App, command: Command) {
 
         Command::ShowAbout => show_about(app),
 
+        Command::ShowHelp => show_help(app),
+        Command::HelpClose => close_help(app),
+        Command::HelpScroll(delta) => scroll_help(app, delta as isize),
+        Command::HelpScrollPage(delta) => {
+            let page = (app.help_rows as isize).max(1);
+            scroll_help(app, delta as isize * page);
+        }
+        Command::HelpHome => {
+            if let Some(help) = app.help.as_mut() {
+                help.home();
+            }
+        }
+        Command::HelpEnd => {
+            let (width, height) = help_view(app);
+            if let Some(help) = app.help.as_mut() {
+                help.end(width, height);
+            }
+        }
+
         Command::MenuOpen(index) => open_menu(app, index),
         Command::MenuClose => close_menu(app),
         Command::MenuNextMenu => step_menu(app, 1),
@@ -271,29 +291,62 @@ pub fn execute_command(app: &mut App, command: Command) {
             app.menu.item = item;
             activate_menu_item(app);
         }
-
-        Command::Unimplemented(what) => {
-            app.notifications
-                .warning(format!("{what}: not implemented yet"));
-        }
     }
 
-    // The diff viewer is drawn over the editor pane, so it cannot outlive its
-    // own focus: a command that moved focus to another pane would otherwise
-    // leave the user typing into a document they cannot see (ADR-037). The
-    // menu and a dialog draw *over* it and are allowed to, so neither closes
-    // it.
-    if app.diff.is_some()
-        && matches!(
-            app.focus,
-            FocusTarget::Editor
-                | FocusTarget::Explorer
-                | FocusTarget::GitPanel
-                | FocusTarget::Search
-        )
-    {
+    // The diff viewer is drawn over the editor pane, and the help screen over
+    // the whole body, so neither can outlive its own focus: a command that
+    // moved focus to another pane would otherwise leave the user typing into a
+    // document they cannot see (ADR-037, ADR-038). The menu and a dialog draw
+    // *over* both and are allowed to, so neither closes either.
+    let covered = matches!(
+        app.focus,
+        FocusTarget::Editor | FocusTarget::Explorer | FocusTarget::GitPanel | FocusTarget::Search
+    );
+    if covered {
         app.diff = None;
+        app.help = None;
     }
+}
+
+/// Opens the help screen on the key tables (SPEC §6).
+///
+/// It covers the body, the diff viewer included, so opening one closes the
+/// other rather than leaving a pane drawn under something it cannot be read
+/// through. Pressing it again from inside is `HelpClose`, so this only ever
+/// opens.
+fn show_help(app: &mut App) {
+    // A help screen opened from the diff viewer returns where the viewer
+    // itself would have, because the viewer is about to be closed —
+    // `dialog_return_focus` already answers that, and the menu's case too.
+    // A menu opened over the screen returns focus *to* the screen, which would
+    // leave the second one closing onto nothing.
+    let return_focus = match dialog_return_focus(app) {
+        FocusTarget::Help => FocusTarget::Editor,
+        other => other,
+    };
+    app.menu.open = None;
+    app.diff = None;
+    app.help = Some(HelpState::new(return_focus));
+    app.focus = FocusTarget::Help;
+}
+
+fn close_help(app: &mut App) {
+    if let Some(help) = app.help.take() {
+        app.focus = help.return_focus;
+    }
+}
+
+fn scroll_help(app: &mut App, delta: isize) {
+    let (width, height) = help_view(app);
+    if let Some(help) = app.help.as_mut() {
+        help.scroll_by(delta, width, height);
+    }
+}
+
+/// The help pane's size in the last drawn frame, the way every other scrolling
+/// pane reads its own (ADR-010).
+fn help_view(app: &App) -> (usize, usize) {
+    (app.help_cols as usize, app.help_rows as usize)
 }
 
 fn focus_pane(app: &mut App, target: FocusTarget) {
@@ -551,7 +604,7 @@ fn remove_tab(app: &mut App, index: usize) {
 fn dialog_return_focus(app: &App) -> FocusTarget {
     match app.focus {
         FocusTarget::Menu => app.menu.return_focus,
-        FocusTarget::Dialog | FocusTarget::Diff => FocusTarget::Editor,
+        FocusTarget::Dialog | FocusTarget::Diff | FocusTarget::Help => FocusTarget::Editor,
         other => other,
     }
 }
@@ -2416,16 +2469,6 @@ mod tests {
     }
 
     #[test]
-    fn unimplemented_commands_notify_instead_of_doing_nothing() {
-        let mut app = app();
-        execute_command(&mut app, Command::Unimplemented("Undo"));
-        assert_eq!(
-            app.notifications.current().unwrap().message,
-            "Undo: not implemented yet"
-        );
-    }
-
-    #[test]
     fn sidebar_selection_is_clamped_at_both_ends() {
         let dir = tempfile::tempdir().unwrap();
         for name in ["a.txt", "b.txt", "c.txt"] {
@@ -3675,6 +3718,95 @@ mod tests {
 
         execute_command(&mut app, Command::DialogActivate);
         assert!(app.dialog.is_none());
+        assert_eq!(app.focus, FocusTarget::Editor);
+    }
+
+    #[test]
+    fn the_help_screen_opens_on_the_keymap_and_gives_focus_back() {
+        let mut app = app();
+        app.help_rows = 10;
+        app.help_cols = 80;
+        execute_command(&mut app, Command::FocusPane(FocusTarget::Explorer));
+
+        execute_command(&mut app, Command::ShowHelp);
+        assert_eq!(app.focus, FocusTarget::Help);
+        let help = app.help.as_ref().expect("a help screen");
+        assert!(!help.sections.is_empty());
+        assert_eq!(help.return_focus, FocusTarget::Explorer);
+
+        execute_command(&mut app, Command::HelpClose);
+        assert!(app.help.is_none());
+        assert_eq!(app.focus, FocusTarget::Explorer, "back where it was opened");
+    }
+
+    #[test]
+    fn the_help_menu_entry_is_the_help_screen() {
+        let mut app = app();
+        let menu = MENUS.iter().position(|m| m.title == "Help").unwrap();
+        let item = MENUS[menu]
+            .items
+            .iter()
+            .position(|i| i.label == "Shortcuts")
+            .unwrap();
+        execute_command(&mut app, Command::MenuOpen(menu));
+        execute_command(&mut app, Command::MenuActivateItem(item));
+        assert!(app.help.is_some());
+        assert_eq!(app.focus, FocusTarget::Help);
+        assert!(app.menu.open.is_none(), "the menu closed under it");
+    }
+
+    #[test]
+    fn the_help_screen_pages_and_stops_at_both_ends() {
+        let mut app = app();
+        app.help_rows = 10;
+        app.help_cols = 80;
+        execute_command(&mut app, Command::ShowHelp);
+
+        execute_command(&mut app, Command::HelpScroll(-1));
+        assert_eq!(app.help.as_ref().unwrap().scroll, 0);
+        execute_command(&mut app, Command::HelpScrollPage(1));
+        assert_eq!(app.help.as_ref().unwrap().scroll, 10);
+        execute_command(&mut app, Command::HelpHome);
+        assert_eq!(app.help.as_ref().unwrap().scroll, 0);
+        execute_command(&mut app, Command::HelpEnd);
+        let help = app.help.as_ref().unwrap();
+        assert_eq!(help.scroll, help.lines(80).len() - 10);
+    }
+
+    /// The screen covers the body, so it cannot outlive its own focus — the
+    /// same rule the diff viewer follows (ADR-037, ADR-038).
+    #[test]
+    fn the_help_screen_closes_when_another_pane_takes_focus() {
+        let mut app = app();
+        execute_command(&mut app, Command::ShowHelp);
+        execute_command(&mut app, Command::FocusPane(FocusTarget::Editor));
+        assert!(app.help.is_none());
+        assert_eq!(app.focus, FocusTarget::Editor);
+    }
+
+    /// A menu and a dialog draw over the screen rather than replacing it, so
+    /// neither closes it — again the viewer's rule.
+    #[test]
+    fn a_menu_over_the_help_screen_leaves_it_open() {
+        let mut app = app();
+        execute_command(&mut app, Command::ShowHelp);
+        execute_command(&mut app, Command::MenuOpen(0));
+        assert!(app.help.is_some());
+        execute_command(&mut app, Command::MenuClose);
+        assert!(app.help.is_some());
+        assert_eq!(app.focus, FocusTarget::Help);
+    }
+
+    /// Opening the screen from a menu that is itself over the screen must not
+    /// leave it returning to itself.
+    #[test]
+    fn reopening_the_help_screen_from_over_itself_still_closes_to_a_pane() {
+        let mut app = app();
+        execute_command(&mut app, Command::ShowHelp);
+        execute_command(&mut app, Command::MenuOpen(0));
+        execute_command(&mut app, Command::ShowHelp);
+        execute_command(&mut app, Command::HelpClose);
+        assert!(app.help.is_none());
         assert_eq!(app.focus, FocusTarget::Editor);
     }
 

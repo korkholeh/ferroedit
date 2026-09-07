@@ -50,6 +50,7 @@ const fn binding(
 pub static BINDINGS: &[Binding] = &[
     // --- global -----------------------------------------------------------
     binding(CTRL, KeyCode::Char('q'), None, Command::Quit, "Ctrl+Q"),
+    binding(NONE, KeyCode::F(1), None, Command::ShowHelp, "F1"),
     binding(NONE, KeyCode::F(6), None, Command::CycleFocus, "F6"),
     binding(NONE, KeyCode::F(10), None, Command::MenuOpen(0), "F10"),
     binding(
@@ -389,6 +390,22 @@ pub static BINDINGS: &[Binding] = &[
     // `s` is the one key that changes what is being shown rather than where in
     // it we are: the staged diff and the unstaged one are different answers.
     diff(NONE, KeyCode::Char('s'), Command::GitDiffToggleSide, "s"),
+    // --- help screen ------------------------------------------------------
+    // The keymap on screen (SPEC §6). A pager like the diff viewer, and
+    // deliberately the same keys: two read-only panes that scrolled
+    // differently would be two things to remember instead of one.
+    help(KeyCode::Esc, Command::HelpClose, "Esc"),
+    // `q` closes it as well. Nothing here types, and it is the key a reader
+    // leaving a pager reaches for; `Ctrl+Q` still quits the editor.
+    help(KeyCode::Char('q'), Command::HelpClose, "q"),
+    help(KeyCode::F(1), Command::HelpClose, "F1"),
+    help(KeyCode::Up, Command::HelpScroll(-1), "Up"),
+    help(KeyCode::Down, Command::HelpScroll(1), "Down"),
+    help(KeyCode::PageUp, Command::HelpScrollPage(-1), "PageUp"),
+    help(KeyCode::PageDown, Command::HelpScrollPage(1), "PageDown"),
+    help(KeyCode::Char(' '), Command::HelpScrollPage(1), "Space"),
+    help(KeyCode::Home, Command::HelpHome, "Home"),
+    help(KeyCode::End, Command::HelpEnd, "End"),
 ];
 
 /// Keys of a dialog that types (SPEC §40).
@@ -426,6 +443,10 @@ const fn search(
 
 const fn diff(mods: KeyModifiers, code: KeyCode, command: Command, label: &'static str) -> Binding {
     binding(mods, code, Some(FocusTarget::Diff), command, label)
+}
+
+const fn help(code: KeyCode, command: Command, label: &'static str) -> Binding {
+    binding(NONE, code, Some(FocusTarget::Help), command, label)
 }
 
 const fn menu(code: KeyCode, command: Command, label: &'static str) -> Binding {
@@ -866,8 +887,10 @@ mod tests {
         assert_eq!(shortcut_for(&Command::Quit), Some("Ctrl+Q"));
         assert_eq!(shortcut_for(&Command::ToggleSidebarMode), Some("Ctrl+B"));
         assert_eq!(shortcut_for(&Command::Save), Some("Ctrl+S"));
-        // Not bound yet, so the menu shows no key for it.
-        assert_eq!(shortcut_for(&Command::Unimplemented("Undo")), None);
+        // Save As is deliberately unbound (ADR-008), so the menu shows no key
+        // next to it rather than one that only some terminals deliver.
+        assert_eq!(shortcut_for(&Command::SaveAsPrompt), None);
+        assert_eq!(shortcut_for(&Command::ShowHelp), Some("F1"));
         assert_eq!(shortcut_for(&Command::Undo), Some("Ctrl+Z"));
         assert_eq!(shortcut_for(&Command::Redo), Some("Ctrl+Y"));
         assert_eq!(shortcut_for(&Command::CloseTab), Some("Ctrl+W"));
@@ -1065,6 +1088,60 @@ mod tests {
 
     /// The viewer is a pager: its keys move a window, and none of them types
     /// (SPEC §36).
+    #[test]
+    fn f1_opens_the_help_screen_from_anywhere_and_closes_it_from_inside() {
+        for focus in [
+            FocusTarget::Editor,
+            FocusTarget::Explorer,
+            FocusTarget::GitPanel,
+            FocusTarget::Search,
+            FocusTarget::Diff,
+        ] {
+            assert_eq!(
+                resolve(key(KeyCode::F(1), NONE), focus),
+                Some(Command::ShowHelp),
+                "F1 does not open the help screen from {focus:?}"
+            );
+        }
+        assert_eq!(
+            resolve(key(KeyCode::F(1), NONE), FocusTarget::Help),
+            Some(Command::HelpClose),
+            "the same key closes it again"
+        );
+        // A dialog is modal, so not even F1 reaches past it (SPEC §40).
+        assert_eq!(resolve(key(KeyCode::F(1), NONE), FocusTarget::Dialog), None);
+    }
+
+    #[test]
+    fn the_help_screens_keys_page_it_and_nothing_types() {
+        for (code, command) in [
+            (KeyCode::Down, Command::HelpScroll(1)),
+            (KeyCode::Up, Command::HelpScroll(-1)),
+            (KeyCode::Char(' '), Command::HelpScrollPage(1)),
+            (KeyCode::PageUp, Command::HelpScrollPage(-1)),
+            (KeyCode::Home, Command::HelpHome),
+            (KeyCode::End, Command::HelpEnd),
+            (KeyCode::Esc, Command::HelpClose),
+            (KeyCode::Char('q'), Command::HelpClose),
+        ] {
+            assert_eq!(
+                resolve(key(code, NONE), FocusTarget::Help),
+                Some(command),
+                "{code:?}"
+            );
+        }
+        assert_eq!(
+            resolve(key(KeyCode::Char('x'), NONE), FocusTarget::Help),
+            None,
+            "an unbound letter types nothing on a read-only screen"
+        );
+        // The global table is still underneath it.
+        assert_eq!(
+            resolve(key(KeyCode::Char('q'), CTRL), FocusTarget::Help),
+            Some(Command::Quit)
+        );
+    }
+
     #[test]
     fn the_diff_viewers_keys_scroll_it_and_nothing_types() {
         assert_eq!(

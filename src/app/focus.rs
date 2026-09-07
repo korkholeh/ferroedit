@@ -16,6 +16,9 @@ pub enum FocusTarget {
     /// and left explicitly and never cycled into — and unlike it, it covers
     /// the editor pane, so it closes as soon as another pane takes focus.
     Diff,
+    /// The help screen (SPEC §6). A pager over the keymap, drawn over the whole
+    /// body, and closed by the same rule as the diff viewer (ADR-038).
+    Help,
     /// The find/replace bar. Reached by `Ctrl+F` and left by `Esc`, never by
     /// the cycle key: it is a transient tool, not one of the panes.
     Search,
@@ -44,6 +47,7 @@ impl FocusTarget {
             Self::Dialog => "Dialog",
             Self::Search => "Search",
             Self::Diff => "Diff",
+            Self::Help => "Help",
         }
     }
 }
@@ -75,5 +79,6 @@ mod tests {
         assert_eq!(FocusTarget::Dialog.next(), FocusTarget::Editor);
         assert_eq!(FocusTarget::Search.next(), FocusTarget::Editor);
         assert_eq!(FocusTarget::Diff.next(), FocusTarget::Editor);
+        assert_eq!(FocusTarget::Help.next(), FocusTarget::Editor);
     }
 }
