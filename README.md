@@ -127,7 +127,25 @@ cargo run -- /tmp/scratch.txt     # type, Ctrl+S to save, Ctrl+Q to quit
 
 ## Installation
 
-No release binaries yet. Build from source:
+Download a build from [the latest release](https://github.com/korkholeh/ferroedit/releases/latest).
+Each one is a single binary with no runtime dependencies; the Linux builds are statically
+linked against musl, so they run on any distribution.
+
+```bash
+tar -xzf ferroedit-x86_64-unknown-linux-musl.tar.gz
+./ferroedit .
+```
+
+Every archive ships a `.sha256` beside it:
+
+```bash
+sha256sum -c ferroedit-x86_64-unknown-linux-musl.tar.gz.sha256
+```
+
+Targets: `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`,
+`aarch64-apple-darwin`, `x86_64-apple-darwin`. Windows is not part of the MVP.
+
+### From source
 
 ```bash
 git clone https://github.com/korkholeh/ferroedit
@@ -135,17 +153,12 @@ cd ferroedit
 cargo build --release
 ```
 
-The binary lands in `target/release/ferroedit`.
-
-### Static Linux builds
+The binary lands in `target/release/ferroedit`. For the static Linux builds:
 
 ```bash
 cross build --release --target x86_64-unknown-linux-musl
 cross build --release --target aarch64-unknown-linux-musl
 ```
-
-Supported targets: `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`,
-`aarch64-apple-darwin`, `x86_64-apple-darwin`. Windows is not part of the MVP.
 
 ## Usage
 

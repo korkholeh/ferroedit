@@ -708,13 +708,17 @@ the per-file quit walk and green CI done)
     `aarch64-apple-darwin`. Every target the release owes now links on a machine that is
     not this one, and both Linux binaries are asserted static there.
   - 690 tests (was 689).
+  - **`v0.1.0` is published**, with `.tar.gz` and `.sha256` for all four targets, on the
+    first run `release.yml` ever had. Both Linux binaries were asserted static twice —
+    once in CI on the commit, once here on the file that actually ships. No workflow
+    artifact was produced by any of it, which is the point of ADR-049.
 
 ## In progress
 
 - Phase 14. The help screen, the responsive status bar, the watcher, the undo budget,
   reloading a buffer whose file changed, cancelling a running job, the combined-diff
   parser, the error-message pass and the per-file quit walk have landed; the README
-  screenshot and the release binaries have not.
+  screenshot has not.
 
 ## Known issues
 
@@ -1289,11 +1293,9 @@ Phase 14 continues. What is left of it, roughly in order of how much it is worth
 
 - What is still unchecked by hand, as after every phase: the real target terminals —
   iTerm2, Ghostty, Terminal.app, tmux, plain ssh.
-- The release binaries themselves. CI is green on all four targets (ADR-048) and
-  `release.yml` is no longer a stub — it drafts a GitHub Release, attaches the four
-  tarballs and their checksums, and publishes only once every target is in (ADR-049).
-  What is left is the `git tag`, which `scripts/release.sh` now does along with the bump
-  and the gate — a decision about a version number rather than about the pipeline.
+- Nothing about the release pipeline. `v0.1.0` is published with all four binaries and
+  their checksums attached, from the first run `release.yml` ever had (ADR-049), and
+  `scripts/release.sh` is what cuts the next one.
 - A worker for the explorer's directory reads is the last of the known issues above that
   Phase 14 named as its own and has not answered.
 - Reloading has no merge and does not offer one: Reload takes the file, Keep Mine keeps
