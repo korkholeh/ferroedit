@@ -43,7 +43,10 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         ]),
     };
 
-    let right = readout(app, area.width);
+    // The readout gives way to the sentence beside it, not to a constant: a
+    // notification longer than the floor is still the thing the user has to
+    // read, and the readout is the same on almost every file (ADR-039).
+    let right = readout(app, area.width, left.width() as u16);
 
     // The two halves are separate widgets over one row, so the row is split
     // rather than overdrawn: on a narrow terminal the notification is clipped
@@ -63,12 +66,12 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     );
 }
 
-/// The left half never shrinks below this. A bar that is all readout and no
-/// file name — or no notification — has stopped being a status bar, so the
-/// readout gives way rather than the sentence next to it.
+/// The left half is never given less than this, even when it has less to say.
+/// A bar that is all readout has stopped being a status bar.
 ///
 /// Twenty is `Opened src/main.rs` and a space at either end: the shortest
-/// sentence the editor actually says about a file it has just opened.
+/// sentence the editor actually says about a file it has just opened. A longer
+/// one asks for its own width instead.
 const MIN_LEFT: u16 = 20;
 
 /// Separator between the readout's pieces.
@@ -88,8 +91,9 @@ fn piece(text: String, drop_order: u8) -> Piece {
     Piece { text, drop_order }
 }
 
-/// The right-hand readout, trimmed to what the width allows.
-fn readout(app: &App, width: u16) -> String {
+/// The right-hand readout, trimmed to what is left after the sentence beside
+/// it has had what it needs.
+fn readout(app: &App, width: u16, left: u16) -> String {
     let document = app.active().map(|t| &t.document);
     // One-based, and counted in user-perceived characters rather than in chars
     // or cells, because that is the number a human arrives at (SPEC §38).
@@ -128,7 +132,7 @@ fn readout(app: &App, width: u16) -> String {
 
     // The leading and trailing spaces keep the readout off a clipped
     // notification and off the right edge.
-    let budget = width.saturating_sub(MIN_LEFT) as usize;
+    let budget = width.saturating_sub(left.max(MIN_LEFT)) as usize;
     let mut worst = 6;
     loop {
         let text = format!(

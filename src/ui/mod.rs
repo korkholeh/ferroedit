@@ -435,6 +435,19 @@ mod tests {
         );
     }
 
+    /// A sentence longer than the floor takes the room it needs: the readout
+    /// sheds for it, not only for a constant (ADR-039).
+    #[test]
+    fn a_long_notification_takes_the_width_it_needs() {
+        let mut app = app();
+        let message = "Nothing staged — finish the rebase with `git rebase --continue`";
+        app.notifications.info(message.to_string());
+        let row = draw(&app, 110, 24)[23].clone();
+        assert!(row.contains(message), "clipped: {row:?}");
+        assert!(row.contains("Ln 1, Col 1"), "{row:?}");
+        assert!(!row.contains("UTF-8"), "the readout gave way: {row:?}");
+    }
+
     /// Past every drop the position still fits, and nothing is written over
     /// anything else.
     #[test]

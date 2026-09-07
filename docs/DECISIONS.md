@@ -992,10 +992,10 @@ menu entry ahead of its feature has to add the placeholder back deliberately.
 
 **Decision.** The right-hand readout — position, selection count, encoding, line ending,
 language, branch, focus — is built as a list of pieces, each with a drop order. When the
-readout will not fit in the width left after an eighteen-column floor for the left half,
-pieces leave in that order until it does: encoding first, then the focus label, the
-language, the branch, the line ending and the selection count. The cursor position is
-never dropped.
+readout will not fit in the width left after the sentence on the left has had what it
+needs (a twenty-column floor, or its own length when that is longer), pieces leave in
+that order until it does: encoding first, then the focus label, the language, the branch,
+the line ending and the selection count. The cursor position is never dropped.
 
 **Why.** This was a known issue from Phase 3: the readout was one `format!` of fixed
 length, so at 60 columns it took its space and the notification beside it was clipped to
@@ -1010,8 +1010,140 @@ git panel; `CRLF` is the surprising one and outlives them. A selection count is 
 and is only shown while it is true, so it is nearly last. `Ln 1, Col 1` is what a status
 bar is for.
 
-**Consequence.** The readout changes width as the window does, and pieces reappear when
-the terminal grows. That movement is the cost of the fix, and it is bounded: the left
+**Consequence.** The readout changes width as the window does *and* as the notification
+beside it does — a long sentence sheds pieces on a terminal wide enough to have kept
+them. Pieces reappear when the sentence expires or the terminal grows. That movement is the cost of the fix, and it is bounded: the left
 edge of the readout is the only thing that moves, and the position stays at the right. At
 40 columns — the minimum layout width — the bar is a notification and a position, which
 is the honest content of a 40-column status bar.
+
+---
+
+## ADR-040: The filesystem watcher is a filter and a window, not a subscription
+
+**Decision.** `notify` watches the workspace root recursively on a thread of its own.
+Every event passes a filter — everything git ignores is dropped, and everything under
+`.git` except the handful of paths that decide what the panel shows — and what survives
+is held in a coalescing window before one `AppEvent::FilesChanged` is sent into the
+channel the input thread and the git worker already write to. The change says whether the
+worktree moved or only the repository did, and the refresh it causes is silent. A watcher
+that will not start is a warning on the status bar and nothing else.
+
+**Why.** Until this the explorer, the git panel and the diff viewer learned about a
+`git checkout` in another terminal on the next save, file operation or `F5`. That is the
+gap; the reason it stayed open through four git phases is that the naive version of
+closing it is worse than leaving it open. A recursive watch on a repository reports git's
+own churn — loose objects by the thousand, `index.lock` held for a millisecond — and a
+build reports every artefact it writes. Refreshing on each of those would mean a
+subprocess per file written.
+
+So the filter is the feature, not the watch. `.git` is matched on the first path
+component, which covers `refs/heads/topic` with one entry, and `index.lock` reports as
+`index` because the rename over the real file is the event that matters and reporting
+both would double every refresh. Outside `.git` the root's own ignore rules decide, which
+is exactly the rule the explorer and `git status` already follow: what git ignores is not
+on screen, so a change to it changes nothing.
+
+The window then bounds what is left. A quiet period, so one `git checkout` is one
+refresh; and a ceiling on top of it, because a writer that never goes quiet would
+otherwise keep resetting the window and the panel would say nothing until it finished.
+Only an event that survives the filter extends the quiet period — without that rule a
+build in an ignored directory would hold the window open with events nobody wants, and
+the refresh would be paced by the ceiling rather than by the change that earned it.
+
+The worktree/repository split exists for one direction only: a worktree change is also a
+`git status` change, but staging a file in another terminal is not a reason to rebuild
+the explorer's rows.
+
+Silent because a refresh nobody asked for should not talk. The status bar is where the
+answers to the user's own commands go, and a notification every time a build touched a
+file would take it away from them.
+
+Best effort because it has to be: inotify watches are a per-user resource on Linux and a
+large tree can exhaust them. Without a watcher the editor behaves exactly as it did
+before this existed, which is a working editor, and `F5` is still there.
+
+**Consequence.** One dependency and one thread, as the plan said it would cost. On Linux
+`notify` is the pure-Rust `inotify` crate, so the static musl goal of ADR-003 is
+untouched; the C `fsevent-sys` it links on macOS is not in any release target. Only the
+root `.gitignore` and `.git/info/exclude` are consulted, because `ignore` matches a path
+against a set of patterns and honouring a `.gitignore` in every subdirectory would mean
+walking for them — the cost of missing one is an extra refresh, not a wrong screen. The
+thread is detached like the input thread and notices the main loop's exit on the next
+event, which on the way out of the process is never. And an open file whose contents
+changed underneath is still not reloaded or flagged: the watcher makes that gap
+*visible*, since the tree and the panel now update while the buffer does not, and closing
+it needs a reload prompt that is its own decision.
+
+---
+
+## ADR-041: The panel names what git is in the middle of, not just a merge
+
+**Decision.** `RepoStatus::merging` becomes `operation: Option<Operation>` over Merge,
+Rebase, CherryPick and Revert, read from the four paths git records one at: `MERGE_HEAD`,
+the rebase state directory, `CHERRY_PICK_HEAD` and `REVERT_HEAD`. Only a merge is
+finished by a commit; for the other three the commit dialog does not open and the status
+bar says which `git … --continue` does finish it.
+
+**Why.** Phase 11 read one path because a merge was the only unfinished operation the
+editor could start. A rebase or a cherry-pick started in a terminal left the panel listing
+conflicted files under a title that said nothing about why they were conflicted — the
+files were right and the sentence above them was missing, which is the worst of both.
+Four `stat`s on a directory `discover` already found is the whole cost.
+
+A rebase is recognised by its state *directory* and not by `REBASE_HEAD`, which is what
+git's own status does: the directory is there for the entire rebase, and `REBASE_HEAD`
+appears only once one has stopped. Merge is tested first because it is the one the editor
+can finish, and because git will not have two of these in progress at once anyway.
+
+The commit gate follows from that. `git rebase --continue` reuses the message git already
+recorded and moves the rebase along; a commit written in the editor's dialog would be
+neither of those things. Refusing and naming the command is more useful than a dialog that
+produces the wrong commit.
+
+**Consequence.** `cherry-picking` is long enough that `[cherry-picking]` fills a
+32-column panel title on its own and pushes the changed-file count off the end. Finishing
+a rebase or a cherry-pick still means leaving the editor for a terminal; making them
+first-class is a phase of its own and SPEC §35 does not ask for it. And the watcher of
+ADR-040 is what makes this worth having at all: the panel now notices the rebase starting.
+
+---
+
+## ADR-042: The undo stack has a byte budget, and the newest step is exempt
+
+**Decision.** The undo stack carries a running weight — each step's text plus its own
+place on the stack — and drops its oldest steps once that weight passes sixteen
+megabytes. The newest step is never dropped, whatever it weighs. The save point moves
+down by what was dropped, and is discarded when it was one of them.
+
+**Why.** SPEC §16 asks for O(edited bytes) and never O(document), and that is what the
+history has always delivered. It is still unbounded: a session that edits a hundred
+megabytes holds a hundred megabytes, and nothing gives it back. Sixteen megabytes is
+sixteen million characters of *edited* text, which no typing session reaches — the budget
+is not for the typist, it is for the session that pastes and rewrites for hours.
+
+Counting each step's own header as well as its text is what makes the budget mean
+something. A million one-character steps hold almost no text and a great deal of `Vec`,
+and a budget that saw only the text would not see them at all.
+
+The newest step is exempt because the alternative is an editor that cannot undo the paste
+that just happened. A twenty-megabyte paste against a sixteen-megabyte budget is exactly
+the case, and losing it would be a data-loss bug wearing a memory-limit costume.
+
+The save point is a stack *height*, so dropping the bottom of the stack moves every
+height down by the same amount. A save point below the new floor names a state that can
+no longer be undone back to, so it is discarded rather than left pointing at the wrong
+one — a document that differed from disk and still looked clean would be worse than one
+that always looks modified.
+
+The weight is kept incrementally rather than recomputed. The budget is checked after
+every keystroke, and walking the stack to do it would be O(steps) per character; a test
+asserts the running figure against a full recount across typing, coalescing, pastes and
+pops, because a number kept by hand is a number that can drift.
+
+**Consequence.** Undo history can now be lost without the user doing anything, and
+nothing says so — `Nothing to undo` is the only surface, which is the same sentence an
+empty stack has always produced. The budget is a constant, not a setting: the field
+behind it exists so the tests can use a small one, and nobody has asked for the option.
+The redo stack is fed from the undo stack, so the pair is bounded by twice the budget
+rather than by it.
