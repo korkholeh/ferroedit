@@ -13,6 +13,7 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use super::diff::{Diff, DiffSide};
 use super::models::{Branch, GitError, RepoStatus};
 use super::parser::parse_status;
 
@@ -197,6 +198,34 @@ impl GitService {
             }
             Err(other) => Err(other),
         }
+    }
+
+    /// The unified diff of one file, worktree or staged (SPEC §36).
+    ///
+    /// `--no-color` because the viewer colours the lines itself from what they
+    /// are, and a user with `color.ui = always` would otherwise get escape
+    /// sequences drawn as text. `--no-ext-diff` because `diff.external` is
+    /// somebody else's program writing somebody else's format, and the parser
+    /// here reads git's. Both are passed rather than inherited, for the reason
+    /// `--untracked-files` is: a configuration file must not change what the
+    /// editor shows.
+    ///
+    /// The path goes in as an `OsString` pathspec after `--`, so a file called
+    /// `-x` is a file and not an option (ADR-032).
+    pub fn diff(&self, path: &Path, side: DiffSide) -> Result<Diff, GitError> {
+        let mut args: Vec<OsString> = ["diff", "--no-color", "--no-ext-diff"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        if side == DiffSide::Staged {
+            args.push(OsString::from("--cached"));
+        }
+        args.push(OsString::from("--"));
+        args.push(path.as_os_str().to_os_string());
+        let output = run_os(&self.root, &args, TIMEOUT)?;
+        // Lossy on purpose: a diff is text to look at, and one line of a file
+        // in another encoding must not cost the user the rest of the hunk.
+        Ok(Diff::parse(&String::from_utf8_lossy(&output)))
     }
 
     /// `git add -- <paths>` (SPEC §31).
@@ -1004,5 +1033,83 @@ mod tests {
             }
             other => panic!("expected a failure, got {other:?}"),
         }
+    }
+
+    /// SPEC §36: the two sides answer different questions, and the service has
+    /// to be able to ask each of them.
+    #[test]
+    fn the_worktree_and_the_staged_diff_of_a_file_are_different_answers() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "one\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+        repo.write("a.txt", "two\n");
+        repo.run(&["add", "a.txt"]);
+        repo.write("a.txt", "three\n");
+
+        let service = GitService::discover(repo.path()).unwrap();
+        let path = Path::new("a.txt");
+
+        let worktree = service.diff(path, DiffSide::Worktree).unwrap();
+        let staged = service.diff(path, DiffSide::Staged).unwrap();
+        let text = |diff: &Diff| {
+            diff.lines
+                .iter()
+                .map(|line| line.text.clone())
+                .collect::<Vec<_>>()
+        };
+        assert!(text(&worktree).contains(&"+three".to_string()));
+        assert!(text(&worktree).contains(&"-two".to_string()));
+        assert!(text(&staged).contains(&"+two".to_string()));
+        assert!(text(&staged).contains(&"-one".to_string()));
+        assert_eq!((worktree.added, worktree.removed), (1, 1));
+    }
+
+    #[test]
+    fn a_file_with_nothing_to_show_diffs_as_nothing() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "one\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+
+        let service = GitService::discover(repo.path()).unwrap();
+        assert!(service
+            .diff(Path::new("a.txt"), DiffSide::Worktree)
+            .unwrap()
+            .is_empty());
+    }
+
+    /// A pathspec that begins with a dash is a file name, not an option
+    /// (ADR-032) — and `--` in front of it is what makes that true.
+    #[test]
+    fn a_file_whose_name_looks_like_an_option_is_still_a_file() {
+        let repo = TestRepo::new();
+        repo.write("-x.txt", "one\n");
+        repo.run(&["add", "--", "-x.txt"]);
+        repo.commit("init");
+        repo.write("-x.txt", "two\n");
+
+        let service = GitService::discover(repo.path()).unwrap();
+        let diff = service
+            .diff(Path::new("-x.txt"), DiffSide::Worktree)
+            .unwrap();
+        assert_eq!((diff.added, diff.removed), (1, 1));
+    }
+
+    /// The diff runs from the repository root, so a path git printed in a
+    /// status is the path that can be handed straight back to it.
+    #[test]
+    fn a_path_in_a_subdirectory_is_relative_to_the_root() {
+        let repo = TestRepo::new();
+        repo.write("src/a.txt", "one\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+        repo.write("src/a.txt", "two\n");
+
+        let service = GitService::discover(&repo.path().join("src")).unwrap();
+        let diff = service
+            .diff(Path::new("src/a.txt"), DiffSide::Worktree)
+            .unwrap();
+        assert_eq!((diff.added, diff.removed), (1, 1));
     }
 }
