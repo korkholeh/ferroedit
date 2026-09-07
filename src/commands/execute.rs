@@ -18,7 +18,7 @@ use crate::filesystem;
 use crate::filesystem::watcher::FsChange;
 use crate::git::diff::DiffSide;
 use crate::git::models::{Change, Operation};
-use crate::git::{GitJob, JobOutcome};
+use crate::git::{GitJob, JobFailure, JobOutcome};
 
 pub fn execute_command(app: &mut App, command: Command) {
     log::debug!("command {command:?} (focus {:?})", app.focus);
@@ -70,6 +70,7 @@ pub fn execute_command(app: &mut App, command: Command) {
         Command::SubmitCommit => log::warn!("a commit was submitted with no dialog open"),
         Command::GitCommit(message) => git_commit(app, &message),
         Command::GitPull => start_git_job(app, GitJob::Pull),
+        Command::GitCancel => cancel_git_jobs(app),
         Command::GitPush => start_git_job(app, GitJob::Push),
         Command::GitBranchPrompt => prompt_branch(app, false),
         Command::GitMergePrompt => prompt_branch(app, true),
@@ -1584,13 +1585,32 @@ fn start_git_job(app: &mut App, job: GitJob) {
     }
 }
 
+/// Stops what the worker is doing (ADR-044).
+///
+/// Says how many were asked about rather than waiting for them: the answers
+/// arrive one at a time and each says its own name, but a key press that
+/// produced no word at all would look like one that did not register.
+fn cancel_git_jobs(app: &mut App) {
+    match app.git.cancel() {
+        0 => app.notifications.info("Nothing to cancel"),
+        1 => app.notifications.info("Cancelling…"),
+        n => app
+            .notifications
+            .info(format!("Cancelling {n} operations…")),
+    }
+}
+
 /// Reports a finished job and re-reads the status it changed.
 fn finish_git_job(app: &mut App, outcome: &JobOutcome) {
     app.git.finish(outcome);
+    let what = outcome.job.label();
     match &outcome.result {
         Ok(said) => app.notifications.info(said.clone()),
-        Err(why) => {
-            let what = outcome.job.label();
+        // Not an error: nothing went wrong, the user asked (ADR-044). It is
+        // still said, because a job that stops without a word is one the user
+        // has to guess about.
+        Err(JobFailure::Cancelled) => app.notifications.info(format!("{what} cancelled")),
+        Err(JobFailure::Failed(why)) => {
             app.notifications.error(format!("{what} failed: {why}"));
         }
     }
@@ -4202,6 +4222,58 @@ mod tests {
             app.notifications.current().unwrap().message,
             "No file to reload"
         );
+    }
+
+    // --- cancelling a job (ADR-044) ----------------------------------------
+
+    #[test]
+    fn cancelling_with_nothing_running_says_so() {
+        let mut app = app();
+        execute_command(&mut app, Command::GitCancel);
+        assert_eq!(
+            app.notifications.current().unwrap().message,
+            "Nothing to cancel"
+        );
+    }
+
+    #[test]
+    fn cancelling_names_how_many_it_is_stopping() {
+        let mut app = app();
+        app.git.pretend_running(GitJob::Push);
+        execute_command(&mut app, Command::GitCancel);
+        assert_eq!(app.notifications.current().unwrap().message, "Cancelling…");
+
+        app.git.pretend_running(GitJob::Pull);
+        execute_command(&mut app, Command::GitCancel);
+        assert_eq!(
+            app.notifications.current().unwrap().message,
+            "Cancelling 2 operations…"
+        );
+    }
+
+    /// A cancelled job is not a failed one: nothing went wrong and the editor
+    /// must not say `Push failed:` about a stop the user asked for.
+    #[test]
+    fn a_cancelled_job_is_reported_as_stopped_and_not_as_broken() {
+        let mut app = app();
+        app.git.pretend_running(GitJob::Push);
+        execute_command(
+            &mut app,
+            Command::GitJobFinished(JobOutcome {
+                id: crate::git::JobId(0),
+                job: GitJob::Push,
+                result: Err(JobFailure::Cancelled),
+            }),
+        );
+
+        let said = app.notifications.current().unwrap();
+        assert_eq!(said.message, "Push cancelled");
+        assert_eq!(
+            said.kind,
+            crate::app::notifications::NotificationKind::Info,
+            "not the error colour"
+        );
+        assert!(app.git.busy().is_none(), "and the queue drained");
     }
 
     /// The watcher's whole point: a change made outside the editor is on

@@ -10,4 +10,4 @@ pub mod worker;
 
 pub use diff::Diff;
 pub use service::GitService;
-pub use worker::{GitJob, GitWorker, JobId, JobOutcome};
+pub use worker::{GitJob, GitWorker, JobFailure, JobId, JobOutcome};

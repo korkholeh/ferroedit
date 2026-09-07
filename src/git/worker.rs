@@ -12,7 +12,9 @@
 //! on Tokio.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 use std::thread;
 
 use super::models::GitError;
@@ -23,6 +25,38 @@ use crate::event::AppEvent;
 /// produced it even when several are outstanding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct JobId(pub u64);
+
+/// Whether the job holding it has been cancelled (ADR-044).
+///
+/// A watermark rather than a flag per job: `cancel` means "everything
+/// outstanding", and outstanding is exactly "submitted before now", so one
+/// number answers for the job in git's hands *and* for the ones still on the
+/// queue behind it. A job submitted after the cancel has a higher id and is
+/// unaffected, which is what makes pressing Esc and pushing again do the
+/// obvious thing rather than racing.
+#[derive(Debug, Clone)]
+pub struct CancelToken {
+    id: JobId,
+    /// Every job whose id is below this has been cancelled.
+    below: Arc<AtomicU64>,
+}
+
+impl CancelToken {
+    pub fn is_cancelled(&self) -> bool {
+        self.id.0 < self.below.load(Ordering::Relaxed)
+    }
+}
+
+/// Why a job did not produce an answer.
+///
+/// Cancellation is not a failure and must not be reported as one: nothing went
+/// wrong, the user asked, and `Push failed: cancelled` would be the editor
+/// blaming git for doing as it was told.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobFailure {
+    Cancelled,
+    Failed(String),
+}
 
 /// What the worker can be asked to do (SPEC §31, §32, §34).
 ///
@@ -108,7 +142,7 @@ impl GitJob {
 pub struct JobOutcome {
     pub id: JobId,
     pub job: GitJob,
-    pub result: Result<String, String>,
+    pub result: Result<String, JobFailure>,
 }
 
 /// The handle the editor keeps: a queue into the thread, and the counter that
@@ -117,6 +151,10 @@ pub struct JobOutcome {
 pub struct GitWorker {
     jobs: Sender<Task>,
     next_id: u64,
+    /// The cancel watermark, shared with the thread. Written here and read
+    /// there, which is why it is an atomic and not a message: a cancel that
+    /// queued behind the job it is meant to stop would never arrive.
+    cancelled_below: Arc<AtomicU64>,
 }
 
 type Task = (JobId, GitJob, GitService);
@@ -127,13 +165,16 @@ impl GitWorker {
     /// timeout on the receive.
     pub fn spawn(events: Sender<AppEvent>) -> Self {
         let (tx, rx) = mpsc::channel();
+        let cancelled_below = Arc::new(AtomicU64::new(0));
+        let theirs = Arc::clone(&cancelled_below);
         thread::Builder::new()
             .name("git".into())
-            .spawn(move || worker_loop(&rx, &events))
+            .spawn(move || worker_loop(&rx, &events, &theirs))
             .expect("failed to spawn the git worker thread");
         Self {
             jobs: tx,
             next_id: 0,
+            cancelled_below,
         }
     }
 
@@ -154,6 +195,16 @@ impl GitWorker {
             }
         }
     }
+
+    /// Cancels everything submitted so far (ADR-044).
+    ///
+    /// Every outstanding job still answers — the one running is killed and
+    /// reports itself cancelled, and the ones queued behind it are answered
+    /// without being run — so the panel's queue drains through the door it
+    /// always drains through rather than being cleared behind its back.
+    pub fn cancel_all(&self) {
+        self.cancelled_below.store(self.next_id, Ordering::Relaxed);
+    }
 }
 
 /// One job at a time, in the order they were submitted.
@@ -162,10 +213,25 @@ impl GitWorker {
 /// and two of them racing for it would produce a failure the user did not cause
 /// — a commit queued behind the staging it depends on has to see that staging
 /// finish.
-fn worker_loop(jobs: &Receiver<Task>, events: &Sender<AppEvent>) {
+fn worker_loop(jobs: &Receiver<Task>, events: &Sender<AppEvent>, cancelled_below: &Arc<AtomicU64>) {
     while let Ok((id, job, service)) = jobs.recv() {
-        log::info!("git job {id:?}: {}", job.label());
-        let result = run_job(&service, &job).map_err(reason);
+        let token = CancelToken {
+            id,
+            below: Arc::clone(cancelled_below),
+        };
+        // A job cancelled while it sat on the queue is answered without being
+        // run: the point of stopping a stuck push is that the three things
+        // queued behind it do not then happen anyway.
+        let result = if token.is_cancelled() {
+            log::info!(
+                "git job {id:?}: {} was cancelled before it ran",
+                job.label()
+            );
+            Err(JobFailure::Cancelled)
+        } else {
+            log::info!("git job {id:?}: {}", job.label());
+            run_job(&service.with_cancel(token), &job).map_err(failure)
+        };
         let outcome = JobOutcome { id, job, result };
         if events.send(AppEvent::GitJob(outcome)).is_err() {
             // The editor has shut down; there is nobody left to answer.
@@ -182,11 +248,14 @@ fn worker_loop(jobs: &Receiver<Task>, events: &Sender<AppEvent>) {
 /// user asked for as an unstage. The variant's *reason* is the half that is
 /// about what went wrong; the half about which subprocess ran is already in the
 /// log.
-fn reason(err: GitError) -> String {
+fn failure(err: GitError) -> JobFailure {
     match err {
-        GitError::Failed { message, .. } => message,
-        GitError::TimedOut { seconds, .. } => format!("it did not finish in {seconds}s"),
-        other => other.to_string(),
+        GitError::Cancelled => JobFailure::Cancelled,
+        GitError::Failed { message, .. } => JobFailure::Failed(message),
+        GitError::TimedOut { seconds, .. } => {
+            JobFailure::Failed(format!("it did not finish in {seconds}s"))
+        }
+        other => JobFailure::Failed(other.to_string()),
     }
 }
 
@@ -279,11 +348,119 @@ mod tests {
         worker.submit(GitJob::Push, service).unwrap();
 
         let answer = outcome(&rx);
-        let message = answer.result.unwrap_err();
+        let JobFailure::Failed(message) = answer.result.unwrap_err() else {
+            panic!("a push with no remote fails, it is not cancelled");
+        };
         assert!(message.contains("destination"), "{message}");
         // The reason only: `App` puts `Push failed: ` in front of it, and
         // git's own `git push failed:` would then be there twice.
         assert!(!message.contains("failed"), "{message}");
+    }
+
+    /// The point of stopping a stuck push: the things queued behind it must
+    /// not then happen anyway (ADR-044).
+    #[test]
+    fn a_cancel_answers_the_queued_jobs_without_running_them() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "a\n");
+        let service = GitService::discover(repo.path()).unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        let mut worker = GitWorker::spawn(tx);
+        // Cancelled before the thread can pick either of them up in the common
+        // case, and harmless when it wins the race: `StageAll` on this repo is
+        // idempotent, and the assertion is about the *answers*.
+        let first = worker.submit(GitJob::StageAll, service.clone()).unwrap();
+        let second = worker.submit(GitJob::UnstageAll, service).unwrap();
+        worker.cancel_all();
+
+        for expected in [first, second] {
+            let answer = outcome(&rx);
+            assert_eq!(answer.id, expected);
+            assert_eq!(
+                answer.result,
+                Err(JobFailure::Cancelled),
+                "a cancelled job still answers, so the queue drains"
+            );
+        }
+    }
+
+    /// The half that needs a real subprocess: a cancel kills the child rather
+    /// than waiting for it. A `pre-commit` hook that sleeps is the one way to
+    /// make git take a knowably long time without a network.
+    #[test]
+    fn cancelling_kills_the_child_instead_of_waiting_for_it() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.run(&["add", "."]);
+        let hook = repo.path().join(".git/hooks/pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\nsleep 30\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let service = GitService::discover(repo.path()).unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        let mut worker = GitWorker::spawn(tx);
+        let id = worker
+            .submit(GitJob::Commit("slow".into()), service)
+            .unwrap();
+        // Long enough for the thread to have spawned git and git the hook.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let started = std::time::Instant::now();
+        worker.cancel_all();
+
+        let answer = outcome(&rx);
+        assert_eq!(answer.id, id);
+        assert_eq!(answer.result, Err(JobFailure::Cancelled));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "it was killed, not waited out: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            !repo.try_run(&["rev-parse", "HEAD"]).stderr.is_empty(),
+            "and the commit the hook was holding up did not happen"
+        );
+    }
+
+    /// A cancel is a watermark, not a switch: it stops what was outstanding
+    /// when it was asked for and nothing submitted afterwards.
+    #[test]
+    fn a_job_submitted_after_a_cancel_still_runs() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "a\n");
+        let service = GitService::discover(repo.path()).unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        let mut worker = GitWorker::spawn(tx);
+        worker.submit(GitJob::UnstageAll, service.clone()).unwrap();
+        worker.cancel_all();
+        let after = worker.submit(GitJob::StageAll, service).unwrap();
+
+        assert_eq!(outcome(&rx).result, Err(JobFailure::Cancelled));
+        let answer = outcome(&rx);
+        assert_eq!(answer.id, after);
+        assert_eq!(answer.result, Ok("Staged every change".into()));
+        assert_eq!(repo.short_status(), vec!["A  a.txt"]);
+    }
+
+    /// Nothing outstanding: a cancel is a no-op rather than something that
+    /// poisons the next job.
+    #[test]
+    fn cancelling_an_idle_worker_costs_the_next_job_nothing() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "a\n");
+        let service = GitService::discover(repo.path()).unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        let mut worker = GitWorker::spawn(tx);
+        worker.cancel_all();
+        worker.submit(GitJob::StageAll, service).unwrap();
+
+        assert_eq!(outcome(&rx).result, Ok("Staged every change".into()));
     }
 
     #[test]

@@ -129,6 +129,22 @@ impl GitState {
         }
     }
 
+    /// Asks the worker to stop everything outstanding (ADR-044).
+    ///
+    /// Returns how many jobs it was asked about, which is what the caller says
+    /// on the status bar — the outcomes themselves arrive later and one by one,
+    /// and `Nothing to cancel` has to be answerable before any of them do.
+    ///
+    /// The queue is *not* cleared here. Every cancelled job still comes back
+    /// through `finish`, so the panel's idea of what is outstanding is only
+    /// ever changed by an answer, never by a request.
+    pub fn cancel(&mut self) -> usize {
+        if let Some(worker) = self.worker.as_ref() {
+            worker.cancel_all();
+        }
+        self.running.len()
+    }
+
     /// Takes a finished job off the queue.
     ///
     /// An id that is not there is not an error: the repository can be
@@ -416,6 +432,27 @@ mod tests {
             "a panel with no worker refuses rather than spawning one"
         );
         assert_eq!(git.busy(), None);
+    }
+
+    #[test]
+    fn a_cancel_with_no_worker_and_nothing_running_reports_nothing_to_stop() {
+        let mut git = GitState::default();
+        assert_eq!(git.cancel(), 0);
+    }
+
+    /// A cancel is a request, not an answer: the queue is only ever shortened
+    /// by an outcome coming back through `finish` (ADR-044).
+    #[test]
+    fn a_cancel_does_not_clear_the_queue_behind_the_panels_back() {
+        let mut git = GitState::default();
+        git.pretend_running(GitJob::Push);
+        git.pretend_running(GitJob::Pull);
+        assert_eq!(git.cancel(), 2);
+        assert_eq!(
+            git.busy(),
+            Some("Pushing…"),
+            "still outstanding until the answers arrive"
+        );
     }
 
     #[test]

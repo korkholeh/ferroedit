@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use super::diff::{Diff, DiffSide};
 use super::models::{Branch, GitError, Operation, RepoStatus};
 use super::parser::parse_status;
+use super::worker::CancelToken;
 
 /// How long any one git invocation may take before it is killed.
 ///
@@ -51,9 +52,38 @@ pub struct GitService {
     /// records as files in it — `MERGE_HEAD` above all — can be read with a
     /// `stat` rather than with another subprocess on every status.
     git_dir: PathBuf,
+    /// Whether the job this service is running for has been cancelled
+    /// (ADR-044). `None` on the UI thread's copy: a status read is milliseconds
+    /// and has nothing to stop.
+    cancel: Option<CancelToken>,
 }
 
 impl GitService {
+    /// The same repository, tied to one job's cancel token (ADR-044).
+    ///
+    /// Taken by value and returned: the worker already owns the copy that
+    /// travelled with the job, so this is a move rather than another clone of
+    /// two paths.
+    #[must_use]
+    pub fn with_cancel(mut self, cancel: CancelToken) -> Self {
+        self.cancel = Some(cancel);
+        self
+    }
+
+    /// Runs one git command in the repository root, under this service's
+    /// cancel token if it has one.
+    fn git(&self, args: &[&str]) -> Result<Vec<u8>, GitError> {
+        run_with(&self.root, args, TIMEOUT, self.cancel.as_ref())
+    }
+
+    fn git_for(&self, args: &[&str], timeout: Duration) -> Result<Vec<u8>, GitError> {
+        run_with(&self.root, args, timeout, self.cancel.as_ref())
+    }
+
+    fn git_os(&self, args: &[OsString]) -> Result<Vec<u8>, GitError> {
+        run_os(&self.root, args, TIMEOUT, self.cancel.as_ref())
+    }
+
     /// Finds the repository `dir` is in (SPEC §28).
     ///
     /// Every failure of `rev-parse` is reported as "not a repository": that is
@@ -91,6 +121,7 @@ impl GitService {
         Ok(Self {
             root: PathBuf::from(root),
             git_dir: PathBuf::from(git_dir),
+            cancel: None,
         })
     }
 
@@ -105,16 +136,13 @@ impl GitService {
     /// silently omits new files, and "the file I just created is not there" is
     /// not a state worth reproducing.
     pub fn status(&self) -> Result<RepoStatus, GitError> {
-        let output = run(
-            &self.root,
-            &[
-                "status",
-                "--porcelain=v2",
-                "--branch",
-                "--untracked-files=normal",
-                "-z",
-            ],
-        )?;
+        let output = self.git(&[
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "--untracked-files=normal",
+            "-z",
+        ])?;
         let mut status = parse_status(&output)?;
         // A `stat`, not a subprocess: git records an unfinished operation as a
         // file in the repository directory, and the panel has to say so even
@@ -150,15 +178,12 @@ impl GitService {
     /// nothing has to be recovered from a display form that changes with the
     /// terminal width and with the user's `color.branch`.
     pub fn branches(&self) -> Result<Vec<Branch>, GitError> {
-        let output = run(
-            &self.root,
-            &[
-                "for-each-ref",
-                "--format=%(HEAD)%00%(refname:short)%00%(refname)",
-                "refs/heads",
-                "refs/remotes",
-            ],
-        )?;
+        let output = self.git(&[
+            "for-each-ref",
+            "--format=%(HEAD)%00%(refname:short)%00%(refname)",
+            "refs/heads",
+            "refs/remotes",
+        ])?;
         let text = String::from_utf8_lossy(&output);
         let mut branches = Vec::new();
         for line in text.lines() {
@@ -190,14 +215,14 @@ impl GitService {
     /// that is also a path cannot be read as a request to discard that file's
     /// changes.
     pub fn switch_to(&self, branch: &str) -> Result<String, GitError> {
-        run(&self.root, &["switch", branch])?;
+        self.git(&["switch", branch])?;
         Ok(String::new())
     }
 
     /// Creates a branch at `HEAD` and switches to it — what "New Branch" means
     /// when it is reached from a picker of branches to be on.
     pub fn create_branch(&self, name: &str) -> Result<String, GitError> {
-        run(&self.root, &["switch", "-c", name])?;
+        self.git(&["switch", "-c", name])?;
         Ok(String::new())
     }
 
@@ -209,7 +234,7 @@ impl GitService {
     /// status is what decides which of the two happened, because it is the same
     /// question the panel will ask a moment later anyway.
     pub fn merge(&self, branch: &str) -> Result<String, GitError> {
-        match run(&self.root, &["merge", "--no-edit", branch]) {
+        match self.git(&["merge", "--no-edit", branch]) {
             Ok(output) => Ok(first_line_of(&output)),
             Err(GitError::Failed { command, message }) => {
                 if self.status().is_ok_and(|status| status.conflicts() > 0) {
@@ -243,7 +268,7 @@ impl GitService {
         }
         args.push(OsString::from("--"));
         args.push(path.as_os_str().to_os_string());
-        let output = run_os(&self.root, &args, TIMEOUT)?;
+        let output = self.git_os(&args)?;
         // Lossy on purpose: a diff is text to look at, and one line of a file
         // in another encoding must not cost the user the rest of the hunk.
         Ok(Diff::parse(&String::from_utf8_lossy(&output)))
@@ -271,12 +296,12 @@ impl GitService {
 
     /// Everything the status lists, in one go — new files included.
     pub fn stage_all(&self) -> Result<String, GitError> {
-        run(&self.root, &["add", "-A"])?;
+        self.git(&["add", "-A"])?;
         Ok(String::new())
     }
 
     pub fn unstage_all(&self) -> Result<String, GitError> {
-        run(&self.root, &["reset", "-q", "--"])?;
+        self.git(&["reset", "-q", "--"])?;
         Ok(String::new())
     }
 
@@ -288,7 +313,7 @@ impl GitService {
     /// the case `GIT_TERMINAL_PROMPT=0` turns into an error message instead of
     /// a hang.
     pub fn commit(&self, message: &str) -> Result<String, GitError> {
-        let output = run(&self.root, &["commit", "-m", message])?;
+        let output = self.git(&["commit", "-m", message])?;
         Ok(first_line_of(&output))
     }
 
@@ -301,7 +326,7 @@ impl GitService {
     /// configuration is git's own clear complaint about exactly that, which is
     /// better advice than anything this editor could substitute for it.
     pub fn pull(&self) -> Result<String, GitError> {
-        match run_with(&self.root, &["pull", "--no-edit"], NETWORK_TIMEOUT) {
+        match self.git_for(&["pull", "--no-edit"], NETWORK_TIMEOUT) {
             Ok(output) => Ok(first_line_of(&output)),
             Err(GitError::Failed { command, message }) => {
                 if self.status().is_ok_and(|status| status.conflicts() > 0) {
@@ -315,7 +340,7 @@ impl GitService {
 
     /// `git push`, with whatever `push.default` and the branch's upstream say.
     pub fn push(&self) -> Result<String, GitError> {
-        let output = run_with(&self.root, &["push"], NETWORK_TIMEOUT)?;
+        let output = self.git_for(&["push"], NETWORK_TIMEOUT)?;
         Ok(first_line_of(&output))
     }
 
@@ -328,19 +353,28 @@ impl GitService {
         }
         let mut args: Vec<OsString> = head.iter().map(OsString::from).collect();
         args.extend(paths.iter().map(|path| path.as_os_str().to_os_string()));
-        run_os(&self.root, &args, TIMEOUT)?;
+        self.git_os(&args)?;
         Ok(String::new())
     }
 }
 
-/// Runs one git command and returns its standard output.
+/// Runs one git command in a directory, with nothing to cancel it.
+///
+/// The free form exists for `discover`, which has no `GitService` yet — every
+/// other caller goes through the methods above so that the job's cancel token
+/// travels with the command it is meant to stop.
 fn run(dir: &Path, args: &[&str]) -> Result<Vec<u8>, GitError> {
-    run_with(dir, args, TIMEOUT)
+    run_with(dir, args, TIMEOUT, None)
 }
 
-fn run_with(dir: &Path, args: &[&str], timeout: Duration) -> Result<Vec<u8>, GitError> {
+fn run_with(
+    dir: &Path,
+    args: &[&str],
+    timeout: Duration,
+    cancel: Option<&CancelToken>,
+) -> Result<Vec<u8>, GitError> {
     let args: Vec<OsString> = args.iter().map(OsString::from).collect();
-    run_os(dir, &args, timeout)
+    run_os(dir, &args, timeout, cancel)
 }
 
 /// The one place a git subprocess is spawned.
@@ -348,7 +382,12 @@ fn run_with(dir: &Path, args: &[&str], timeout: Duration) -> Result<Vec<u8>, Git
 /// Arguments are `OsString` rather than `&str` because a pathspec is a path,
 /// and a path is bytes: transcoding one through `String` on the way to `git
 /// add` would stage a different file than the status listed (ADR-032).
-fn run_os(dir: &Path, args: &[OsString], timeout: Duration) -> Result<Vec<u8>, GitError> {
+fn run_os(
+    dir: &Path,
+    args: &[OsString],
+    timeout: Duration,
+    cancel: Option<&CancelToken>,
+) -> Result<Vec<u8>, GitError> {
     let started = Instant::now();
     let mut command = Command::new("git");
     command
@@ -387,7 +426,7 @@ fn run_os(dir: &Path, args: &[OsString], timeout: Duration) -> Result<Vec<u8>, G
         || "git".to_string(),
         |arg| arg.to_string_lossy().into_owned(),
     );
-    let (status, stdout, stderr) = wait_with_timeout(child, &name, timeout)?;
+    let (status, stdout, stderr) = wait_with_timeout(child, &name, timeout, cancel)?;
     log::debug!(
         "git {name} finished in {:?} ({} bytes)",
         started.elapsed(),
@@ -411,6 +450,7 @@ fn wait_with_timeout(
     mut child: Child,
     name: &str,
     timeout: Duration,
+    cancel: Option<&CancelToken>,
 ) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), GitError> {
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -421,6 +461,15 @@ fn wait_with_timeout(
     let status = loop {
         match child.try_wait()? {
             Some(status) => break status,
+            // Checked on the same poll as the deadline, so a cancel costs at
+            // most one `POLL` — and a kill is the only way to stop a `git push`
+            // that is blocked on a socket (ADR-044).
+            None if cancel.is_some_and(CancelToken::is_cancelled) => {
+                log::info!("git {name} was cancelled; killing it");
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(GitError::Cancelled);
+            }
             None if Instant::now() >= deadline => {
                 log::error!("git {name} timed out; killing it");
                 let _ = child.kill();

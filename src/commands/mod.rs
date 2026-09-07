@@ -121,6 +121,10 @@ pub enum Command {
     GitCommit(String),
     GitPull,
     GitPush,
+    /// Stops everything the worker has outstanding (ADR-044): the job in git's
+    /// hands is killed, and the ones queued behind it are answered without
+    /// being run.
+    GitCancel,
     /// Opens the branch picker (SPEC §33). `GitSwitchBranch` is what moves
     /// `HEAD`.
     GitBranchPrompt,
@@ -389,6 +393,7 @@ impl Command {
             Self::GitCommit(_) => "Commit what is staged".into(),
             Self::GitPull => "Pull from the upstream branch".into(),
             Self::GitPush => "Push to the upstream branch".into(),
+            Self::GitCancel => "Stop the running git operation".into(),
             Self::GitBranchPrompt => "Switch branch — opens a picker".into(),
             Self::GitSwitchBranch(_) => "Switch to a branch".into(),
             Self::GitNewBranchPrompt => "New branch — asks for a name".into(),
@@ -638,6 +643,7 @@ pub static MENUS: &[MenuDef] = &[
             item("Commit…", Command::GitCommitPrompt),
             item("Pull", Command::GitPull),
             item("Push", Command::GitPush),
+            item("Cancel", Command::GitCancel),
             item("Branch…", Command::GitBranchPrompt),
             item("New Branch…", Command::GitNewBranchPrompt),
             item("Merge…", Command::GitMergePrompt),

@@ -98,6 +98,7 @@ The changed-files list (SPEC §31, §33, §35). Everything that writes to the re
 | `Up` | Move the sidebar selection up |
 | `Down` | Move the sidebar selection down |
 | `F5` | Re-read the repository status |
+| `Esc` | Stop the running git operation |
 | `Enter` | Open the selected changed file |
 | `Space` | Stage the selected file, or unstage it when it is staged |
 | `a` | Stage every change |
@@ -256,6 +257,7 @@ Every item is a command, and the *Shortcut* column is the same lookup the menu i
 | Git | Commit… | `c` | Git panel |
 | Git | Pull | — | — |
 | Git | Push | — | — |
+| Git | Cancel | `Esc` | Git panel |
 | Git | Branch… | `b` | Git panel |
 | Git | New Branch… | — | — |
 | Git | Merge… | `m` | Git panel |

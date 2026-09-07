@@ -299,6 +299,15 @@ pub static BINDINGS: &[Binding] = &[
         Command::GitRefresh,
         "F5",
     ),
+    // `Esc` stops what the worker is doing (ADR-044). It is the key the panel
+    // can spare — nothing here types, and there is no bar to close — and it is
+    // the one every other "stop this" in the editor already is.
+    sidebar(
+        FocusTarget::GitPanel,
+        KeyCode::Esc,
+        Command::GitCancel,
+        "Esc",
+    ),
     // Enter opens the file, as it does in the explorer. Space is the toggle
     // because it is the key a list of checkboxes has trained everyone to press,
     // and the panel is a list of things that are either staged or not.

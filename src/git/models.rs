@@ -276,4 +276,9 @@ pub enum GitError {
     /// the user has to finish.
     #[error("conflicts — resolve them in the panel, then commit")]
     Conflicted,
+    /// The user stopped it (SPEC §34). Not a failure either: nothing went
+    /// wrong, and the repository is in whatever state the killed command left
+    /// it in — which the status re-read after every job is what reports.
+    #[error("cancelled")]
+    Cancelled,
 }
