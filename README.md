@@ -189,6 +189,22 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 ```
 
+### Cutting a release
+
+`scripts/release.sh` bumps the version in `Cargo.toml`, refreshes `Cargo.lock`, runs the
+three commands above and then commits and tags. It pushes nothing: everything it does is
+undoable with `git reset` and `git tag -d`, and the push is the first step that is not.
+
+```bash
+scripts/release.sh patch --dry-run   # 0.1.0 -> 0.1.1, and stop
+scripts/release.sh minor             # bump, gate, commit, tag
+git push origin main v0.2.0          # this is what publishes
+```
+
+Pushing the tag starts [`release.yml`](.github/workflows/release.yml), which drafts a
+GitHub Release, builds the four targets, attaches a tarball and a checksum for each, and
+publishes only once all four are in.
+
 Docs: [ARCHITECTURE](docs/ARCHITECTURE.md) · [PLAN](docs/PLAN.md) ·
 [ROADMAP](docs/ROADMAP.md) · [PROGRESS](docs/PROGRESS.md) ·
 [DECISIONS](docs/DECISIONS.md)

@@ -1292,8 +1292,8 @@ Phase 14 continues. What is left of it, roughly in order of how much it is worth
 - The release binaries themselves. CI is green on all four targets (ADR-048) and
   `release.yml` is no longer a stub — it drafts a GitHub Release, attaches the four
   tarballs and their checksums, and publishes only once every target is in (ADR-049).
-  What is left is the `git tag`, which is a decision about a version number rather than
-  about the pipeline.
+  What is left is the `git tag`, which `scripts/release.sh` now does along with the bump
+  and the gate — a decision about a version number rather than about the pipeline.
 - A worker for the explorer's directory reads is the last of the known issues above that
   Phase 14 named as its own and has not answered.
 - Reloading has no merge and does not offer one: Reload takes the file, Keep Mine keeps
