@@ -1480,3 +1480,47 @@ to a branch: a release has to name a version, and a manual run of it must be the
 thing as the tag push, not a second kind of release. Nothing publishes automatically
 without a `v*` tag, so the release binaries the phase owes are one `git tag` away rather
 than one workflow away — which is the right place for that decision to sit.
+
+---
+
+## ADR-050: The macOS binaries are signed and notarised, and cannot be stapled
+
+**Decision.** `release.yml` signs each macOS build with a Developer ID Application
+certificate under the hardened runtime and submits it to Apple's notary service before it
+is packaged. The step is conditional on `MACOS_CERT_P12` being configured, but a
+*half*-configured signing setup fails the job rather than falling through: with the
+certificate present, every other secret must be too. A macOS build going out unsigned
+says so as a warning in the run.
+
+**Why.** The first release proved the thing everyone assumes is a Finder problem is not.
+A quarantined binary with no Developer ID is killed on `execve` — from a terminal, with
+no dialog in the shell at all, just `exit 137`:
+
+```
+$ xattr -w com.apple.quarantine "0081;…;Safari;…" ferroedit
+$ ./ferroedit --version
+exit=137          # 128 + 9, SIGKILL
+```
+
+Rust's linker ad-hoc signs on arm64, which is what lets the binary run at all on Apple
+silicon, but `TeamIdentifier=not set` and `spctl` answers `rejected`. Quarantine is
+applied by browsers; a `curl | tar` install never carries it, which is why the same file
+runs perfectly one way and dies the other.
+
+**A bare Mach-O cannot be stapled.** `xcrun stapler` writes its ticket into an `.app`, a
+`.dmg` or a `.pkg`, and an executable has nowhere to put one. Notarisation still works —
+Gatekeeper looks the ticket up online — so the cost is that a first run of a
+browser-downloaded binary needs the network. Shipping a `.pkg` would remove even that,
+at the price of turning "unpack and run" into an installer; for a terminal editor mostly
+fetched with `curl`, that trade is not worth making yet.
+
+The keychain is created per run, unlocked with a throwaway password, and deleted by a
+trap on exit, so the private key does not outlive the step even when signing fails.
+`set-key-partition-list` is not optional: without it `codesign` blocks on a UI prompt no
+runner can answer, which presents as a hung job rather than an error.
+
+**Consequence.** Releases now depend on six secrets and on Apple's notary service being
+up; `--wait --timeout 30m` bounds the second. A notarisation that is rejected prints the
+submission log before failing, because the status alone is one opaque word. The
+`spctl` check at the end is informative only — an unstapled binary is assessed online,
+and a release must not fail on Apple's CDN being briefly slow.

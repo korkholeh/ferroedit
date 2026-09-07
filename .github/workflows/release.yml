@@ -61,6 +61,10 @@ jobs:
     name: ${{ matrix.target }}
     needs: draft
     runs-on: ${{ matrix.runner }}
+    env:
+      # `secrets` cannot be read from an `if:`, so the one question that decides
+      # whether the macOS binaries are signed is answered once, here.
+      SIGNING: ${{ secrets.MACOS_CERT_P12 != '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -106,6 +110,99 @@ jobs:
           if file "$f" | grep -q "interpreter"; then
             echo "::error::$f has an ELF interpreter, so it is not static"; exit 1
           fi
+      # macOS kills a quarantined binary that carries no Developer ID — from a
+      # terminal, not only from Finder — so a downloaded build has to be signed
+      # and notarised to be runnable at all (ADR-050).
+      #
+      # A bare Mach-O cannot be stapled: `stapler` writes its ticket into an
+      # .app, .dmg or .pkg and there is nowhere in an executable to put one. The
+      # notarisation is still what matters — Gatekeeper looks the ticket up
+      # online — and the `curl | tar` install never carries quarantine at all.
+      - name: Sign and notarize
+        if: runner.os == 'macOS' && env.SIGNING == 'true'
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/ferroedit"
+
+          # Half-configured signing must not fall through to shipping an
+          # unsigned binary: a typo in one secret name would otherwise surface
+          # as a Gatekeeper dialog on someone else's Mac.
+          for name in MACOS_CERT_PASSWORD MACOS_SIGN_IDENTITY \
+                      NOTARY_KEY_P8 NOTARY_KEY_ID NOTARY_ISSUER_ID; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is empty while MACOS_CERT_P12 is set"
+              exit 1
+            fi
+          done
+
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          cert="$RUNNER_TEMP/cert.p12"
+          notary_key="$RUNNER_TEMP/notary.p8"
+
+          # Whatever happens, the private key does not outlive the step.
+          cleanup() {
+            rm -f "$cert" "$notary_key"
+            security delete-keychain "$keychain" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 900 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+
+          printf '%s' "$MACOS_CERT_P12" | base64 --decode > "$cert"
+          security import "$cert" -k "$keychain" -P "$MACOS_CERT_PASSWORD" \
+            -f pkcs12 -T /usr/bin/codesign
+          # Without this, codesign blocks on a UI prompt no runner can answer.
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$keychain_password" "$keychain" > /dev/null
+          security list-keychain -d user -s "$keychain" login.keychain-db
+
+          # `--options runtime` is the hardened runtime, which notarisation
+          # refuses a binary without.
+          codesign --force --timestamp --options runtime \
+            --sign "$MACOS_SIGN_IDENTITY" "$bin"
+          codesign --verify --strict --verbose=2 "$bin"
+
+          printf '%s' "$NOTARY_KEY_P8" | base64 --decode > "$notary_key"
+          ditto -c -k "$bin" "$RUNNER_TEMP/notarize.zip"
+
+          # `--wait` blocks until Apple has answered, and notarytool exits
+          # non-zero on anything but Accepted.
+          set +e
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+            --key "$notary_key" \
+            --key-id "$NOTARY_KEY_ID" \
+            --issuer "$NOTARY_ISSUER_ID" \
+            --wait --timeout 30m \
+            --output-format json > "$RUNNER_TEMP/notary.json"
+          status=$?
+          set -e
+          cat "$RUNNER_TEMP/notary.json"
+          if [ $status -ne 0 ]; then
+            # The submission log is the only thing that says *why*; without it a
+            # rejection is one opaque word.
+            id=$(jq -r '.id // empty' < "$RUNNER_TEMP/notary.json")
+            [ -n "$id" ] && xcrun notarytool log "$id" \
+              --key "$notary_key" --key-id "$NOTARY_KEY_ID" \
+              --issuer "$NOTARY_ISSUER_ID" || true
+            exit 1
+          fi
+
+          echo "--- what Gatekeeper makes of it ---"
+          codesign -dvv "$bin" 2>&1
+          # Informative only: an unstapled binary is assessed online, and a
+          # release must not fail on Apple's CDN being briefly slow.
+          spctl -a -vvv -t execute "$bin" 2>&1 || true
+
       - name: Package
         run: |
           mkdir -p dist
@@ -119,6 +216,11 @@ jobs:
           else
             shasum -a 256 ferroedit-${{ matrix.target }}.tar.gz > ferroedit-${{ matrix.target }}.tar.gz.sha256
           fi
+      - name: Warn that macOS is going out unsigned
+        if: runner.os == 'macOS' && env.SIGNING != 'true'
+        run: |
+          echo '::warning::No MACOS_CERT_P12 secret, so ${{ matrix.target }} is neither signed nor notarised. macOS kills such a binary if it was downloaded through a browser; xattr -d com.apple.quarantine is the way round it.'
+
       - name: Attach to the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
