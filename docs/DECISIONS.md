@@ -1442,3 +1442,41 @@ falling back to the developer's own name, which is what makes this class of bug 
 until CI. The static-link assertion now accepts two spellings, so a future `file` that
 invents a third will need it added — the interpreter check is there so that a wording
 change alone cannot turn a dynamic binary green.
+
+---
+
+## ADR-049: A release is a GitHub Release, drafted first and published last
+
+**Decision.** `release.yml` uploads no workflow artifacts. A tag push (or a manual run
+naming an existing tag) drafts a GitHub Release, four matrix jobs build their target and
+attach a `.tar.gz` and a `.sha256` to that draft with `gh release upload --clobber`, and
+a final job publishes it. The static-link assertion `ci.yml` makes is repeated here, on
+the binaries that actually ship.
+
+**Why.** The Phase 0 stub packaged the four binaries and handed them to
+`actions/upload-artifact`, which is the wrong end of the pipe. An artifact expires after
+ninety days, needs a GitHub login to download, and is reachable only by finding the run
+that produced it — none of which describes what someone wants when they are looking for a
+build. A release asset is a stable public URL on the repository's front page.
+
+Drafting first is what makes a four-job matrix safe to publish from. The alternative —
+each job creating-or-reusing the release as it finishes — races on the first two to
+arrive, and worse, makes the release visible the moment the fastest target lands, so a
+Linux build that failed leaves a published release that quietly has no Linux binary in
+it. Here `publish` needs every build, so a half-finished run leaves a draft only the
+maintainer can see.
+
+`--clobber` because re-running one failed target has to be a normal thing to do; without
+it the upload fails on the asset a previous attempt already put there.
+
+The static assertion is duplicated rather than trusted from CI because CI checks the
+commit and this checks the artefact. They are the same code today and the failure they
+guard against — shipping a musl binary that turns out to need a dynamic loader — is worth
+catching on the file that is actually going out.
+
+**Consequence.** The workflow needs `permissions: contents: write`, which the default
+read-only token does not have. `workflow_dispatch` now takes a tag rather than defaulting
+to a branch: a release has to name a version, and a manual run of it must be the same
+thing as the tag push, not a second kind of release. Nothing publishes automatically
+without a `v*` tag, so the release binaries the phase owes are one `git tag` away rather
+than one workflow away — which is the right place for that decision to sit.

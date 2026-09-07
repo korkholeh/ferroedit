@@ -1289,9 +1289,11 @@ Phase 14 continues. What is left of it, roughly in order of how much it is worth
 
 - What is still unchecked by hand, as after every phase: the real target terminals —
   iTerm2, Ghostty, Terminal.app, tmux, plain ssh.
-- The release binaries themselves. CI is green on all four targets (ADR-048), so what
-  is left is tagging a version and letting `release.yml` — still the Phase 0 stub — do
-  something with it.
+- The release binaries themselves. CI is green on all four targets (ADR-048) and
+  `release.yml` is no longer a stub — it drafts a GitHub Release, attaches the four
+  tarballs and their checksums, and publishes only once every target is in (ADR-049).
+  What is left is the `git tag`, which is a decision about a version number rather than
+  about the pipeline.
 - A worker for the explorer's directory reads is the last of the known issues above that
   Phase 14 named as its own and has not answered.
 - Reloading has no merge and does not offer one: Reload takes the file, Keep Mine keeps

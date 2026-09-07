@@ -1,18 +1,65 @@
 name: Release
 
-# Stub: builds and uploads the four release binaries for a version tag.
-# Kept in lockstep with the `targets` job in ci.yml.
+# Builds the four release binaries for a version tag and attaches them to the
+# GitHub Release for that tag. Kept in lockstep with the `targets` job in
+# ci.yml.
+#
+# Nothing here uploads a workflow artifact. An artifact expires, needs a login
+# to fetch and is invisible from the repository's front page; a release asset is
+# the thing a user is actually looking for (ADR-049). The release is drafted
+# first and published last, so a run that fails halfway leaves a draft only the
+# maintainer can see rather than a release missing half its binaries.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: An existing tag to build and release, e.g. v0.1.0
+        required: true
 
 env:
   CARGO_TERM_COLOR: always
 
+# `gh release` writes to the repository, which the default read-only token
+# cannot do.
+permissions:
+  contents: write
+
 jobs:
+  draft:
+    name: draft the release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.name.outputs.tag }}
+    steps:
+      # Tags and not just the commit: a manual run checks out the default
+      # branch, and the verification below has to be able to see the tag it was
+      # given.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: The tag being released
+        id: name
+        # A tag push names itself; a manual run is told which tag to build, so
+        # that re-running a release is not a different thing from making one.
+        run: echo "tag=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+      - name: Create the draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag='${{ steps.name.outputs.tag }}'
+          git rev-parse -q --verify "refs/tags/$tag" >/dev/null || {
+            echo "::error::$tag is not a tag in this repository"; exit 1; }
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "$tag already has a release; its assets will be replaced"
+          else
+            gh release create "$tag" --draft --generate-notes --title "$tag"
+          fi
+
   build:
     name: ${{ matrix.target }}
+    needs: draft
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -32,6 +79,8 @@ jobs:
             cross: false
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.draft.outputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -45,12 +94,49 @@ jobs:
           else
             cargo build --release --target ${{ matrix.target }}
           fi
+      # The same assertion ci.yml makes, on the binaries that actually ship:
+      # a dynamically linked musl build is the one failure worth catching twice.
+      - name: Assert the Linux binary is static
+        if: matrix.cross
+        run: |
+          f=target/${{ matrix.target }}/release/ferroedit
+          file "$f"
+          file "$f" | grep -Eq "statically linked|static-pie linked" || {
+            echo "::error::$f is not statically linked"; exit 1; }
+          if file "$f" | grep -q "interpreter"; then
+            echo "::error::$f has an ELF interpreter, so it is not static"; exit 1
+          fi
       - name: Package
         run: |
           mkdir -p dist
           tar -czf dist/ferroedit-${{ matrix.target }}.tar.gz \
             -C target/${{ matrix.target }}/release ferroedit
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ferroedit-${{ matrix.target }}
-          path: dist/*.tar.gz
+          cd dist
+          # macOS has `shasum`, Linux has `sha256sum`, and the checksum is worth
+          # more than picking a side.
+          if command -v sha256sum >/dev/null; then
+            sha256sum ferroedit-${{ matrix.target }}.tar.gz > ferroedit-${{ matrix.target }}.tar.gz.sha256
+          else
+            shasum -a 256 ferroedit-${{ matrix.target }}.tar.gz > ferroedit-${{ matrix.target }}.tar.gz.sha256
+          fi
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # `--clobber` so re-running one target replaces its asset instead of
+        # failing on the one already there.
+        run: gh release upload '${{ needs.draft.outputs.tag }}' dist/* --clobber
+
+  # Only once every target is attached. A run that fails halfway leaves the
+  # draft where it is, so a release is never visible missing half its binaries.
+  publish:
+    name: publish the release
+    needs: [draft, build]
+    runs-on: ubuntu-latest
+    steps:
+      # No checkout: `GH_REPO` is what tells `gh` which repository this is, and
+      # there is no source to read here.
+      - name: Undraft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release edit '${{ needs.draft.outputs.tag }}' --draft=false
