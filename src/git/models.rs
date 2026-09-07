@@ -167,13 +167,69 @@ pub struct RepoStatus {
     pub entries: Vec<FileEntry>,
     /// Whether `MAX_ENTRIES` cut the list short.
     pub truncated: bool,
-    /// A merge that stopped and has not been committed — `MERGE_HEAD` exists
-    /// (SPEC §35).
+    /// An operation git started and has not finished (SPEC §35).
     ///
     /// It is not the same as "there are conflicts": once every conflicted file
-    /// has been staged the conflicts are gone and the merge is still waiting
-    /// for its commit, which is the state a user is most likely to be lost in.
-    pub merging: bool,
+    /// has been staged the conflicts are gone and the operation is still
+    /// waiting to be finished, which is the state a user is most likely to be
+    /// lost in.
+    pub operation: Option<Operation>,
+}
+
+/// Something git is in the middle of, recorded in the repository directory.
+///
+/// Phase 11 read only `MERGE_HEAD`, so a stopped rebase or cherry-pick left the
+/// panel listing conflicted files under a title that said nothing about why
+/// they were conflicted. All four are the same `exists()` on a path `discover`
+/// already knows (ADR-041).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Operation {
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+}
+
+impl Operation {
+    /// What the panel title and the status bar call it, mid-sentence.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Merge => "merging",
+            Self::Rebase => "rebasing",
+            Self::CherryPick => "cherry-picking",
+            Self::Revert => "reverting",
+        }
+    }
+
+    /// The noun for it, for a sentence that names it.
+    pub fn noun(self) -> &'static str {
+        match self {
+            Self::Merge => "merge",
+            Self::Rebase => "rebase",
+            Self::CherryPick => "cherry-pick",
+            Self::Revert => "revert",
+        }
+    }
+
+    /// The `git` command that finishes it, for the sentence that says so.
+    pub fn continue_command(self) -> &'static str {
+        match self {
+            Self::Merge => "git commit",
+            Self::Rebase => "git rebase --continue",
+            Self::CherryPick => "git cherry-pick --continue",
+            Self::Revert => "git revert --continue",
+        }
+    }
+
+    /// Whether the editor's own Commit finishes it.
+    ///
+    /// A merge is completed by a commit and the dialog is the way to write one.
+    /// The other three are driven by `git <verb> --continue`, which reuses the
+    /// recorded message and is not something an editor should imitate with a
+    /// commit of its own.
+    pub fn finished_by_commit(self) -> bool {
+        self == Self::Merge
+    }
 }
 
 impl RepoStatus {

@@ -17,7 +17,7 @@ use crate::editor::document::Document;
 use crate::filesystem;
 use crate::filesystem::watcher::FsChange;
 use crate::git::diff::DiffSide;
-use crate::git::models::Change;
+use crate::git::models::{Change, Operation};
 use crate::git::{GitJob, JobOutcome};
 
 pub fn execute_command(app: &mut App, command: Command) {
@@ -1373,15 +1373,26 @@ fn prompt_commit(app: &mut App) {
         return;
     }
     // A merge that has been resolved still has to be committed even when the
-    // resolution staged nothing new, so `merging` is the second way in.
+    // resolution staged nothing new, so an unfinished merge is the second way
+    // in. Only a merge: a stopped rebase or cherry-pick is finished by
+    // `git <verb> --continue`, which reuses the message git already recorded,
+    // and a commit written here would not be that (ADR-041).
     if app.git.status.conflicts() > 0 {
         app.notifications
             .warning("Resolve the conflicts before committing");
         return;
     }
+    let operation = app.git.status.operation;
     let staged = app.git.staged_count();
-    if staged == 0 && !app.git.status.merging {
-        app.notifications.info("Nothing staged to commit");
+    if staged == 0 && !operation.is_some_and(Operation::finished_by_commit) {
+        app.notifications.info(match operation {
+            Some(operation) => format!(
+                "Nothing staged — finish the {} with `{}`",
+                operation.noun(),
+                operation.continue_command()
+            ),
+            None => "Nothing staged to commit".to_string(),
+        });
         return;
     }
     let return_focus = dialog_return_focus(app);
@@ -1952,7 +1963,11 @@ mod tests {
         assert!(app.dialog.is_none(), "no markers, no question");
         settle(&mut app, &rx);
         assert_eq!(app.git.status.conflicts(), 0);
-        assert!(app.git.status.merging, "and the merge still wants a commit");
+        assert_eq!(
+            app.git.status.operation,
+            Some(Operation::Merge),
+            "and the merge still wants a commit"
+        );
     }
 
     /// SPEC §35: a merge that stops shows its conflicted files, and the panel
@@ -1966,7 +1981,7 @@ mod tests {
         assert_eq!(app.git.busy(), Some("Merging…"));
         settle(&mut app, &rx);
 
-        assert!(app.git.status.merging);
+        assert_eq!(app.git.status.operation, Some(Operation::Merge));
         assert_eq!(app.git.entries().len(), 1);
         assert!(app.git.entries()[0].is_conflicted());
         assert_eq!(app.git.summary(), "main (merging) — 1 change, 1 conflict");
@@ -2000,7 +2015,7 @@ mod tests {
 
         assert!(repo.path().join("b.txt").exists());
         assert!(app.git.status.is_clean());
-        assert!(!app.git.status.merging);
+        assert_eq!(app.git.status.operation, None);
     }
 
     /// Committing is refused while anything is still conflicted, and allowed
@@ -2032,7 +2047,7 @@ mod tests {
         execute_command(&mut app, Command::DialogActivate);
         settle(&mut app, &rx);
 
-        assert!(!app.git.status.merging);
+        assert_eq!(app.git.status.operation, None);
         assert!(app.git.status.is_clean());
         assert_eq!(
             repo.run(&["log", "-1", "--pretty=%s"]).trim(),
@@ -3736,6 +3751,41 @@ mod tests {
         execute_command(&mut app, Command::DialogActivate);
         assert!(app.dialog.is_none());
         assert_eq!(app.focus, FocusTarget::Editor);
+    }
+
+    /// A stopped rebase is not finished by writing a commit here, so the
+    /// dialog says what does finish it instead of opening (ADR-041).
+    #[test]
+    fn a_stopped_rebase_is_not_offered_a_commit_dialog() {
+        let repo = crate::git::testing::TestRepo::new();
+        repo.write("c.txt", "base\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+        repo.run(&["checkout", "-q", "-b", "other"]);
+        repo.write("c.txt", "theirs\n");
+        repo.commit("theirs");
+        repo.run(&["checkout", "-q", "main"]);
+        repo.write("c.txt", "ours\n");
+        repo.commit("ours");
+        let (mut app, _rx) = app_over(&repo);
+
+        assert!(!repo.try_run(&["rebase", "other"]).status.success());
+        // Resolve it, so the conflict gate is not what is being tested.
+        repo.write("c.txt", "resolved\n");
+        repo.run(&["add", "c.txt"]);
+        execute_command(&mut app, Command::GitRefresh);
+        assert_eq!(app.git.status.operation, Some(Operation::Rebase));
+
+        // Nothing new to stage: the resolution is already in the index, and
+        // `staged_count` counts it, so the dialog opens. Unstage it to reach
+        // the branch that matters.
+        repo.run(&["restore", "--staged", "c.txt"]);
+        repo.run(&["checkout", "--", "c.txt"]);
+        execute_command(&mut app, Command::GitRefresh);
+        execute_command(&mut app, Command::GitCommitPrompt);
+        assert!(app.dialog.is_none(), "a rebase is not committed from here");
+        let said = app.notifications.current().unwrap().message.clone();
+        assert!(said.contains("git rebase --continue"), "{said}");
     }
 
     /// The watcher's whole point: a change made outside the editor is on

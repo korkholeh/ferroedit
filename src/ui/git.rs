@@ -97,11 +97,11 @@ fn title(app: &App) -> String {
     }
     let status = &app.git.status;
     let mut title = format!(" Git — {}", status.head_label());
-    // A stopped merge outranks the ahead/behind counts: it is a state the user
-    // has to finish, and it stays true after every conflicted file has been
-    // staged (SPEC §35).
-    if status.merging {
-        title.push_str(" [merging]");
+    // An unfinished operation outranks the ahead/behind counts: it is a state
+    // the user has to finish, and it stays true after every conflicted file has
+    // been staged (SPEC §35).
+    if let Some(operation) = status.operation {
+        title.push_str(&format!(" [{}]", operation.label()));
     }
     if status.ahead > 0 {
         title.push_str(&format!(" ↑{}", status.ahead));

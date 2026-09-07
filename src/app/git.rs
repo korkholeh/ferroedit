@@ -194,9 +194,11 @@ impl GitState {
             GitAvailability::NotARepository => "Not a Git repository".to_string(),
             GitAvailability::Unavailable(why) => why.clone(),
             GitAvailability::Repository => {
-                let head = match self.status.merging {
-                    true => format!("{} (merging)", self.status.head_label()),
-                    false => self.status.head_label().to_string(),
+                let head = match self.status.operation {
+                    Some(operation) => {
+                        format!("{} ({})", self.status.head_label(), operation.label())
+                    }
+                    None => self.status.head_label().to_string(),
                 };
                 let conflicts = match self.status.conflicts() {
                     0 => String::new(),

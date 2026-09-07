@@ -139,16 +139,31 @@ mod tests {
         assert!(screen.contains("Git — Pushing…"), "{screen}");
     }
 
-    /// SPEC §35: a stopped merge is a state the user has to finish, and it
-    /// outranks the ahead/behind counts in the title.
+    /// SPEC §35: an unfinished operation is a state the user has to finish,
+    /// and it outranks the ahead/behind counts in the title. All four are
+    /// named, not only the merge Phase 11 could see (ADR-041).
     #[test]
-    fn the_panel_says_when_a_merge_is_unfinished() {
-        let mut app = app();
-        app.git.status.merging = true;
-        // Wide enough for the sidebar to reach its maximum: at 80 columns the
-        // panel is twenty cells and the title is clipped mid-word.
-        let screen = draw(&app, 130, 24).join("\n");
-        assert!(screen.contains("Git — main [merging] (4)"), "{screen}");
+    fn the_panel_says_when_an_operation_is_unfinished() {
+        use crate::git::models::Operation;
+        for (operation, label) in [
+            (Operation::Merge, "merging"),
+            (Operation::Rebase, "rebasing"),
+            (Operation::CherryPick, "cherry-picking"),
+            (Operation::Revert, "reverting"),
+        ] {
+            let mut app = app();
+            app.git.status.operation = Some(operation);
+            // Wide enough for the sidebar to reach its maximum: at 80 columns
+            // the panel is twenty cells and the title is clipped mid-word.
+            let screen = draw(&app, 130, 24).join("\n");
+            // The count is asserted only for the labels that leave room for
+            // it: the sidebar caps at 32 cells and `[cherry-picking]` fills
+            // the title on its own.
+            assert!(
+                screen.contains(&format!("Git — main [{label}]")),
+                "{screen}"
+            );
+        }
     }
 
     /// SPEC §33's picker: every branch, `*` on the one HEAD is on, and the

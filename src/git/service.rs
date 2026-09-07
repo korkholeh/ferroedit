@@ -14,7 +14,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::diff::{Diff, DiffSide};
-use super::models::{Branch, GitError, RepoStatus};
+use super::models::{Branch, GitError, Operation, RepoStatus};
 use super::parser::parse_status;
 
 /// How long any one git invocation may take before it is killed.
@@ -116,11 +116,32 @@ impl GitService {
             ],
         )?;
         let mut status = parse_status(&output)?;
-        // A `stat`, not a subprocess: git records a stopped merge as a file in
-        // the repository directory, and the panel has to say so even after
-        // every conflicted file has been staged (SPEC §35).
-        status.merging = self.git_dir.join("MERGE_HEAD").exists();
+        // A `stat`, not a subprocess: git records an unfinished operation as a
+        // file in the repository directory, and the panel has to say so even
+        // after every conflicted file has been staged (SPEC §35).
+        status.operation = self.operation();
         Ok(status)
+    }
+
+    /// What git is in the middle of, if anything (ADR-041).
+    ///
+    /// Four `stat`s on paths under a directory `discover` already found. A
+    /// rebase is recognised by its state *directory* rather than by
+    /// `REBASE_HEAD`, which is what git's own status does: the directory is
+    /// there for the whole rebase, and `REBASE_HEAD` only once one has stopped.
+    /// Merge is checked first because it is the one the editor can finish.
+    fn operation(&self) -> Option<Operation> {
+        let exists = |name: &str| self.git_dir.join(name).exists();
+        if exists("MERGE_HEAD") {
+            return Some(Operation::Merge);
+        }
+        if exists("rebase-merge") || exists("rebase-apply") {
+            return Some(Operation::Rebase);
+        }
+        if exists("CHERRY_PICK_HEAD") {
+            return Some(Operation::CherryPick);
+        }
+        exists("REVERT_HEAD").then_some(Operation::Revert)
     }
 
     /// Every local branch, and every remote-tracking branch (SPEC §33).
@@ -930,13 +951,14 @@ mod tests {
 
         let status = service.status().unwrap();
         assert_eq!(status.conflicts(), 1, "{:?}", status.entries);
-        assert!(
-            status.merging,
+        assert_eq!(
+            status.operation,
+            Some(Operation::Merge),
             "MERGE_HEAD is what says the merge is unfinished"
         );
     }
 
-    /// The half of `merging` that `conflicts()` cannot answer: once every
+    /// The half of `operation` that `conflicts()` cannot answer: once every
     /// conflicted file is staged there are no conflicts left and the merge is
     /// still waiting for its commit.
     #[test]
@@ -949,10 +971,37 @@ mod tests {
         service.stage(&[PathBuf::from("c.txt")]).unwrap();
         let status = service.status().unwrap();
         assert_eq!(status.conflicts(), 0);
-        assert!(status.merging, "{status:?}");
+        assert_eq!(status.operation, Some(Operation::Merge), "{status:?}");
 
         service.commit("merged").unwrap();
-        assert!(!service.status().unwrap().merging);
+        assert_eq!(service.status().unwrap().operation, None);
+    }
+
+    /// Phase 11 read only `MERGE_HEAD`, so these two left the panel listing
+    /// conflicted files with nothing above them saying why (ADR-041).
+    #[test]
+    fn a_stopped_rebase_and_a_stopped_cherry_pick_are_named() {
+        let repo = conflicting_repo();
+        let service = GitService::discover(repo.path()).unwrap();
+
+        // `main` and `other` changed the same line, so replaying either onto
+        // the other stops.
+        let rebase = repo.try_run(&["rebase", "other"]);
+        assert!(!rebase.status.success(), "the rebase was meant to stop");
+        let status = service.status().unwrap();
+        assert_eq!(status.operation, Some(Operation::Rebase), "{status:?}");
+        assert_eq!(status.conflicts(), 1);
+        repo.run(&["rebase", "--abort"]);
+        assert_eq!(service.status().unwrap().operation, None);
+
+        let pick = repo.try_run(&["cherry-pick", "other"]);
+        assert!(!pick.status.success(), "the cherry-pick was meant to stop");
+        assert_eq!(
+            service.status().unwrap().operation,
+            Some(Operation::CherryPick)
+        );
+        repo.run(&["cherry-pick", "--abort"]);
+        assert_eq!(service.status().unwrap().operation, None);
     }
 
     #[test]
