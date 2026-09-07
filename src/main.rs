@@ -158,6 +158,9 @@ fn sync_editor_view(app: &mut App, rects: &LayoutRects) -> bool {
     // sidebar height needs no redraw of its own.
     app.explorer_rows = rects.explorer.height.saturating_sub(1);
     app.git_rows = rects.git_panel.height.saturating_sub(1);
+    // Two rows of border, like the dialog's; paging through a diff is measured
+    // against what is left.
+    app.diff_rows = rects.diff.map_or(0, |diff| diff.height.saturating_sub(2));
 
     let view = EditorView {
         width: rects.editor.width,

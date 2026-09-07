@@ -12,6 +12,10 @@ pub enum FocusTarget {
     GitPanel,
     Menu,
     Dialog,
+    /// The read-only diff viewer (SPEC §36). Like the find bar it is entered
+    /// and left explicitly and never cycled into — and unlike it, it covers
+    /// the editor pane, so it closes as soon as another pane takes focus.
+    Diff,
     /// The find/replace bar. Reached by `Ctrl+F` and left by `Esc`, never by
     /// the cycle key: it is a transient tool, not one of the panes.
     Search,
@@ -39,6 +43,7 @@ impl FocusTarget {
             Self::Menu => "Menu",
             Self::Dialog => "Dialog",
             Self::Search => "Search",
+            Self::Diff => "Diff",
         }
     }
 }
@@ -69,5 +74,6 @@ mod tests {
         assert_eq!(FocusTarget::Menu.next(), FocusTarget::Editor);
         assert_eq!(FocusTarget::Dialog.next(), FocusTarget::Editor);
         assert_eq!(FocusTarget::Search.next(), FocusTarget::Editor);
+        assert_eq!(FocusTarget::Diff.next(), FocusTarget::Editor);
     }
 }

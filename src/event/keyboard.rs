@@ -341,9 +341,54 @@ pub static BINDINGS: &[Binding] = &[
         Command::GitMergePrompt,
         "m",
     ),
+    sidebar(
+        FocusTarget::GitPanel,
+        KeyCode::Char('d'),
+        Command::GitDiff,
+        "d",
+    ),
     // Pull and push have no key on purpose: they are the two operations that
     // reach the network, and a single letter next to `c` is not the gesture for
     // something that changes what other people see. Both are Git menu entries.
+    // --- diff viewer ------------------------------------------------------
+    // A read-only pane over the editor (SPEC §36), so its keys are a pager's:
+    // the arrows scroll it, and nothing here types.
+    diff(NONE, KeyCode::Esc, Command::DiffClose, "Esc"),
+    diff(NONE, KeyCode::Up, Command::DiffScroll(-1), "Up"),
+    diff(NONE, KeyCode::Down, Command::DiffScroll(1), "Down"),
+    diff(NONE, KeyCode::PageUp, Command::DiffScrollPage(-1), "PageUp"),
+    diff(
+        NONE,
+        KeyCode::PageDown,
+        Command::DiffScrollPage(1),
+        "PageDown",
+    ),
+    // Space is a pager's page-down, which is the key a reader's thumb is
+    // already on.
+    diff(
+        NONE,
+        KeyCode::Char(' '),
+        Command::DiffScrollPage(1),
+        "Space",
+    ),
+    diff(NONE, KeyCode::Home, Command::DiffHome, "Home"),
+    diff(NONE, KeyCode::End, Command::DiffEnd, "End"),
+    diff(
+        NONE,
+        KeyCode::Left,
+        Command::DiffScrollHorizontal(-1),
+        "Left",
+    ),
+    diff(
+        NONE,
+        KeyCode::Right,
+        Command::DiffScrollHorizontal(1),
+        "Right",
+    ),
+    diff(NONE, KeyCode::F(5), Command::DiffRefresh, "F5"),
+    // `s` is the one key that changes what is being shown rather than where in
+    // it we are: the staged diff and the unstaged one are different answers.
+    diff(NONE, KeyCode::Char('s'), Command::GitDiffToggleSide, "s"),
 ];
 
 /// Keys of a dialog that types (SPEC §40).
@@ -377,6 +422,10 @@ const fn search(
     label: &'static str,
 ) -> Binding {
     binding(mods, code, Some(FocusTarget::Search), command, label)
+}
+
+const fn diff(mods: KeyModifiers, code: KeyCode, command: Command, label: &'static str) -> Binding {
+    binding(mods, code, Some(FocusTarget::Diff), command, label)
 }
 
 const fn menu(code: KeyCode, command: Command, label: &'static str) -> Binding {
@@ -1011,6 +1060,38 @@ mod tests {
                 FocusTarget::Search
             ),
             None
+        );
+    }
+
+    /// The viewer is a pager: its keys move a window, and none of them types
+    /// (SPEC §36).
+    #[test]
+    fn the_diff_viewers_keys_scroll_it_and_nothing_types() {
+        assert_eq!(
+            resolve(key(KeyCode::Down, NONE), FocusTarget::Diff),
+            Some(Command::DiffScroll(1))
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Char(' '), NONE), FocusTarget::Diff),
+            Some(Command::DiffScrollPage(1))
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Char('s'), NONE), FocusTarget::Diff),
+            Some(Command::GitDiffToggleSide)
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Esc, NONE), FocusTarget::Diff),
+            Some(Command::DiffClose)
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Char('x'), NONE), FocusTarget::Diff),
+            None,
+            "an unbound letter is not typed into a read-only pane"
+        );
+        // A global binding still resolves behind it: the viewer is not modal.
+        assert_eq!(
+            resolve(key(KeyCode::Char('q'), CTRL), FocusTarget::Diff),
+            Some(Command::Quit)
         );
     }
 }

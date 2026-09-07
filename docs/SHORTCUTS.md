@@ -103,6 +103,25 @@ The changed-files list (SPEC §31, §33, §35). Everything that writes to the re
 | `c` | Commit what is staged — asks for a message |
 | `b` | Switch branch — opens a picker |
 | `m` | Merge a branch — opens a picker |
+| `d` | Show the diff of the selected file |
+
+## Diff viewer
+
+The read-only unified diff (SPEC §36), drawn over the editor pane. It closes as soon as another pane takes focus, so its keys are a pager's and nothing here types.
+
+| Keys | Action |
+|---|---|
+| `Esc` | Close the diff viewer |
+| `Up` | Scroll up a line |
+| `Down` | Scroll down a line |
+| `PageUp` | Scroll up a page |
+| `PageDown` / `Space` | Scroll down a page |
+| `Home` | Go to the first line |
+| `End` | Go to the last line |
+| `Left` | Scroll left |
+| `Right` | Scroll right |
+| `F5` | Re-read the diff |
+| `s` | Show the other side: staged or unstaged |
 
 ## Find bar
 
@@ -223,6 +242,7 @@ Every item is a command, and the *Shortcut* column is the same lookup the menu i
 | Git | Branch… | `b` | Git panel |
 | Git | New Branch… | — | — |
 | Git | Merge… | `m` | Git panel |
+| Git | Diff | `d` | Git panel |
 | Help | Shortcuts *(not implemented yet)* | — | — |
 | Help | About | — | — |
 

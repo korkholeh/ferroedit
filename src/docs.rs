@@ -49,6 +49,13 @@ const SECTIONS: &[(Option<FocusTarget>, &str, &str)] = &[
          blocks a frame (ADR-033).",
     ),
     (
+        Some(FocusTarget::Diff),
+        "Diff viewer",
+        "The read-only unified diff (SPEC §36), drawn over the editor pane. It \
+         closes as soon as another pane takes focus, so its keys are a pager's \
+         and nothing here types.",
+    ),
+    (
         Some(FocusTarget::Search),
         "Find bar",
         "Open from `Ctrl+F` or `Ctrl+H`, and *not* modal: `Ctrl+S` still saves and \

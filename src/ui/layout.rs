@@ -100,6 +100,10 @@ pub struct LayoutRects {
     pub tab_overflow_left: Option<Rect>,
     pub tab_overflow_right: Option<Rect>,
     pub editor: Rect,
+    /// The diff viewer, when one is open (SPEC §36). It *is* the editor rect:
+    /// the viewer covers the pane rather than splitting it, so a hit test that
+    /// finds it must be made before the editor's own (ADR-037).
+    pub diff: Option<Rect>,
     /// The find/replace bar under the editor, when it is open.
     pub search: Option<SearchRects>,
     pub status_bar: Rect,
@@ -182,6 +186,7 @@ pub fn compute(area: Rect, app: &App) -> LayoutRects {
         tab_overflow_left: bar.overflow_left,
         tab_overflow_right: bar.overflow_right,
         editor,
+        diff: app.diff.as_ref().map(|_| editor),
         search,
         status_bar,
         dialog,

@@ -119,6 +119,11 @@ fn left_click(app: &App, rects: &LayoutRects, at: Position) -> Option<Command> {
     if let Some(command) = search_click(rects, at) {
         return Some(command);
     }
+    // The viewer covers the editor pane, so it is tested first: a click on a
+    // diff must not place a cursor in the document behind it.
+    if rects.diff.is_some_and(|diff| diff.contains(at)) {
+        return Some(Command::FocusPane(FocusTarget::Diff));
+    }
     if rects.editor.contains(at) {
         return Some(editor_click(app, rects.editor, at));
     }
@@ -256,6 +261,9 @@ fn sidebar_scroll(app: &App, mode: SidebarMode) -> usize {
 }
 
 fn scroll(rects: &LayoutRects, at: Position, delta: i16) -> Option<Command> {
+    if rects.diff.is_some_and(|diff| diff.contains(at)) {
+        return Some(Command::DiffScroll(delta));
+    }
     if rects.editor.contains(at) || rects.tab_bar.contains(at) {
         return Some(Command::ScrollEditor(delta));
     }
@@ -707,5 +715,56 @@ mod tests {
             matches!(command, Some(Command::SearchFocusField(_))),
             "got {command:?}"
         );
+    }
+
+    /// The viewer covers the editor, so the pointer must find it first: a
+    /// click on a diff line is not a place to put a cursor (ADR-037).
+    fn app_with_diff() -> App {
+        use crate::app::diff::DiffState;
+        use crate::git::diff::{Diff, DiffSide};
+
+        let mut app = app();
+        app.diff = Some(DiffState::new(
+            std::path::Path::new("src/main.rs"),
+            DiffSide::Worktree,
+            Diff::parse("@@ -1 +1 @@\n-a\n+b\n"),
+            FocusTarget::GitPanel,
+        ));
+        app.focus = FocusTarget::Diff;
+        app
+    }
+
+    #[test]
+    fn clicking_the_open_viewer_focuses_it_instead_of_the_document_behind_it() {
+        let app = app_with_diff();
+        let rects = rects(&app);
+        let (x, y) = centre(rects.diff.expect("the viewer is open"));
+        assert_eq!(
+            hit_test(&app, &rects, click(x, y)),
+            Some(Command::FocusPane(FocusTarget::Diff))
+        );
+    }
+
+    #[test]
+    fn the_wheel_over_the_viewer_scrolls_the_diff_and_not_the_editor() {
+        let app = app_with_diff();
+        let rects = rects(&app);
+        let (x, y) = centre(rects.diff.expect("the viewer is open"));
+        assert_eq!(
+            hit_test(&app, &rects, wheel(MouseEventKind::ScrollDown, x, y)),
+            Some(Command::DiffScroll(3)),
+            "three lines a notch, like every other pane"
+        );
+        assert_eq!(
+            hit_test(&app, &rects, wheel(MouseEventKind::ScrollUp, x, y)),
+            Some(Command::DiffScroll(-3))
+        );
+    }
+
+    #[test]
+    fn a_closed_viewer_leaves_the_editor_clickable() {
+        let app = app();
+        let rects = rects(&app);
+        assert!(rects.diff.is_none());
     }
 }

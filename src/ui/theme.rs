@@ -69,6 +69,11 @@ pub struct Theme {
     /// A conflicted file, which is the one git state the user has to act on
     /// before anything else works — so it is the one that is not orange.
     pub git_conflict: Color,
+    /// The `@@ … @@` line of a diff. Its own colour rather than a reused one:
+    /// it is the only line of the output that says *where* in the file the
+    /// hunk under it is, and a reader scanning for it should not have to read
+    /// the text to find it (SPEC §36).
+    pub diff_hunk: Color,
 
     pub info: Color,
     pub warning: Color,
@@ -141,6 +146,9 @@ impl Default for Theme {
             git_untracked: Color::Indexed(245),
             git_renamed: Color::Indexed(140),
             git_conflict: Color::Indexed(196),
+            // Cyan: neither of the two colours a `+` or a `−` line can be, so
+            // the hunk headers stand out as the milestones they are.
+            diff_hunk: Color::Indexed(80),
 
             info: Color::Indexed(75),
             warning: Color::Indexed(215),

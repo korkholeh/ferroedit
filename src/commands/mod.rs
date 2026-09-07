@@ -138,6 +138,25 @@ pub enum Command {
     /// dialog's second button, and the gesture that tells git a conflict is
     /// resolved (ADR-036).
     GitStageResolved,
+    /// Opens the diff viewer on the file the git panel's selection is on, or
+    /// on the file being edited when the editor has focus (SPEC §36).
+    GitDiff,
+    /// Shows the other side of the same file — staged instead of unstaged, or
+    /// the other way round.
+    GitDiffToggleSide,
+    /// Re-runs the diff the viewer is showing.
+    DiffRefresh,
+    /// Closes the viewer and gives the pane behind it its focus back.
+    DiffClose,
+    /// Scrolls the viewer by lines, and by whole panes.
+    DiffScroll(i16),
+    DiffScrollPage(i16),
+    /// Moves the viewer's window sideways, for the lines that are wider than
+    /// the pane.
+    DiffScrollHorizontal(i16),
+    DiffHome,
+    DiffEnd,
+
     /// A job the worker has finished. The only command no user can produce: the
     /// run loop makes it out of an `AppEvent::GitJob` so that a background
     /// result reaches `App` through the same door as everything else.
@@ -357,6 +376,16 @@ impl Command {
             Self::GitStageResolved => "Stage the conflicted file as resolved".into(),
             Self::GitJobFinished(_) => "Report a finished background git job".into(),
 
+            Self::GitDiff => "Show the diff of the selected file".into(),
+            Self::GitDiffToggleSide => "Show the other side: staged or unstaged".into(),
+            Self::DiffRefresh => "Re-read the diff".into(),
+            Self::DiffClose => "Close the diff viewer".into(),
+            Self::DiffScroll(delta) => step(*delta, "Scroll down a line", "Scroll up a line"),
+            Self::DiffScrollPage(delta) => step(*delta, "Scroll down a page", "Scroll up a page"),
+            Self::DiffScrollHorizontal(delta) => step(*delta, "Scroll right", "Scroll left"),
+            Self::DiffHome => "Go to the first line".into(),
+            Self::DiffEnd => "Go to the last line".into(),
+
             Self::NewFilePrompt => "New file — asks for a name".into(),
             Self::NewDirectoryPrompt => "New folder — asks for a name".into(),
             Self::RenamePrompt => "Rename what is selected in the explorer".into(),
@@ -471,6 +500,7 @@ fn pane_name(target: FocusTarget) -> &'static str {
         FocusTarget::Menu => "menu",
         FocusTarget::Dialog => "dialog",
         FocusTarget::Search => "find bar",
+        FocusTarget::Diff => "diff viewer",
     }
 }
 
@@ -576,6 +606,7 @@ pub static MENUS: &[MenuDef] = &[
             item("Branch…", Command::GitBranchPrompt),
             item("New Branch…", Command::GitNewBranchPrompt),
             item("Merge…", Command::GitMergePrompt),
+            item("Diff", Command::GitDiff),
         ],
     },
     MenuDef {

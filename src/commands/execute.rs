@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::app::dialog::DialogState;
+use crate::app::diff::{DiffState, HORIZONTAL_STEP};
 use crate::app::focus::FocusTarget;
 use crate::app::input_field::InputField;
 use crate::app::search::SearchField;
@@ -13,6 +14,8 @@ use crate::commands::{Command, FileOp, MENUS};
 use crate::editor::coords::VisualCol;
 use crate::editor::document::Document;
 use crate::filesystem;
+use crate::git::diff::DiffSide;
+use crate::git::models::Change;
 use crate::git::{GitJob, JobOutcome};
 
 pub fn execute_command(app: &mut App, command: Command) {
@@ -75,6 +78,32 @@ pub fn execute_command(app: &mut App, command: Command) {
         Command::SubmitBranch => log::warn!("a branch was submitted with no dialog open"),
         Command::GitCreateBranch(name) => git_create_branch(app, &name),
         Command::GitStageResolved => git_stage_conflicted(app),
+        Command::GitDiff => open_diff(app),
+        Command::GitDiffToggleSide => toggle_diff_side(app),
+        Command::DiffRefresh => reread_diff(app, false),
+        Command::DiffClose => close_diff(app),
+        Command::DiffScroll(delta) => scroll_diff(app, delta as isize),
+        Command::DiffScrollPage(delta) => {
+            let page = (app.diff_rows as isize).max(1);
+            scroll_diff(app, delta as isize * page);
+        }
+        Command::DiffScrollHorizontal(delta) => {
+            let step = delta as isize * HORIZONTAL_STEP as isize;
+            if let Some(viewer) = app.diff.as_mut() {
+                viewer.scroll_h(step);
+            }
+        }
+        Command::DiffHome => {
+            if let Some(viewer) = app.diff.as_mut() {
+                viewer.home();
+            }
+        }
+        Command::DiffEnd => {
+            let height = app.diff_rows as usize;
+            if let Some(viewer) = app.diff.as_mut() {
+                viewer.end(height);
+            }
+        }
         Command::GitJobFinished(outcome) => finish_git_job(app, &outcome),
         Command::ToggleHiddenFiles => toggle_hidden_files(app),
 
@@ -247,6 +276,23 @@ pub fn execute_command(app: &mut App, command: Command) {
             app.notifications
                 .warning(format!("{what}: not implemented yet"));
         }
+    }
+
+    // The diff viewer is drawn over the editor pane, so it cannot outlive its
+    // own focus: a command that moved focus to another pane would otherwise
+    // leave the user typing into a document they cannot see (ADR-037). The
+    // menu and a dialog draw *over* it and are allowed to, so neither closes
+    // it.
+    if app.diff.is_some()
+        && matches!(
+            app.focus,
+            FocusTarget::Editor
+                | FocusTarget::Explorer
+                | FocusTarget::GitPanel
+                | FocusTarget::Search
+        )
+    {
+        app.diff = None;
     }
 }
 
@@ -505,7 +551,7 @@ fn remove_tab(app: &mut App, index: usize) {
 fn dialog_return_focus(app: &App) -> FocusTarget {
     match app.focus {
         FocusTarget::Menu => app.menu.return_focus,
-        FocusTarget::Dialog => FocusTarget::Editor,
+        FocusTarget::Dialog | FocusTarget::Diff => FocusTarget::Editor,
         other => other,
     }
 }
@@ -1064,6 +1110,9 @@ fn follow_git(app: &mut App) {
 fn refresh_git(app: &mut App) {
     app.git.refresh();
     follow_git(app);
+    // An open viewer is showing one of the files that status just re-read, so
+    // it follows it rather than keeping a diff that is no longer true.
+    reread_diff(app, true);
 }
 
 /// The Git menu's Refresh, and `F5` in the panel: looks for the repository
@@ -1304,6 +1353,177 @@ fn finish_git_job(app: &mut App, outcome: &JobOutcome) {
     // then refused to fast-forward has moved the remote-tracking branch — so
     // the status is re-read either way.
     refresh_git(app);
+}
+
+// --- diff viewer -----------------------------------------------------------
+
+/// Opens the read-only diff of one file (SPEC §36).
+///
+/// Which file is the one question worth answering carefully: while the git
+/// panel has focus it is the row the selection is on, and anywhere else it is
+/// the file being edited — the Git menu's Diff, pressed mid-edit, means "this
+/// one" and not "whichever row the panel happens to be parked on".
+fn open_diff(app: &mut App) {
+    let Some(root) = app.git.root().map(Path::to_path_buf) else {
+        app.notifications.warning(app.git.summary());
+        return;
+    };
+    let Some(path) = diff_target(app, &root) else {
+        return;
+    };
+    // An untracked file has no diff at all: git has nothing to compare it
+    // with until it is staged, and an empty viewer would look like a bug.
+    if app
+        .git
+        .entries()
+        .iter()
+        .any(|entry| entry.path == path && entry.worktree == Change::Untracked)
+    {
+        app.notifications.info(format!(
+            "{} is untracked — stage it to see a diff",
+            path.display()
+        ));
+        return;
+    }
+    let side = side_for(app, &path);
+    let Some(diff) = read_diff(app, &path, side) else {
+        return;
+    };
+    let return_focus = dialog_return_focus(app);
+    app.diff = Some(DiffState::new(&path, side, diff, return_focus));
+    app.focus = FocusTarget::Diff;
+}
+
+/// The file a diff would be of, or `None` after saying why there is not one.
+fn diff_target(app: &mut App, root: &Path) -> Option<PathBuf> {
+    if app.focus != FocusTarget::GitPanel {
+        if let Some(path) = active_repo_path(app, root) {
+            return Some(path);
+        }
+    }
+    match app.git.selected_entry() {
+        Some(entry) => Some(entry.path.clone()),
+        None => {
+            app.notifications
+                .info("Nothing to diff — select a changed file");
+            None
+        }
+    }
+}
+
+/// The active tab's path, relative to the repository root, when it has one and
+/// it is inside the repository at all.
+fn active_repo_path(app: &App, root: &Path) -> Option<PathBuf> {
+    let path = app.active()?.document.path()?;
+    path.strip_prefix(root).ok().map(Path::to_path_buf)
+}
+
+/// Which side is worth showing first: what has not been staged when there is
+/// any, and what has been when there is not.
+///
+/// It is the answer to "what did I just change?" in both cases, which is the
+/// question a diff is opened to answer.
+fn side_for(app: &App, path: &Path) -> DiffSide {
+    match app.git.entries().iter().find(|entry| entry.path == path) {
+        Some(entry) if entry.worktree.is_change() => DiffSide::Worktree,
+        Some(entry) if entry.index.is_change() => DiffSide::Staged,
+        _ => DiffSide::Worktree,
+    }
+}
+
+/// Runs one `git diff`, reporting a failure and an answer with nothing in it.
+///
+/// In the foreground, like the status and the branch list and for the same
+/// reason: it is a local read that finishes in milliseconds, and a viewer that
+/// opened empty and filled in later would be one that scrolls under the
+/// reader (ADR-030).
+fn read_diff(app: &mut App, path: &Path, side: DiffSide) -> Option<crate::git::Diff> {
+    let repo = app.git.service()?.clone();
+    match repo.diff(path, side) {
+        Ok(diff) if diff.is_empty() => {
+            app.notifications
+                .info(format!("{} {}", side.nothing(), path.display()));
+            None
+        }
+        Ok(diff) => Some(diff),
+        Err(err) => {
+            log::error!("could not diff {}: {err}", path.display());
+            app.notifications.error(format!("Diff failed: {err}"));
+            None
+        }
+    }
+}
+
+/// Shows the other side of the same file. The side on screen stays put when
+/// the other one holds nothing, which is the common case for a file that is
+/// only half staged.
+fn toggle_diff_side(app: &mut App) {
+    let Some(viewer) = app.diff.as_ref() else {
+        return;
+    };
+    let (path, side, return_focus) = (
+        viewer.path.clone(),
+        viewer.side.other(),
+        viewer.return_focus,
+    );
+    let Some(diff) = read_diff(app, &path, side) else {
+        return;
+    };
+    app.diff = Some(DiffState::new(&path, side, diff, return_focus));
+}
+
+/// Re-runs the diff on screen.
+///
+/// `quiet` is the automatic refresh after something changed the repository:
+/// the viewer follows the file it is showing, and a diff that has nothing left
+/// in it closes rather than lying about a change that has been staged or
+/// undone. `F5` is the loud form, which says so.
+fn reread_diff(app: &mut App, quiet: bool) {
+    let Some(viewer) = app.diff.as_ref() else {
+        return;
+    };
+    let (path, side) = (viewer.path.clone(), viewer.side);
+    let Some(repo) = app.git.service().cloned() else {
+        close_diff(app);
+        return;
+    };
+    match repo.diff(&path, side) {
+        Ok(diff) if diff.is_empty() => {
+            if !quiet {
+                app.notifications
+                    .info(format!("{} {}", side.nothing(), path.display()));
+            }
+            close_diff(app);
+        }
+        Ok(diff) => {
+            let height = app.diff_rows as usize;
+            if let Some(viewer) = app.diff.as_mut() {
+                viewer.diff = diff;
+                viewer.clamp(height);
+            }
+        }
+        Err(err) => {
+            // The viewer keeps what it has: a diff that failed to re-read is
+            // stale, and a pane that vanished would be worse than one that is.
+            log::error!("could not re-read the diff of {}: {err}", path.display());
+            if !quiet {
+                app.notifications.error(format!("Diff failed: {err}"));
+            }
+        }
+    }
+}
+
+fn scroll_diff(app: &mut App, delta: isize) {
+    let height = app.diff_rows as usize;
+    if let Some(viewer) = app.diff.as_mut() {
+        viewer.scroll_by(delta, height);
+    }
+}
+
+fn close_diff(app: &mut App) {
+    if let Some(viewer) = app.diff.take() {
+        app.focus = viewer.return_focus;
+    }
 }
 
 fn scroll_sidebar(app: &mut App, delta: i16) {
@@ -3479,5 +3699,226 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- diff viewer (SPEC §36) -------------------------------------------
+
+    /// Puts the panel's selection on a named row, which is what every diff
+    /// test starts from.
+    fn select_row(app: &mut App, name: &str) {
+        let row = app
+            .git
+            .entries()
+            .iter()
+            .position(|entry| entry.path == Path::new(name))
+            .unwrap_or_else(|| panic!("{name} is listed: {:?}", app.git.entries()));
+        app.git.selected = row;
+    }
+
+    fn diff_text(app: &App) -> String {
+        app.diff
+            .as_ref()
+            .expect("a viewer is open")
+            .diff
+            .lines
+            .iter()
+            .map(|line| format!("{}\n", line.text))
+            .collect()
+    }
+
+    #[test]
+    fn the_panels_selection_opens_its_own_unstaged_diff() {
+        let repo = changed_repo();
+        let (mut app, _rx) = app_over(&repo);
+        select_row(&mut app, "a.txt");
+
+        execute_command(&mut app, Command::GitDiff);
+
+        let viewer = app.diff.as_ref().expect("a viewer is open");
+        assert_eq!(viewer.path, Path::new("a.txt"));
+        assert_eq!(viewer.side, DiffSide::Worktree);
+        assert_eq!(app.focus, FocusTarget::Diff);
+        assert!(diff_text(&app).contains("+b"), "{}", diff_text(&app));
+        assert!(diff_text(&app).contains("-a"));
+    }
+
+    /// A file that is staged and unchanged since has only one diff worth
+    /// showing, and it is the staged one.
+    #[test]
+    fn a_file_with_nothing_unstaged_opens_its_staged_diff_instead() {
+        let repo = changed_repo();
+        let (mut app, rx) = app_over(&repo);
+        select_row(&mut app, "a.txt");
+        execute_command(&mut app, Command::GitStage);
+        settle(&mut app, &rx);
+        select_row(&mut app, "a.txt");
+
+        execute_command(&mut app, Command::GitDiff);
+        assert_eq!(app.diff.as_ref().unwrap().side, DiffSide::Staged);
+        assert!(diff_text(&app).contains("+b"));
+    }
+
+    #[test]
+    fn the_other_side_of_the_same_file_is_one_key_away() {
+        let repo = changed_repo();
+        let (mut app, rx) = app_over(&repo);
+        select_row(&mut app, "a.txt");
+        execute_command(&mut app, Command::GitStage);
+        settle(&mut app, &rx);
+        // Staged `b`, then changed the worktree again: both sides now hold
+        // something, and they are not the same thing.
+        repo.write("a.txt", "c\n");
+        execute_command(&mut app, Command::GitRefresh);
+        select_row(&mut app, "a.txt");
+
+        execute_command(&mut app, Command::GitDiff);
+        assert_eq!(app.diff.as_ref().unwrap().side, DiffSide::Worktree);
+        assert!(diff_text(&app).contains("+c"));
+
+        execute_command(&mut app, Command::GitDiffToggleSide);
+        assert_eq!(app.diff.as_ref().unwrap().side, DiffSide::Staged);
+        assert!(diff_text(&app).contains("+b"));
+    }
+
+    /// An untracked file has nothing to be compared with, and an empty pane
+    /// would look like a bug rather than an answer.
+    #[test]
+    fn an_untracked_file_says_why_it_has_no_diff() {
+        let repo = changed_repo();
+        let (mut app, _rx) = app_over(&repo);
+        select_row(&mut app, "new.txt");
+
+        execute_command(&mut app, Command::GitDiff);
+        assert!(app.diff.is_none());
+        let said = app.notifications.current().unwrap().message.clone();
+        assert!(said.contains("untracked"), "{said}");
+    }
+
+    #[test]
+    fn a_file_with_no_changes_opens_no_viewer_and_says_so() {
+        let repo = crate::git::testing::TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+        let (mut app, _rx) = app_over(&repo);
+        // Nothing is listed at all, so there is nothing selected either.
+        execute_command(&mut app, Command::GitDiff);
+        assert!(app.diff.is_none());
+        assert!(app
+            .notifications
+            .current()
+            .unwrap()
+            .message
+            .contains("Nothing to diff"));
+    }
+
+    /// Outside the panel the file on screen is what "Diff" means — the Git
+    /// menu, pressed mid-edit.
+    #[test]
+    fn the_editors_own_file_is_what_the_menu_entry_diffs() {
+        let repo = changed_repo();
+        let (mut app, _rx) = app_over(&repo);
+        app.open_path(&repo.path().join("a.txt"), None).unwrap();
+        assert_eq!(app.focus, FocusTarget::Editor);
+        // The panel's selection is deliberately somewhere else.
+        select_row(&mut app, "new.txt");
+
+        execute_command(&mut app, Command::GitDiff);
+        assert_eq!(app.diff.as_ref().unwrap().path, Path::new("a.txt"));
+    }
+
+    #[test]
+    fn the_viewer_closes_when_another_pane_takes_focus() {
+        let repo = changed_repo();
+        let (mut app, _rx) = app_over(&repo);
+        select_row(&mut app, "a.txt");
+        execute_command(&mut app, Command::GitDiff);
+        assert!(app.diff.is_some());
+
+        execute_command(&mut app, Command::CycleFocus);
+        assert!(app.diff.is_none(), "the viewer covers the editor (ADR-037)");
+        assert_ne!(app.focus, FocusTarget::Diff);
+    }
+
+    #[test]
+    fn closing_the_viewer_gives_the_panel_its_focus_back() {
+        let repo = changed_repo();
+        let (mut app, _rx) = app_over(&repo);
+        select_row(&mut app, "a.txt");
+        execute_command(&mut app, Command::GitDiff);
+
+        execute_command(&mut app, Command::DiffClose);
+        assert!(app.diff.is_none());
+        assert_eq!(app.focus, FocusTarget::GitPanel);
+    }
+
+    /// Staging what the viewer is showing empties the diff it was showing, so
+    /// the viewer closes rather than keeping a change that is no longer there.
+    #[test]
+    fn staging_the_file_on_screen_closes_the_viewer_it_emptied() {
+        let repo = changed_repo();
+        let (mut app, rx) = app_over(&repo);
+        select_row(&mut app, "a.txt");
+        execute_command(&mut app, Command::GitDiff);
+        assert!(app.diff.is_some());
+
+        // Focus is on the viewer, so the panel's own keys are not what stages
+        // it here; the command is the same one they produce.
+        execute_command(&mut app, Command::GitStage);
+        settle(&mut app, &rx);
+        assert!(app.diff.is_none(), "the unstaged diff is empty now");
+    }
+
+    #[test]
+    fn an_edit_to_the_file_on_screen_is_picked_up_by_a_refresh() {
+        let repo = changed_repo();
+        let (mut app, _rx) = app_over(&repo);
+        select_row(&mut app, "a.txt");
+        execute_command(&mut app, Command::GitDiff);
+        assert!(diff_text(&app).contains("+b"));
+
+        repo.write("a.txt", "z\n");
+        execute_command(&mut app, Command::DiffRefresh);
+        assert!(diff_text(&app).contains("+z"), "{}", diff_text(&app));
+    }
+
+    #[test]
+    fn the_viewer_scrolls_by_lines_and_by_pages_and_stops_at_the_ends() {
+        let repo = crate::git::testing::TestRepo::new();
+        repo.write("a.txt", "");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+        let body: String = (0..100).map(|i| format!("line {i}\n")).collect();
+        repo.write("a.txt", &body);
+        let (mut app, _rx) = app_over(&repo);
+        app.diff_rows = 10;
+        select_row(&mut app, "a.txt");
+        execute_command(&mut app, Command::GitDiff);
+
+        execute_command(&mut app, Command::DiffScroll(3));
+        assert_eq!(app.diff.as_ref().unwrap().scroll, 3);
+        execute_command(&mut app, Command::DiffScrollPage(1));
+        assert_eq!(app.diff.as_ref().unwrap().scroll, 13);
+        execute_command(&mut app, Command::DiffHome);
+        assert_eq!(app.diff.as_ref().unwrap().scroll, 0);
+        execute_command(&mut app, Command::DiffEnd);
+        let viewer = app.diff.as_ref().unwrap();
+        assert_eq!(viewer.scroll, viewer.diff.len() - 10);
+        execute_command(&mut app, Command::DiffScrollHorizontal(1));
+        assert_eq!(app.diff.as_ref().unwrap().h_scroll, HORIZONTAL_STEP);
+    }
+
+    #[test]
+    fn a_diff_command_outside_a_repository_says_so_and_opens_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::fixture_in(dir.path());
+        execute_command(&mut app, Command::GitRefresh);
+
+        execute_command(&mut app, Command::GitDiff);
+        assert!(app.diff.is_none());
+        assert_eq!(
+            app.notifications.current().map(|n| n.message.as_str()),
+            Some("Not a Git repository")
+        );
     }
 }

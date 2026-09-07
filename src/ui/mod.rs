@@ -46,6 +46,10 @@ pub fn render(frame: &mut Frame, app: &App, rects: &LayoutRects, theme: &Theme) 
     git::render(frame, app, rects.git_panel, theme);
     tabs::render(frame, app, rects, theme);
     editor::render(frame, app, rects.editor, theme);
+    // Over the editor, because that is the pane it replaces while it is open.
+    if let Some(area) = rects.diff {
+        diff::render(frame, app, area, theme);
+    }
     search::render(frame, app, rects, theme);
     statusbar::render(frame, app, rects.status_bar, theme);
     menu::render(frame, app, rects, theme);
@@ -807,5 +811,97 @@ mod tests {
         // 40 columns is the minimum layout; the sidebar leaves the bar ~24.
         let screen = draw(&app, 40, 12).join("\n");
         assert!(screen.contains("Find:"), "the field survives: {screen}");
+    }
+
+    // --- diff viewer (SPEC §36) -------------------------------------------
+
+    /// An app with a viewer open over the editor, built in memory: the
+    /// rendering has nothing to do with where the diff came from.
+    fn app_with_diff() -> App {
+        use crate::app::diff::DiffState;
+        use crate::git::diff::{Diff, DiffSide};
+
+        let mut app = app();
+        let diff = Diff::parse(
+            "diff --git a/src/main.rs b/src/main.rs\n\
+             --- a/src/main.rs\n\
+             +++ b/src/main.rs\n\
+             @@ -1,2 +1,2 @@\n\
+              context line\n\
+             -removed line\n\
+             +added line\n",
+        );
+        app.diff = Some(DiffState::new(
+            std::path::Path::new("src/main.rs"),
+            DiffSide::Worktree,
+            diff,
+            FocusTarget::GitPanel,
+        ));
+        app.focus = FocusTarget::Diff;
+        app
+    }
+
+    #[test]
+    fn the_viewer_draws_its_diff_over_the_editor() {
+        let app = app_with_diff();
+        let screen = draw(&app, 80, 24).join("\n");
+        assert!(
+            screen.contains("Diff — src/main.rs [worktree] +1 −1"),
+            "{screen}"
+        );
+        assert!(screen.contains("@@ -1,2 +1,2 @@"), "{screen}");
+        assert!(screen.contains("-removed line"), "{screen}");
+        assert!(screen.contains("+added line"), "{screen}");
+        assert!(
+            !screen.contains("println!"),
+            "the document behind it must not show through: {screen}"
+        );
+    }
+
+    /// The `+` and the `−` lines are what a diff is read by, so they are the
+    /// two the theme has to tell apart.
+    #[test]
+    fn additions_and_removals_are_drawn_in_their_own_colours() {
+        let app = app_with_diff();
+        let theme = Theme::default();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| {
+                let rects = layout::compute(frame.area(), &app);
+                render(frame, &app, &rects, &theme);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        let colour_of = |needle: char| {
+            (0..24)
+                .flat_map(|y| (0..80).map(move |x| (x, y)))
+                .find(|&(x, y)| {
+                    buffer[(x, y)].symbol() == needle.to_string()
+                        && buffer[(x + 1, y)].symbol() == "a"
+                        || buffer[(x, y)].symbol() == needle.to_string()
+                            && buffer[(x + 1, y)].symbol() == "r"
+                })
+                .map(|(x, y)| buffer[(x, y)].fg)
+                .expect("the marker is on screen")
+        };
+        assert_eq!(colour_of('+'), theme.git_added);
+        assert_eq!(colour_of('-'), theme.git_deleted);
+    }
+
+    #[test]
+    fn the_viewer_scrolled_sideways_shows_the_tail_of_its_lines() {
+        let mut app = app_with_diff();
+        app.diff.as_mut().unwrap().h_scroll = 4;
+        let screen = draw(&app, 80, 24).join("\n");
+        assert!(screen.contains("oved line"), "{screen}");
+        assert!(!screen.contains("-removed line"), "{screen}");
+    }
+
+    #[test]
+    fn the_bottom_of_the_frame_says_which_line_is_at_the_top() {
+        let app = app_with_diff();
+        let screen = draw(&app, 80, 24).join("\n");
+        assert!(screen.contains("1/7"), "{screen}");
     }
 }

@@ -2,6 +2,7 @@
 //! Never renders and never talks to crossterm directly.
 
 pub mod dialog;
+pub mod diff;
 pub mod focus;
 pub mod git;
 pub mod input_field;
@@ -13,6 +14,7 @@ pub mod workspace;
 use std::path::{Path, PathBuf};
 
 use dialog::DialogState;
+use diff::DiffState;
 use focus::FocusTarget;
 use git::GitState;
 use notifications::Notifications;
@@ -146,6 +148,10 @@ pub struct App {
     /// The one modal window, when there is one. Nothing else receives input
     /// while it is open (SPEC §8, §40).
     pub dialog: Option<DialogState>,
+    /// The read-only diff viewer, when one is open (SPEC §36). It is drawn
+    /// over the editor pane, so `execute_command` closes it as soon as another
+    /// pane takes focus (ADR-037).
+    pub diff: Option<DiffState>,
     pub last_click: Option<LastClick>,
     /// Size of the editor pane in the last drawn frame.
     pub editor_view: EditorView,
@@ -157,6 +163,10 @@ pub struct App {
     /// reason as `explorer_rows`: the changed-file list can be longer than the
     /// four to ten rows the layout gives it.
     pub git_rows: u16,
+    /// Rows the diff viewer could show in the last drawn frame, for the same
+    /// reason as `git_rows`: a diff is longer than its pane and paging through
+    /// it needs the pane's height.
+    pub diff_rows: u16,
     pub should_quit: bool,
 }
 
@@ -179,10 +189,12 @@ impl App {
             clipboard: Clipboard::default(),
             search: SearchState::default(),
             dialog: None,
+            diff: None,
             last_click: None,
             editor_view: EditorView::default(),
             explorer_rows: 0,
             git_rows: 0,
+            diff_rows: 0,
             should_quit: false,
             workspace,
         }
@@ -289,6 +301,9 @@ impl App {
         };
         self.active_tab = Some(index);
         self.focus = FocusTarget::Editor;
+        // The viewer covers the editor, and a file opened from it is a file
+        // the user wants to look at (ADR-037).
+        self.diff = None;
         if let Some(line) = line {
             self.tabs[index].document.goto_line(line);
         }
