@@ -553,7 +553,38 @@ Phase 14 — Polish (in progress: help screen and status bar done)
     first, then the focus label, the language, the branch, the line ending and the
     selection count. `Ln 1, Col 1` is never dropped. At 60 columns a notification is no
     longer clipped to make room for text that is the same on every file.
-  - 622 tests (was 599), including the pty check below.
+  - **A filesystem watcher** (ADR-040), the largest thing the phase owed. `notify`
+    watches the workspace root on a thread of its own and reports into the channel the
+    input thread and the git worker already write to, so a `git checkout` in another
+    terminal reaches `App` through the same door as a key press.
+  - The filter is the feature, not the watch. Everything git ignores is dropped, and
+    everything under `.git` except the paths that decide what the panel shows — matched
+    on the first component, so `refs/heads/topic` is one entry, and `index.lock` reports
+    as `index` because the rename over the real file is the event that matters. A
+    coalescing window then turns what is left into one refresh, with a ceiling so a
+    writer that never goes quiet still gets one. Only an event that survives the filter
+    extends the window.
+  - The change says whether the worktree moved or only the repository did: staging in
+    another terminal re-reads the status without rebuilding the explorer's rows. The
+    refresh is silent, because the status bar is where the answers to the user's own
+    commands go.
+  - Best effort by construction: inotify watches are a per-user resource, so a watcher
+    that will not start is a warning and an editor that behaves exactly as it did before.
+  - **Every unfinished git operation is named** (ADR-041), not only a merge.
+    `RepoStatus::merging` becomes `operation: Option<Operation>` over Merge, Rebase,
+    CherryPick and Revert, read from the four paths git records one at. A rebase is
+    recognised by its state *directory* rather than by `REBASE_HEAD`, which is what git's
+    own status does. Only a merge is finished by a commit; for the other three the commit
+    dialog does not open and the status bar names the `git … --continue` that does.
+  - **A byte budget for the undo stack** (ADR-042). O(edited bytes) was still unbounded
+    over a long session, so the stack carries a running weight — text plus each step's own
+    place on it — and drops its oldest steps past sixteen megabytes. The newest step is
+    exempt however large it is, the save point moves down by what went and is discarded
+    when it was one of them, and the running figure is asserted against a full recount.
+  - A long notification now takes the width it needs from the readout rather than only
+    what a constant floor left it: `Nothing staged — finish the rebase with …` lost three
+    characters at 110 columns before this.
+  - 641 tests (was 599), including the pty checks below.
 
 ## In progress
 
@@ -603,9 +634,11 @@ Phase 14 — Polish (in progress: help screen and status bar done)
 - **Rename pre-fills the name and there is no way to select it.** The field has a caret
   but no selection, so replacing `main.rs` wholesale is seven `Backspace`s. Editing an
   extension or a suffix — the common case — is what the pre-filled name is good at.
-- **The tree does not watch the filesystem.** A file created, deleted or renamed by
-  something else appears on `F5` (or after any file operation, which refreshes anyway).
-  A watcher is a dependency and a thread, and neither belongs in this phase.
+- **An open file changed on disk is not reloaded, and the tab does not say so.** The
+  watcher (ADR-040) made this visible rather than causing it: the tree and the git panel
+  now update while the buffer in front of the user does not. Closing it needs a reload
+  prompt, which is a decision of its own — a buffer with unsaved edits cannot simply be
+  replaced.
 - **Deleting a file that is open leaves the tab open.** The buffer keeps its text, the
   tab keeps its name, and `Ctrl+S` writes the file back into existence. That is
   recoverable rather than surprising, but the tab does not say that what it is showing
@@ -643,10 +676,10 @@ Phase 14 — Polish (in progress: help screen and status bar done)
   caret where the typing started, without re-selecting what was replaced.
 - **A run of emoji coalesces as punctuation.** `char::is_alphanumeric` is false for
   them, so `b👨‍👩‍👧` backspaces in two undo steps rather than one (ADR-013).
-- **The undo stack is unbounded.** It is O(edited bytes) and never O(document), which is
-  what SPEC §16 asks for, but a session that edits a hundred megabytes holds a hundred
-  megabytes. A cap belongs with the other memory work in Phase 14, and dropping the
-  oldest steps is a behaviour change worth deciding deliberately.
+- **Undo history can be dropped without the user being told.** Past sixteen megabytes the
+  oldest steps go (ADR-042), and `Nothing to undo` is the only surface — the same sentence
+  an empty stack has always produced. The newest step is never dropped, so the thing that
+  just happened is always undoable.
 - **Mixed line endings are normalised to the file's first one on save** — deliberate,
   and recorded as the cost in ADR-009.
 - **ZWJ emoji width follows `unicode-width`.** `👨‍👩‍👧` is reported as six cells; some
@@ -668,10 +701,10 @@ Phase 14 — Polish (in progress: help screen and status bar done)
   correct; they are not batched.
 - **A branch cannot be deleted from the editor.** SPEC §33 says it can wait, and it is
   the one branch operation that loses work.
-- **A rebase or a cherry-pick in progress is invisible.** Only `MERGE_HEAD` is looked at,
-  so `REBASE_HEAD` and `CHERRY_PICK_HEAD` leave the panel saying nothing while their
-  conflicts are listed like any other. The conflicted files are right; the sentence above
-  them is missing.
+- **`cherry-picking` fills a narrow panel title.** All four unfinished operations are
+  named now (ADR-041), and `[cherry-picking]` is long enough to push the changed-file
+  count off a 32-column title. Finishing a rebase or a cherry-pick still means leaving the
+  editor for a terminal; SPEC §35 does not ask for more.
 - **The commit dialog does not prefill a merge message.** git writes one into `MERGE_MSG`
   and the dialog ignores it, so finishing a merge means typing the subject again.
 - **A pull with divergent branches and no `pull.rebase` fails** with git's own advice
@@ -690,9 +723,6 @@ Phase 14 — Polish (in progress: help screen and status bar done)
 - **The commit dialog is one line.** `InputField` is a single-line field, so a commit
   body — the blank line and the paragraphs after the subject — cannot be typed. A
   multi-line body needs a text area, which is a Phase 14 shape and not a Phase 11 one.
-- **Nothing watches the filesystem.** A `git checkout` in another terminal shows up on
-  the next save, file operation or `F5`, not by itself. Same trade as the explorer's,
-  and the watcher is Phase 14 for both.
 - **A rename shows only its new path** in the panel, as ADR-031 said it would; the
   diff viewer's header is where `old -> new` is now readable, because git writes it
   there itself.
@@ -737,7 +767,39 @@ Phase 2 through Phase 8 acceptance were verified by driving the real binary in a
 (the Phase 1 harness: fork a pty, set `TIOCSWINSZ`, write key and mouse bytes, replay
 the output through a minimal terminal emulator).
 
-### Phase 14
+### Phase 14 — watcher, git operations, undo budget
+
+Same harness. A scratch repository whose `main` and `other` change the same line, so
+replaying either onto the other stops.
+
+- **A change made outside the editor, at 74x18.** With the editor sitting idle, writing
+  `a.txt` and creating `c.txt` from a shell put ` M a.txt` and ` ? c.txt` in the panel and
+  `c.txt` in the tree, with no keystroke. `git add a.txt` turned ` M ` into `M  `.
+  `git checkout -b topic` moved the panel title to `Git — topic` and the status bar's
+  branch with it.
+- **Three thousand files into an ignored `target/`.** The screen did not change, and the
+  debug log recorded three `filesystem changed` lines for the whole session — one per real
+  change and none for the burst. That is the filter and the window doing exactly what they
+  are for.
+- **The worktree/repository split.** The two changes that were `git add` and
+  `git checkout -b` logged `FsChange { worktree: false, repository: true }`: the status was
+  re-read and the tree was not.
+- **A stopped rebase, at 110x16.** `git rebase other` from a shell, and the panel became
+  `Git — detached [rebasing]` with ` UU c.txt` under it — again with no keystroke, and
+  again through the watcher. `git rebase --abort` put it back to `Git — main` and a clean
+  tree; `git cherry-pick other` made it `Git — main [cherry-picking]`.
+- **The commit gate mid-rebase.** With the resolution staged, `c` opens the commit dialog
+  — git allows a commit during a stopped rebase and the user staged something. With
+  nothing staged it does not, and says
+  `Nothing staged — finish the rebase with \`git rebase --continue\`` instead.
+- **That sentence is what found the status bar bug.** It was clipped by three characters
+  at 110 columns while the readout sat comfortably beside it; the floor is now the
+  sentence's own width when that is longer than the constant.
+- `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test`
+  (with and without `native-clipboard`) — all clean, 641 tests, zero warnings.
+
+### Phase 14 — help screen and status bar
 
 Same harness, at 100x30, 60x20 and 40x12 (the minimum layout width). The emulator now
 replays the whole output stream for each snapshot rather than feeding it in chunks — a
@@ -1064,11 +1126,9 @@ reporting.
 
 Phase 14 continues. What is left of it, roughly in order of how much it is worth:
 
-- A filesystem watcher would close the explorer's refresh gap, the git panel's and now
-  the viewer's. It is one dependency and one thread, and it is the largest single
-  improvement left in Phase 14.
-- `REBASE_HEAD` and `CHERRY_PICK_HEAD` are the same one-line check as `MERGE_HEAD`, and
-  the panel says nothing about either.
+- Reloading a buffer whose file changed on disk. The watcher made the gap visible and did
+  not close it: the panes update and the document does not. It needs a prompt, because a
+  buffer with unsaved edits cannot simply be replaced.
 - Cancelling a running job is worth doing when a second one wants it: the `JobId`
   exists, but the worker keeps no handle to the child it spawned.
 - A diff of a conflicted file is now a view rather than a question (ADR-036), but it is

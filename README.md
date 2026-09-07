@@ -74,6 +74,11 @@ wired to a placeholder — and both [docs/SHORTCUTS.md](docs/SHORTCUTS.md) and t
 help screen are generated from the keymap itself rather than written beside it. `Ctrl+O` opens a path from outside the workspace and File → Save As…
 writes the current buffer somewhere else, keeping its undo history.
 
+FerroEdit watches the workspace, so a `git checkout`, a rebase or a file written in
+another terminal shows up in the tree and the panel by itself rather than on `F5`. The
+watch is filtered — what git ignores is ignored here too — so a build writing thousands
+of files costs nothing.
+
 The Git panel is real, and it is the system `git` you already have: FerroEdit runs
 `git status --porcelain=v2`, never a bundled reimplementation, so your config, your
 ignore rules and your rename detection are the ones that apply. The sidebar shows the
