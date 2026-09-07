@@ -89,7 +89,7 @@ The file tree (SPEC §18, §20). The operations act on the selected row, not on 
 
 ## Git panel
 
-The changed-files list (SPEC §31). Everything that writes to the repository runs on a worker thread, so none of these keys blocks a frame (ADR-033).
+The changed-files list (SPEC §31, §33, §35). Everything that writes to the repository runs on a worker thread, so none of these keys blocks a frame (ADR-033).
 
 | Keys | Action |
 |---|---|
@@ -101,6 +101,8 @@ The changed-files list (SPEC §31). Everything that writes to the repository run
 | `a` | Stage every change |
 | `u` | Unstage every change |
 | `c` | Commit what is staged — asks for a message |
+| `b` | Switch branch — opens a picker |
+| `m` | Merge a branch — opens a picker |
 
 ## Find bar
 
@@ -137,12 +139,14 @@ While a menu is open. The items themselves are further down, under *Menu bar*.
 
 ## Dialog
 
-A confirmation — a message and a row of buttons.
+A message and a row of buttons, or a list to choose from (SPEC §33). `Left` and `Right` are the button row's axis and `Up` and `Down` are the list's; a dialog with no list ignores the latter two.
 
 | Keys | Action |
 |---|---|
 | `Left` | Move back along the button row |
 | `Right` / `Tab` | Move along the button row |
+| `Up` | Move up the list |
+| `Down` | Move down the list |
 | `Enter` | Activate the selected button |
 | `Esc` | Dismiss the dialog |
 
@@ -216,12 +220,15 @@ Every item is a command, and the *Shortcut* column is the same lookup the menu i
 | Git | Commit… | `c` | Git panel |
 | Git | Pull | — | — |
 | Git | Push | — | — |
+| Git | Branch… | `b` | Git panel |
+| Git | New Branch… | — | — |
+| Git | Merge… | `m` | Git panel |
 | Help | Shortcuts *(not implemented yet)* | — | — |
 | Help | About | — | — |
 
 ## Mouse
 
-Clicking in the editor places the cursor, dragging selects, and a double-click selects the word under the pointer. The wheel scrolls the pane under the pointer without moving the cursor. Clicking a tab switches to it; clicking its `×`, or middle-clicking it, closes it. Clicking a row in the explorer opens the file or folds the directory in one click (ADR-020). Clicking a row of the find bar puts the caret in that row's field, and its `[Aa]`, `[Replace]` and `[All]` are clickable — the fallback for terminals that swallow `Alt`.
+Clicking a row of a dialog's list selects it without choosing it — unlike the explorer's rows (ADR-020), the confirm button is right there and choosing a branch by accident is a checkout. Clicking in the editor places the cursor, dragging selects, and a double-click selects the word under the pointer. The wheel scrolls the pane under the pointer without moving the cursor. Clicking a tab switches to it; clicking its `×`, or middle-clicking it, closes it. Clicking a row in the explorer opens the file or folds the directory in one click (ADR-020). Clicking a row of the find bar puts the caret in that row's field, and its `[Aa]`, `[Replace]` and `[All]` are clickable — the fallback for terminals that swallow `Alt`.
 
 ## Terminal limits
 

@@ -170,6 +170,11 @@ pub static BINDINGS: &[Binding] = &[
     dialog(KeyCode::Left, Command::DialogMove(-1), "Left"),
     dialog(KeyCode::Right, Command::DialogMove(1), "Right"),
     dialog(KeyCode::Tab, Command::DialogMove(1), "Tab"),
+    // Up and Down are the list body's axis, the way Left and Right are the
+    // button row's. A dialog with no list ignores them, which is what the two
+    // keys did here before the branch picker existed anyway.
+    dialog(KeyCode::Up, Command::DialogListMove(-1), "Up"),
+    dialog(KeyCode::Down, Command::DialogListMove(1), "Down"),
     dialog(KeyCode::Enter, Command::DialogActivate, "Enter"),
     dialog(KeyCode::Esc, Command::DialogCancel, "Esc"),
     // --- editor -----------------------------------------------------------
@@ -323,6 +328,18 @@ pub static BINDINGS: &[Binding] = &[
         KeyCode::Char('c'),
         Command::GitCommitPrompt,
         "c",
+    ),
+    sidebar(
+        FocusTarget::GitPanel,
+        KeyCode::Char('b'),
+        Command::GitBranchPrompt,
+        "b",
+    ),
+    sidebar(
+        FocusTarget::GitPanel,
+        KeyCode::Char('m'),
+        Command::GitMergePrompt,
+        "m",
     ),
     // Pull and push have no key on purpose: they are the two operations that
     // reach the network, and a single letter next to `c` is not the gesture for

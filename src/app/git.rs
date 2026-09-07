@@ -149,6 +149,12 @@ impl GitState {
         self.repo.as_ref().map(GitService::root)
     }
 
+    /// The repository itself, for the reads that are not the status — the
+    /// branch list a picker is built from (SPEC §33). `None` outside one.
+    pub fn service(&self) -> Option<&GitService> {
+        self.repo.as_ref()
+    }
+
     /// The entry the panel's selection is on.
     pub fn selected_entry(&self) -> Option<&FileEntry> {
         self.status.entries.get(self.selected)
@@ -188,7 +194,10 @@ impl GitState {
             GitAvailability::NotARepository => "Not a Git repository".to_string(),
             GitAvailability::Unavailable(why) => why.clone(),
             GitAvailability::Repository => {
-                let head = self.status.head_label();
+                let head = match self.status.merging {
+                    true => format!("{} (merging)", self.status.head_label()),
+                    false => self.status.head_label().to_string(),
+                };
                 let conflicts = match self.status.conflicts() {
                     0 => String::new(),
                     1 => ", 1 conflict".to_string(),

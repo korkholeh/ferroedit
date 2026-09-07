@@ -44,9 +44,9 @@ const SECTIONS: &[(Option<FocusTarget>, &str, &str)] = &[
     (
         Some(FocusTarget::GitPanel),
         "Git panel",
-        "The changed-files list (SPEC §31). Everything that writes to the \
-         repository runs on a worker thread, so none of these keys blocks a \
-         frame (ADR-033).",
+        "The changed-files list (SPEC §31, §33, §35). Everything that writes \
+         to the repository runs on a worker thread, so none of these keys \
+         blocks a frame (ADR-033).",
     ),
     (
         Some(FocusTarget::Search),
@@ -63,7 +63,9 @@ const SECTIONS: &[(Option<FocusTarget>, &str, &str)] = &[
     (
         Some(FocusTarget::Dialog),
         "Dialog",
-        "A confirmation — a message and a row of buttons.",
+        "A message and a row of buttons, or a list to choose from (SPEC §33). \
+         `Left` and `Right` are the button row's axis and `Up` and `Down` are \
+         the list's; a dialog with no list ignores the latter two.",
     ),
 ];
 
@@ -104,7 +106,9 @@ command that does not exist, not a letter.
 const MOUSE: &str = "\
 ## Mouse
 
-Clicking in the editor places the cursor, dragging selects, and a double-click selects \
+Clicking a row of a dialog's list selects it without choosing it — unlike the explorer's \
+rows (ADR-020), the confirm button is right there and choosing a branch by accident is a \
+checkout. Clicking in the editor places the cursor, dragging selects, and a double-click selects \
 the word under the pointer. The wheel scrolls the pane under the pointer without moving \
 the cursor. Clicking a tab switches to it; clicking its `×`, or middle-clicking it, \
 closes it. Clicking a row in the explorer opens the file or folds the directory in one \

@@ -39,6 +39,12 @@ pub enum GitJob {
     Commit(String),
     Pull,
     Push,
+    /// Moves `HEAD` to an existing branch (SPEC §33).
+    Switch(String),
+    /// Creates a branch at `HEAD` and switches to it.
+    CreateBranch(String),
+    /// Merges a branch into the current one (SPEC §35).
+    Merge(String),
 }
 
 impl GitJob {
@@ -53,6 +59,9 @@ impl GitJob {
             Self::Commit(_) => "Committing…",
             Self::Pull => "Pulling…",
             Self::Push => "Pushing…",
+            Self::Switch(_) => "Switching…",
+            Self::CreateBranch(_) => "Creating the branch…",
+            Self::Merge(_) => "Merging…",
         }
     }
 
@@ -66,6 +75,9 @@ impl GitJob {
             Self::Commit(_) => "Committed",
             Self::Pull => "Pulled",
             Self::Push => "Pushed",
+            Self::Switch(_) => "Switched",
+            Self::CreateBranch(_) => "Created the branch",
+            Self::Merge(_) => "Merged",
         }
     }
 
@@ -79,6 +91,9 @@ impl GitJob {
             Self::Commit(_) => "Commit",
             Self::Pull => "Pull",
             Self::Push => "Push",
+            Self::Switch(_) => "Switch",
+            Self::CreateBranch(_) => "New branch",
+            Self::Merge(_) => "Merge",
         }
     }
 }
@@ -184,13 +199,22 @@ fn run_job(service: &GitService, job: &GitJob) -> Result<String, GitError> {
         GitJob::Commit(message) => service.commit(message)?,
         GitJob::Pull => service.pull()?,
         GitJob::Push => service.push()?,
+        GitJob::Switch(branch) => service.switch_to(branch)?,
+        GitJob::CreateBranch(name) => service.create_branch(name)?,
+        GitJob::Merge(branch) => service.merge(branch)?,
     };
-    // git's own sentence when it wrote one — `[main 5944bbe] message`,
-    // `Already up to date.` — and ours when it did not.
-    Ok(if said.is_empty() {
-        job.done().to_string()
-    } else {
-        said
+    if !said.is_empty() {
+        // git's own sentence when it wrote one — `[main 5944bbe] message`,
+        // `Already up to date.`
+        return Ok(said);
+    }
+    // Ours when it did not, naming the branch: `Switched` alone leaves the one
+    // question the user has — to what? — unanswered.
+    Ok(match job {
+        GitJob::Switch(branch) | GitJob::CreateBranch(branch) | GitJob::Merge(branch) => {
+            format!("{} {branch}", job.done())
+        }
+        _ => job.done().to_string(),
     })
 }
 
@@ -272,6 +296,9 @@ mod tests {
             GitJob::Commit("m".into()),
             GitJob::Pull,
             GitJob::Push,
+            GitJob::Switch("main".into()),
+            GitJob::CreateBranch("topic".into()),
+            GitJob::Merge("other".into()),
         ] {
             assert!(job.progress().ends_with('…'), "{job:?}");
             assert!(!job.done().is_empty(), "{job:?}");

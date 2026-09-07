@@ -38,7 +38,46 @@ pub fn render(frame: &mut Frame, app: &App, rects: &LayoutRects, theme: &Theme) 
     if let Some(field) = dialog.field() {
         render_field(frame, field, area, theme);
     }
+    if let Some(list) = rects.dialog_list {
+        render_list(frame, dialog, list, theme);
+    }
     render_buttons(frame, dialog, rects, theme);
+}
+
+/// The rows of a list body (SPEC §33).
+///
+/// `*` is git's own marker for the branch `HEAD` is on, and it is deliberately
+/// not the same thing as the highlight: one says where you are, the other says
+/// what Enter would do.
+fn render_list(frame: &mut Frame, dialog: &DialogState, area: Rect, theme: &Theme) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let (selected, scroll) = dialog.list_view();
+    let rows: Vec<Line> = dialog
+        .items()
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(area.height as usize)
+        .map(|(index, item)| {
+            let marker = if item.current { "*" } else { " " };
+            let line = Line::from(Span::styled(
+                format!("{marker} {}", item.label),
+                if item.current {
+                    theme.dialog.fg(theme.git_added)
+                } else {
+                    theme.dialog
+                },
+            ));
+            if index == selected {
+                line.style(theme.dialog_button_selected)
+            } else {
+                line
+            }
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(rows), area);
 }
 
 fn render_message(frame: &mut Frame, dialog: &DialogState, area: Rect, theme: &Theme) {

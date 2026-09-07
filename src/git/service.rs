@@ -13,7 +13,7 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::models::{GitError, RepoStatus};
+use super::models::{Branch, GitError, RepoStatus};
 use super::parser::parse_status;
 
 /// How long any one git invocation may take before it is killed.
@@ -46,6 +46,10 @@ const POLL: Duration = Duration::from_millis(2);
 #[derive(Debug, Clone)]
 pub struct GitService {
     root: PathBuf,
+    /// The repository's own directory, absolute. Held so that the states git
+    /// records as files in it — `MERGE_HEAD` above all — can be read with a
+    /// `stat` rather than with another subprocess on every status.
+    git_dir: PathBuf,
 }
 
 impl GitService {
@@ -63,7 +67,10 @@ impl GitService {
         if !dir.is_dir() {
             return Err(GitError::NotARepository);
         }
-        let output = match run(dir, &["rev-parse", "--show-toplevel"]) {
+        // Both paths in one invocation, both absolute: `--git-dir` on its own
+        // is printed relative to the working directory, which is `dir` and not
+        // necessarily the root.
+        let output = match run(dir, &["rev-parse", "--show-toplevel", "--absolute-git-dir"]) {
             Ok(output) => output,
             Err(GitError::Failed { message, .. }) => {
                 log::debug!("{} is not a repository: {message}", dir.display());
@@ -71,13 +78,18 @@ impl GitService {
             }
             Err(other) => return Err(other),
         };
-        let root = String::from_utf8_lossy(&output).trim_end().to_string();
-        if root.is_empty() {
+        let text = String::from_utf8_lossy(&output);
+        let mut lines = text.lines().map(str::trim_end);
+        let (Some(root), Some(git_dir)) = (lines.next(), lines.next()) else {
+            return Err(GitError::NotARepository);
+        };
+        if root.is_empty() || git_dir.is_empty() {
             return Err(GitError::NotARepository);
         }
-        log::info!("git repository at {root}");
+        log::info!("git repository at {root} (git dir {git_dir})");
         Ok(Self {
             root: PathBuf::from(root),
+            git_dir: PathBuf::from(git_dir),
         })
     }
 
@@ -102,7 +114,89 @@ impl GitService {
                 "-z",
             ],
         )?;
-        parse_status(&output)
+        let mut status = parse_status(&output)?;
+        // A `stat`, not a subprocess: git records a stopped merge as a file in
+        // the repository directory, and the panel has to say so even after
+        // every conflicted file has been staged (SPEC §35).
+        status.merging = self.git_dir.join("MERGE_HEAD").exists();
+        Ok(status)
+    }
+
+    /// Every local branch, and every remote-tracking branch (SPEC §33).
+    ///
+    /// One `for-each-ref` rather than `git branch -a`: the format is ours, so
+    /// nothing has to be recovered from a display form that changes with the
+    /// terminal width and with the user's `color.branch`.
+    pub fn branches(&self) -> Result<Vec<Branch>, GitError> {
+        let output = run(
+            &self.root,
+            &[
+                "for-each-ref",
+                "--format=%(HEAD)%00%(refname:short)%00%(refname)",
+                "refs/heads",
+                "refs/remotes",
+            ],
+        )?;
+        let text = String::from_utf8_lossy(&output);
+        let mut branches = Vec::new();
+        for line in text.lines() {
+            let mut fields = line.split('\0');
+            let (Some(head), Some(name), Some(refname)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                return Err(GitError::Parse(format!("branch record {line:?}")));
+            };
+            // `refs/remotes/origin/HEAD` is a symbolic ref to the remote's
+            // default branch, not a branch of its own; listing it would offer
+            // the same branch twice under two names.
+            if refname.ends_with("/HEAD") {
+                continue;
+            }
+            branches.push(Branch {
+                name: name.to_string(),
+                is_head: head == "*",
+                remote: refname.starts_with("refs/remotes/"),
+            });
+        }
+        log::debug!("{} branches", branches.len());
+        Ok(branches)
+    }
+
+    /// `git switch <name>` (SPEC §33).
+    ///
+    /// `switch` and not `checkout`: it only ever moves `HEAD`, so a branch name
+    /// that is also a path cannot be read as a request to discard that file's
+    /// changes.
+    pub fn switch_to(&self, branch: &str) -> Result<String, GitError> {
+        run(&self.root, &["switch", branch])?;
+        Ok(String::new())
+    }
+
+    /// Creates a branch at `HEAD` and switches to it — what "New Branch" means
+    /// when it is reached from a picker of branches to be on.
+    pub fn create_branch(&self, name: &str) -> Result<String, GitError> {
+        run(&self.root, &["switch", "-c", name])?;
+        Ok(String::new())
+    }
+
+    /// `git merge <branch>` (SPEC §35).
+    ///
+    /// A merge that stops on conflicts is reported as `Conflicted` and not as a
+    /// failed command: git wrote its complaint to *stdout*, exited non-zero,
+    /// and left the tree in exactly the state the panel is there to show. The
+    /// status is what decides which of the two happened, because it is the same
+    /// question the panel will ask a moment later anyway.
+    pub fn merge(&self, branch: &str) -> Result<String, GitError> {
+        match run(&self.root, &["merge", "--no-edit", branch]) {
+            Ok(output) => Ok(first_line_of(&output)),
+            Err(GitError::Failed { command, message }) => {
+                if self.status().is_ok_and(|status| status.conflicts() > 0) {
+                    return Err(GitError::Conflicted);
+                }
+                Err(GitError::Failed { command, message })
+            }
+            Err(other) => Err(other),
+        }
     }
 
     /// `git add -- <paths>` (SPEC §31).
@@ -148,15 +242,25 @@ impl GitService {
         Ok(first_line_of(&output))
     }
 
-    /// `git pull --ff-only` (SPEC §34).
+    /// `git pull --no-edit` (SPEC §34).
     ///
-    /// Fast-forward only, deliberately: a pull that merges can conflict, and a
-    /// conflict needs the resolution UI that Phase 12 owns. Refusing with
-    /// git's own "Not possible to fast-forward" is a state the user can act on;
-    /// a surprise merge commit made by an editor is not (ADR-034).
+    /// No `--ff-only` any more and no `--rebase` either way: ADR-034 refused a
+    /// merging pull only until there was somewhere for a conflict to be shown,
+    /// and `merge` above is now that somewhere (ADR-036). Neither reconciliation
+    /// strategy is forced, so `pull.rebase` decides — and a divergence with no
+    /// configuration is git's own clear complaint about exactly that, which is
+    /// better advice than anything this editor could substitute for it.
     pub fn pull(&self) -> Result<String, GitError> {
-        let output = run_with(&self.root, &["pull", "--ff-only"], NETWORK_TIMEOUT)?;
-        Ok(first_line_of(&output))
+        match run_with(&self.root, &["pull", "--no-edit"], NETWORK_TIMEOUT) {
+            Ok(output) => Ok(first_line_of(&output)),
+            Err(GitError::Failed { command, message }) => {
+                if self.status().is_ok_and(|status| status.conflicts() > 0) {
+                    return Err(GitError::Conflicted);
+                }
+                Err(GitError::Failed { command, message })
+            }
+            Err(other) => Err(other),
+        }
     }
 
     /// `git push`, with whatever `push.default` and the branch's upstream say.
@@ -297,21 +401,29 @@ fn read_all<R: Read>(stream: Option<R>) -> Vec<u8> {
     buffer
 }
 
-/// The first line of git's complaint, which is the sentence worth showing on a
-/// one-line status bar; the rest is hints and is logged instead.
+/// The one line of git's complaint worth showing on a one-line status bar; the
+/// rest is progress and hints, and is logged instead.
+///
+/// It is *not* simply the first line. A failed `git pull` reports the fetch it
+/// managed first (`From /srv/repo`), then a dozen `hint:` lines, and only then
+/// says what actually went wrong — so a line git marked as the failure wins
+/// over position, and position is only the fallback for the commands that mark
+/// nothing.
 fn first_line(stderr: &[u8]) -> String {
+    const MARKERS: [&str; 2] = ["fatal: ", "error: "];
     let text = String::from_utf8_lossy(stderr);
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return "no output".to_string();
     }
     log::error!("git said: {trimmed}");
-    trimmed
+    let marked = trimmed
         .lines()
-        .next()
-        .unwrap_or(trimmed)
-        .trim_start_matches("fatal: ")
-        .trim_start_matches("error: ")
+        .find(|line| MARKERS.iter().any(|marker| line.starts_with(marker)));
+    let line = marked.or_else(|| trimmed.lines().next()).unwrap_or(trimmed);
+    MARKERS
+        .iter()
+        .fold(line, |line, marker| line.trim_start_matches(marker))
         .to_string()
 }
 
@@ -332,7 +444,7 @@ fn first_line_of(stdout: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::models::{Change, Head};
+    use crate::git::models::{Branch, Change, Head};
     use crate::git::testing::TestRepo;
 
     #[test]
@@ -657,6 +769,227 @@ mod tests {
             }
             other => panic!("expected a failure, got {other:?}"),
         }
+    }
+
+    /// A repository with a `main` and an `other` whose changes conflict.
+    fn conflicting_repo() -> TestRepo {
+        let repo = TestRepo::new();
+        repo.write("c.txt", "base\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+        repo.run(&["checkout", "-q", "-b", "other"]);
+        repo.write("c.txt", "theirs\n");
+        repo.commit("theirs");
+        repo.run(&["checkout", "-q", "main"]);
+        repo.write("c.txt", "ours\n");
+        repo.commit("ours");
+        repo
+    }
+
+    #[test]
+    fn the_branch_list_names_every_branch_and_marks_the_one_head_is_on() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+        repo.run(&["branch", "topic"]);
+
+        let branches = GitService::discover(repo.path())
+            .unwrap()
+            .branches()
+            .unwrap();
+        let names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, vec!["main", "topic"]);
+        assert!(branches[0].is_head, "{branches:?}");
+        assert!(!branches[0].remote);
+        assert!(!branches[1].is_head);
+    }
+
+    /// A remote branch is worth listing — checking out a colleague's is the
+    /// common reason to open a picker — and `origin/HEAD` is not, because it is
+    /// a symbolic ref to a branch already in the list.
+    #[test]
+    fn remote_branches_are_listed_and_the_remotes_head_symref_is_not() {
+        let (repo, _remote) = repo_with_remote();
+        repo.run(&["remote", "set-head", "origin", "main"]);
+
+        let branches = GitService::discover(repo.path())
+            .unwrap()
+            .branches()
+            .unwrap();
+        let names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, vec!["main", "origin/main"]);
+        assert!(branches[1].remote);
+        assert!(!branches[1].is_head, "a remote branch is never HEAD");
+        // `git switch origin/main` would detach HEAD; `git switch main` is what
+        // clicking that row has to run.
+        assert_eq!(branches[1].switch_target(), "main");
+    }
+
+    #[test]
+    fn a_remote_branch_keeps_the_slashes_in_its_own_name() {
+        let branch = Branch {
+            name: "origin/feature/nested".into(),
+            is_head: false,
+            remote: true,
+        };
+        assert_eq!(branch.switch_target(), "feature/nested");
+    }
+
+    #[test]
+    fn switching_moves_head_and_creating_makes_a_branch_at_it() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+        let service = GitService::discover(repo.path()).unwrap();
+
+        service.create_branch("topic").unwrap();
+        assert_eq!(
+            service.status().unwrap().head,
+            Some(Head::Branch("topic".into()))
+        );
+        service.switch_to("main").unwrap();
+        assert_eq!(
+            service.status().unwrap().head,
+            Some(Head::Branch("main".into()))
+        );
+    }
+
+    #[test]
+    fn switching_to_a_branch_that_does_not_exist_says_so() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+
+        let err = GitService::discover(repo.path())
+            .unwrap()
+            .switch_to("nope")
+            .unwrap_err();
+        assert!(matches!(err, GitError::Failed { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn a_clean_merge_reports_what_git_said_about_it() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+        repo.run(&["checkout", "-q", "-b", "other"]);
+        repo.write("b.txt", "b\n");
+        repo.run(&["add", "."]);
+        repo.commit("other");
+        repo.run(&["checkout", "-q", "main"]);
+
+        let service = GitService::discover(repo.path()).unwrap();
+        let said = service.merge("other").unwrap();
+        assert!(!said.is_empty(), "git says what it did");
+        assert!(repo.path().join("b.txt").exists());
+        assert!(service.status().unwrap().is_clean());
+    }
+
+    /// SPEC §35: a merge that conflicts is not a failed command. git wrote its
+    /// complaint to stdout, exited non-zero, and left a tree the panel shows.
+    #[test]
+    fn a_merge_that_conflicts_is_reported_as_conflicts_and_not_as_a_failure() {
+        let repo = conflicting_repo();
+        let service = GitService::discover(repo.path()).unwrap();
+
+        let err = service.merge("other").unwrap_err();
+        assert!(matches!(err, GitError::Conflicted), "{err:?}");
+
+        let status = service.status().unwrap();
+        assert_eq!(status.conflicts(), 1, "{:?}", status.entries);
+        assert!(
+            status.merging,
+            "MERGE_HEAD is what says the merge is unfinished"
+        );
+    }
+
+    /// The half of `merging` that `conflicts()` cannot answer: once every
+    /// conflicted file is staged there are no conflicts left and the merge is
+    /// still waiting for its commit.
+    #[test]
+    fn a_resolved_merge_is_still_a_merge_until_it_is_committed() {
+        let repo = conflicting_repo();
+        let service = GitService::discover(repo.path()).unwrap();
+        let _ = service.merge("other");
+
+        repo.write("c.txt", "resolved\n");
+        service.stage(&[PathBuf::from("c.txt")]).unwrap();
+        let status = service.status().unwrap();
+        assert_eq!(status.conflicts(), 0);
+        assert!(status.merging, "{status:?}");
+
+        service.commit("merged").unwrap();
+        assert!(!service.status().unwrap().merging);
+    }
+
+    #[test]
+    fn merging_a_branch_that_does_not_exist_is_an_ordinary_failure() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+
+        let err = GitService::discover(repo.path())
+            .unwrap()
+            .merge("nope")
+            .unwrap_err();
+        assert!(matches!(err, GitError::Failed { .. }), "{err:?}");
+    }
+
+    /// ADR-036: `--ff-only` is gone, so a pull that has to merge does.
+    ///
+    /// `pull.rebase` is written into the repository's own config rather than
+    /// left to the machine's: the point of not passing `--no-rebase` is that
+    /// the user's configuration decides, so the test has to be a user with one.
+    #[test]
+    fn a_pull_that_has_to_merge_merges() {
+        let (repo, remote) = repo_with_remote();
+        repo.run(&["config", "pull.rebase", "false"]);
+        // A second clone pushes a commit the first one has not seen.
+        let other = tempfile::tempdir().unwrap();
+        let clone = TestRepo::at(other.path());
+        clone.run(&["clone", "-q", remote.path().to_str().unwrap(), "."]);
+        clone.write("theirs.txt", "theirs\n");
+        clone.run(&["add", "."]);
+        clone.commit("theirs");
+        clone.run(&["push", "-q"]);
+
+        // And the first one has a commit of its own, so the pull cannot
+        // fast-forward.
+        repo.write("ours.txt", "ours\n");
+        repo.run(&["add", "."]);
+        repo.commit("ours");
+
+        let service = GitService::discover(repo.path()).unwrap();
+        service.pull().unwrap();
+        assert!(
+            repo.path().join("theirs.txt").exists(),
+            "their commit arrived"
+        );
+        assert!(service.status().unwrap().is_clean());
+    }
+
+    /// A failed `git pull` writes the fetch it managed, then a dozen hints, and
+    /// only then the sentence that says what went wrong.
+    #[test]
+    fn the_line_git_marked_as_the_failure_beats_the_first_one() {
+        let stderr = b"From /srv/repo\n   abc..def  main -> origin/main\n\
+                       hint: You have divergent branches.\n\
+                       fatal: Need to specify how to reconcile divergent branches.\n";
+        assert_eq!(
+            first_line(stderr),
+            "Need to specify how to reconcile divergent branches."
+        );
+        // And position is still the fallback for the commands that mark nothing.
+        assert_eq!(
+            first_line(b"something went wrong\nand then more\n"),
+            "something went wrong"
+        );
+        assert_eq!(first_line(b"   \n"), "no output");
     }
 
     #[test]

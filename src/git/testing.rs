@@ -13,17 +13,42 @@ use std::process::{Command, Output};
 use tempfile::TempDir;
 
 pub struct TestRepo {
-    dir: TempDir,
+    dir: Handle,
+}
+
+/// A repository this handle owns the directory of, or one it only points at.
+#[derive(Debug)]
+enum Handle {
+    Owned(TempDir),
+    Borrowed(std::path::PathBuf),
+}
+
+impl Handle {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Owned(dir) => dir.path(),
+            Self::Borrowed(path) => path,
+        }
+    }
 }
 
 impl TestRepo {
     /// A repository with no commits, on `main`.
     pub fn new() -> Self {
         let repo = Self {
-            dir: tempfile::tempdir().expect("a temporary directory"),
+            dir: Handle::Owned(tempfile::tempdir().expect("a temporary directory")),
         };
         repo.run(&["-c", "init.defaultBranch=main", "init", "-q"]);
         repo
+    }
+
+    /// An empty handle over a directory that is about to become a repository —
+    /// a `git clone .` into it, which `new`'s `git init` would get in the way
+    /// of. The `TempDir` stays the caller's, so it outlives this.
+    pub fn at(dir: &Path) -> Self {
+        Self {
+            dir: Handle::Borrowed(dir.to_path_buf()),
+        }
     }
 
     pub fn path(&self) -> &Path {

@@ -56,11 +56,19 @@ fn dialog_click(rects: &LayoutRects, kind: MouseEventKind, at: Position) -> Opti
     if kind != MouseEventKind::Down(MouseButton::Left) {
         return None;
     }
-    rects
+    if let Some(index) = rects
         .dialog_buttons
         .iter()
         .position(|rect| rect.contains(at))
-        .map(Command::DialogActivateButton)
+    {
+        return Some(Command::DialogActivateButton(index));
+    }
+    // A click on a list row selects it rather than acting on it: unlike the
+    // explorer's rows (ADR-020), a picker's confirm button is right there and
+    // choosing a branch by accident is a checkout.
+    let list = rects.dialog_list?;
+    list.contains(at)
+        .then(|| Command::DialogSelectItem((at.y - list.y) as usize))
 }
 
 /// Middle click closes the tab under the pointer (SPEC §11).

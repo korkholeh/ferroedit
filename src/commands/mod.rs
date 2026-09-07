@@ -120,6 +120,24 @@ pub enum Command {
     GitCommit(String),
     GitPull,
     GitPush,
+    /// Opens the branch picker (SPEC §33). `GitSwitchBranch` is what moves
+    /// `HEAD`.
+    GitBranchPrompt,
+    GitSwitchBranch(String),
+    /// Asks for the name of a branch to create at `HEAD`. Reached from the Git
+    /// menu and from the picker's own New… button.
+    GitNewBranchPrompt,
+    /// Runs the branch creation with whatever the open dialog holds; only the
+    /// dialog's button carries it.
+    SubmitBranch,
+    GitCreateBranch(String),
+    /// Opens the merge picker (SPEC §35). `GitMerge` is what merges.
+    GitMergePrompt,
+    GitMerge(String),
+    /// Stages the selected file even though it is conflicted — the confirm
+    /// dialog's second button, and the gesture that tells git a conflict is
+    /// resolved (ADR-036).
+    GitStageResolved,
     /// A job the worker has finished. The only command no user can produce: the
     /// run loop makes it out of an `AppEvent::GitJob` so that a background
     /// result reaches `App` through the same door as everything else.
@@ -193,6 +211,13 @@ pub enum Command {
 
     /// Moves the dialog's button selection, wrapping at both ends.
     DialogMove(i16),
+    /// Moves the selection in a dialog's list body, clamped at both ends.
+    DialogListMove(i16),
+    /// Selects a list row by its place in the visible window — a click on one.
+    DialogSelectItem(usize),
+    /// Runs the selected list row's command. Only a list dialog's confirm
+    /// button carries it; activating one turns it into that row's own command.
+    SubmitListChoice,
     /// Text entry in a dialog's input field. Separate from the editor's own
     /// insert commands because a file name is not a document: it has no undo
     /// history, no selection and no viewport.
@@ -322,6 +347,14 @@ impl Command {
             Self::GitCommit(_) => "Commit what is staged".into(),
             Self::GitPull => "Pull from the upstream branch".into(),
             Self::GitPush => "Push to the upstream branch".into(),
+            Self::GitBranchPrompt => "Switch branch — opens a picker".into(),
+            Self::GitSwitchBranch(_) => "Switch to a branch".into(),
+            Self::GitNewBranchPrompt => "New branch — asks for a name".into(),
+            Self::SubmitBranch => "Create the branch that was named".into(),
+            Self::GitCreateBranch(_) => "Create a branch and switch to it".into(),
+            Self::GitMergePrompt => "Merge a branch — opens a picker".into(),
+            Self::GitMerge(_) => "Merge a branch into the current one".into(),
+            Self::GitStageResolved => "Stage the conflicted file as resolved".into(),
             Self::GitJobFinished(_) => "Report a finished background git job".into(),
 
             Self::NewFilePrompt => "New file — asks for a name".into(),
@@ -367,6 +400,9 @@ impl Command {
                 "Move along the button row",
                 "Move back along the button row",
             ),
+            Self::DialogListMove(delta) => step(*delta, "Move down the list", "Move up the list"),
+            Self::DialogSelectItem(_) => "Select a list row".into(),
+            Self::SubmitListChoice => "Choose the selected row".into(),
             Self::DialogInputChar(_) => "Type it into the field".into(),
             Self::DialogInputText(_) => "Paste into the field".into(),
             Self::DialogInputBackspace => "Delete the cluster before the caret".into(),
@@ -537,6 +573,9 @@ pub static MENUS: &[MenuDef] = &[
             item("Commit…", Command::GitCommitPrompt),
             item("Pull", Command::GitPull),
             item("Push", Command::GitPush),
+            item("Branch…", Command::GitBranchPrompt),
+            item("New Branch…", Command::GitNewBranchPrompt),
+            item("Merge…", Command::GitMergePrompt),
         ],
     },
     MenuDef {

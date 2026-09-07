@@ -65,6 +65,16 @@ pub fn execute_command(app: &mut App, command: Command) {
         Command::GitCommit(message) => git_commit(app, &message),
         Command::GitPull => start_git_job(app, GitJob::Pull),
         Command::GitPush => start_git_job(app, GitJob::Push),
+        Command::GitBranchPrompt => prompt_branch(app, false),
+        Command::GitMergePrompt => prompt_branch(app, true),
+        Command::GitSwitchBranch(branch) => start_git_job(app, GitJob::Switch(branch)),
+        Command::GitMerge(branch) => start_git_job(app, GitJob::Merge(branch)),
+        Command::GitNewBranchPrompt => prompt_new_branch(app),
+        // Paired with the typed name by the dialog, exactly as `SubmitInput`
+        // and `SubmitCommit` are; see `activate_dialog_button`.
+        Command::SubmitBranch => log::warn!("a branch was submitted with no dialog open"),
+        Command::GitCreateBranch(name) => git_create_branch(app, &name),
+        Command::GitStageResolved => git_stage_conflicted(app),
         Command::GitJobFinished(outcome) => finish_git_job(app, &outcome),
         Command::ToggleHiddenFiles => toggle_hidden_files(app),
 
@@ -140,6 +150,17 @@ pub fn execute_command(app: &mut App, command: Command) {
         Command::Backspace => edit(app, Document::backspace),
         Command::Delete => edit(app, Document::delete),
 
+        Command::DialogListMove(delta) => {
+            if let Some(dialog) = app.dialog.as_mut() {
+                dialog.step_list(delta);
+            }
+        }
+        Command::DialogSelectItem(row) => {
+            if let Some(dialog) = app.dialog.as_mut() {
+                dialog.select_visible_row(row);
+            }
+        }
+        Command::SubmitListChoice => log::warn!("a list choice was made with no dialog open"),
         Command::DialogMove(delta) => {
             if let Some(dialog) = app.dialog.as_mut() {
                 dialog.step(delta);
@@ -503,9 +524,10 @@ fn close_dialog(app: &mut App) {
 
 /// Runs a dialog button's command, with the dialog already closed.
 ///
-/// Closing first is what keeps this from recursing: no command a button can
-/// carry opens another dialog, and the modal state is gone before any of them
-/// runs.
+/// Closing first is what keeps this from recursing: the modal state is gone
+/// before any of the commands runs, so one that opens a dialog of its own —
+/// the branch picker's New… button — replaces this one rather than nesting
+/// inside it.
 ///
 /// An input dialog's confirm button is the one command that is completed here
 /// rather than carried whole: the operation was decided when the dialog opened
@@ -518,6 +540,11 @@ fn activate_dialog_button(app: &mut App, index: usize) {
     let command = match dialog.command_at(index) {
         Some(Command::SubmitInput(operation)) => Some(Command::ApplyFileOp(operation, typed())),
         Some(Command::SubmitCommit) => Some(Command::GitCommit(typed())),
+        Some(Command::SubmitBranch) => Some(Command::GitCreateBranch(typed())),
+        // A list dialog's confirm button acts on the highlighted row, which is
+        // the same pairing as the two above: the button was built before the
+        // choice existed.
+        Some(Command::SubmitListChoice) => dialog.selected_item().map(|item| item.command.clone()),
         other => other,
     };
     close_dialog(app);
@@ -1049,6 +1076,103 @@ fn git_rescan(app: &mut App) {
     app.notifications.info(app.git.summary());
 }
 
+/// Opens a branch picker: the one to switch to, or the one to merge (SPEC §33,
+/// §35).
+///
+/// The list is read in the foreground, like the status and for the same reason:
+/// `for-each-ref` is a local read that finishes in milliseconds, and a picker
+/// that appeared empty and filled in later would be one whose selection moves
+/// under the user (ADR-030).
+fn prompt_branch(app: &mut App, merge: bool) {
+    let Some(repo) = app.git.service() else {
+        app.notifications.warning(app.git.summary());
+        return;
+    };
+    let branches = match repo.branches() {
+        Ok(branches) => branches,
+        Err(err) => {
+            log::error!("could not list branches: {err}");
+            app.notifications.error(format!("{err}"));
+            return;
+        }
+    };
+    // The merge picker leaves out the branch already checked out, so an empty
+    // one means something different in each case.
+    let choosable = branches.iter().filter(|b| merge != b.is_head).count();
+    if choosable == 0 {
+        app.notifications.info(if merge {
+            "No other branch to merge"
+        } else {
+            "No branches yet — commit something first"
+        });
+        return;
+    }
+    let return_focus = dialog_return_focus(app);
+    let dialog = if merge {
+        DialogState::merge_branch(&branches, return_focus)
+    } else {
+        DialogState::switch_branch(&branches, return_focus)
+    };
+    open_dialog(app, dialog);
+}
+
+/// Asks for the name of a branch to create at `HEAD`.
+fn prompt_new_branch(app: &mut App) {
+    if !app.git.is_repository() {
+        app.notifications.warning(app.git.summary());
+        return;
+    }
+    let head = app.git.status.head_label().to_string();
+    let return_focus = dialog_return_focus(app);
+    open_dialog(app, DialogState::new_branch(&head, return_focus));
+}
+
+fn git_create_branch(app: &mut App, name: &str) {
+    let name = name.trim();
+    if name.is_empty() {
+        app.notifications.warning("A branch needs a name");
+        return;
+    }
+    start_git_job(app, GitJob::CreateBranch(name.to_string()));
+}
+
+/// Stages the selected file with its markers as they are — the confirm
+/// dialog's second button.
+fn git_stage_conflicted(app: &mut App) {
+    let Some(entry) = app.git.selected_entry() else {
+        app.notifications.info("Nothing selected in the Git panel");
+        return;
+    };
+    start_git_job(app, GitJob::Stage(vec![entry.path.clone()]));
+}
+
+/// How much of a conflicted file is scanned for markers. git writes the first
+/// one where the first conflict is, which is not necessarily near the top, but
+/// a megabyte is far past any hunk a person is reading.
+const MARKER_SCAN_LIMIT: usize = 1 << 20;
+
+/// Whether the file still holds a conflict marker git would have written.
+///
+/// Only the `<<<<<<< ` opener is looked for, at the start of a line: it is the
+/// one of the three that cannot plausibly be the file's own content, and
+/// demanding all three would miss a half-finished resolution. The read is
+/// capped, because a conflicted file can be a large one and this happens on the
+/// UI thread.
+fn has_conflict_markers(app: &App, path: &Path) -> bool {
+    const MARKER: &[u8] = b"<<<<<<< ";
+    let Some(root) = app.git.root() else {
+        return false;
+    };
+    let Ok(text) = std::fs::read(root.join(path)) else {
+        // Unreadable, or a delete/modify conflict with nothing on disk. Neither
+        // is a reason to block the staging; git will say so if it disagrees.
+        return false;
+    };
+    text[..MARKER_SCAN_LIMIT.min(text.len())]
+        .split(|byte| *byte == b'\n')
+        .any(|line| line.starts_with(MARKER))
+}
+
 /// Opens the file the panel's selection is on.
 ///
 /// The status lists repository-relative paths, so the root is what turns one
@@ -1080,14 +1204,20 @@ fn git_stage_selected(app: &mut App, stage: bool) {
         return;
     };
     // `git add` on a conflicted file is git's way of saying "I resolved this",
-    // and the editor has no diff and no conflict view to justify that claim
-    // yet. Refusing is honest; asserting a resolution the user has not made is
-    // not (ADR-034).
-    if entry.is_conflicted() {
-        let name = entry.path.display().to_string();
-        app.notifications.warning(format!(
-            "{name} is conflicted — resolve it outside the editor"
-        ));
+    // and now that a merge can be started from the editor it needs saying here
+    // too (ADR-036). What it must not do is let `<<<<<<<` reach a commit
+    // unremarked, so a file that still has markers in it asks first.
+    if stage && entry.is_conflicted() {
+        let path = entry.path.clone();
+        if has_conflict_markers(app, &path) {
+            let return_focus = dialog_return_focus(app);
+            open_dialog(
+                app,
+                DialogState::confirm_conflict_markers(&path, return_focus),
+            );
+            return;
+        }
+        start_git_job(app, GitJob::Stage(vec![path]));
         return;
     }
     let paths = vec![entry.path.clone()];
@@ -1123,8 +1253,15 @@ fn prompt_commit(app: &mut App) {
         app.notifications.warning(app.git.summary());
         return;
     }
+    // A merge that has been resolved still has to be committed even when the
+    // resolution staged nothing new, so `merging` is the second way in.
+    if app.git.status.conflicts() > 0 {
+        app.notifications
+            .warning("Resolve the conflicts before committing");
+        return;
+    }
     let staged = app.git.staged_count();
-    if staged == 0 {
+    if staged == 0 && !app.git.status.merging {
         app.notifications.info("Nothing staged to commit");
         return;
     }
@@ -1474,10 +1611,8 @@ mod tests {
         );
     }
 
-    /// ADR-034: `git add` on a conflicted file is an assertion the editor has
-    /// no view to justify yet, so it refuses rather than making it.
-    #[test]
-    fn a_conflicted_file_is_not_staged() {
+    /// A repository whose `other` branch conflicts with `main`.
+    fn conflicting_repo() -> crate::git::testing::TestRepo {
         let repo = crate::git::testing::TestRepo::new();
         repo.write("c.txt", "base\n");
         repo.run(&["add", "."]);
@@ -1488,15 +1623,260 @@ mod tests {
         repo.run(&["checkout", "-q", "main"]);
         repo.write("c.txt", "ours\n");
         repo.commit("ours");
-        let _ = repo.try_run(&["merge", "other"]);
+        repo
+    }
 
-        let (mut app, _rx) = app_over(&repo);
-        assert_eq!(app.git.status.conflicts(), 1);
+    /// ADR-036: staging a conflicted file is how git is told the conflict is
+    /// resolved, and the editor now has a merge that needs saying so — but a
+    /// file that still has `<<<<<<<` in it asks first.
+    #[test]
+    fn a_conflicted_file_with_markers_asks_before_it_is_staged() {
+        let repo = conflicting_repo();
+        let (mut app, rx) = app_over(&repo);
+        execute_command(&mut app, Command::GitMerge("other".into()));
+        settle(&mut app, &rx);
+        assert_eq!(app.git.status.conflicts(), 1, "{:?}", app.git.entries());
+
         execute_command(&mut app, Command::GitToggleStage);
+        assert_eq!(app.git.busy(), None, "nothing was submitted yet");
+        let dialog = app.dialog.as_ref().expect("a confirmation");
+        assert_eq!(dialog.prompt(), "c.txt still has conflict markers.");
+        assert_eq!(dialog.buttons[dialog.selected].label, "Cancel");
 
-        assert_eq!(app.git.busy(), None, "nothing was submitted");
-        let message = app.notifications.current().unwrap().message.clone();
-        assert!(message.contains("conflicted"), "{message}");
+        // Stage Anyway is the second button, and it does stage them.
+        execute_command(&mut app, Command::DialogMove(1));
+        execute_command(&mut app, Command::DialogActivate);
+        settle(&mut app, &rx);
+        assert_eq!(app.git.status.conflicts(), 0, "{:?}", app.git.entries());
+    }
+
+    #[test]
+    fn a_conflicted_file_the_user_has_resolved_is_staged_without_a_question() {
+        let repo = conflicting_repo();
+        let (mut app, rx) = app_over(&repo);
+        execute_command(&mut app, Command::GitMerge("other".into()));
+        settle(&mut app, &rx);
+
+        repo.write("c.txt", "resolved by hand\n");
+        execute_command(&mut app, Command::GitToggleStage);
+        assert!(app.dialog.is_none(), "no markers, no question");
+        settle(&mut app, &rx);
+        assert_eq!(app.git.status.conflicts(), 0);
+        assert!(app.git.status.merging, "and the merge still wants a commit");
+    }
+
+    /// SPEC §35: a merge that stops shows its conflicted files, and the panel
+    /// says the merge is unfinished until it is committed.
+    #[test]
+    fn a_merge_that_conflicts_shows_the_files_and_says_the_merge_is_open() {
+        let repo = conflicting_repo();
+        let (mut app, rx) = app_over(&repo);
+
+        execute_command(&mut app, Command::GitMerge("other".into()));
+        assert_eq!(app.git.busy(), Some("Merging…"));
+        settle(&mut app, &rx);
+
+        assert!(app.git.status.merging);
+        assert_eq!(app.git.entries().len(), 1);
+        assert!(app.git.entries()[0].is_conflicted());
+        assert_eq!(app.git.summary(), "main (merging) — 1 change, 1 conflict");
+        let notification = app.notifications.current().unwrap();
+        assert_eq!(
+            notification.kind,
+            crate::app::notifications::NotificationKind::Error
+        );
+        assert!(
+            notification.message.starts_with("Merge failed: conflicts"),
+            "{}",
+            notification.message
+        );
+    }
+
+    #[test]
+    fn a_clean_merge_brings_the_other_branchs_files_in() {
+        let repo = crate::git::testing::TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+        repo.run(&["checkout", "-q", "-b", "other"]);
+        repo.write("b.txt", "b\n");
+        repo.run(&["add", "."]);
+        repo.commit("other");
+        repo.run(&["checkout", "-q", "main"]);
+
+        let (mut app, rx) = app_over(&repo);
+        execute_command(&mut app, Command::GitMerge("other".into()));
+        settle(&mut app, &rx);
+
+        assert!(repo.path().join("b.txt").exists());
+        assert!(app.git.status.is_clean());
+        assert!(!app.git.status.merging);
+    }
+
+    /// Committing is refused while anything is still conflicted, and allowed
+    /// once nothing is — even though a resolved merge may have nothing new
+    /// staged of its own.
+    #[test]
+    fn a_merge_is_finished_by_committing_it() {
+        let repo = conflicting_repo();
+        let (mut app, rx) = app_over(&repo);
+        execute_command(&mut app, Command::GitMerge("other".into()));
+        settle(&mut app, &rx);
+
+        execute_command(&mut app, Command::GitCommitPrompt);
+        assert!(app.dialog.is_none());
+        assert_eq!(
+            app.notifications.current().map(|n| n.message.as_str()),
+            Some("Resolve the conflicts before committing")
+        );
+
+        repo.write("c.txt", "resolved\n");
+        execute_command(&mut app, Command::GitToggleStage);
+        settle(&mut app, &rx);
+
+        execute_command(&mut app, Command::GitCommitPrompt);
+        assert!(app.dialog.is_some(), "the merge can be committed now");
+        for character in "merge other".chars() {
+            execute_command(&mut app, Command::DialogInputChar(character));
+        }
+        execute_command(&mut app, Command::DialogActivate);
+        settle(&mut app, &rx);
+
+        assert!(!app.git.status.merging);
+        assert!(app.git.status.is_clean());
+        assert_eq!(
+            repo.run(&["log", "-1", "--pretty=%s"]).trim(),
+            "merge other"
+        );
+    }
+
+    // --- branches (SPEC §33) ----------------------------------------------
+
+    #[test]
+    fn the_branch_picker_lists_the_branches_and_switching_moves_head() {
+        let repo = crate::git::testing::TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+        repo.run(&["branch", "topic"]);
+        let (mut app, rx) = app_over(&repo);
+
+        execute_command(&mut app, Command::GitBranchPrompt);
+        let dialog = app.dialog.as_ref().expect("a picker");
+        let labels: Vec<&str> = dialog.items().iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, vec!["main", "topic"]);
+        assert_eq!(app.focus, FocusTarget::Dialog);
+
+        // Down, then Enter on the default Switch button.
+        execute_command(&mut app, Command::DialogListMove(1));
+        execute_command(&mut app, Command::DialogActivate);
+        assert!(app.dialog.is_none());
+        settle(&mut app, &rx);
+
+        assert_eq!(app.git.branch_label(), "topic");
+        assert_eq!(
+            app.notifications.current().map(|n| n.message.as_str()),
+            Some("Switched topic")
+        );
+        assert_eq!(app.focus, FocusTarget::GitPanel, "focus came back");
+    }
+
+    /// Enter without moving is a no-op, because the picker opens on the branch
+    /// HEAD is already on.
+    #[test]
+    fn confirming_the_picker_unchanged_switches_to_the_branch_already_checked_out() {
+        let repo = crate::git::testing::TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+        repo.run(&["branch", "topic"]);
+        let (mut app, rx) = app_over(&repo);
+
+        execute_command(&mut app, Command::GitBranchPrompt);
+        execute_command(&mut app, Command::DialogActivate);
+        settle(&mut app, &rx);
+        assert_eq!(app.git.branch_label(), "main");
+    }
+
+    /// The picker's New… button opens the name prompt in place of the picker
+    /// rather than on top of it.
+    #[test]
+    fn the_pickers_new_button_asks_for_a_name_and_creates_the_branch() {
+        let repo = crate::git::testing::TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+        let (mut app, rx) = app_over(&repo);
+
+        execute_command(&mut app, Command::GitBranchPrompt);
+        execute_command(&mut app, Command::DialogActivateButton(1));
+        let dialog = app
+            .dialog
+            .as_ref()
+            .expect("the name prompt replaced the picker");
+        assert_eq!(dialog.title, "New Branch");
+        assert_eq!(dialog.prompt(), "Branch from main");
+
+        for character in "feature/x".chars() {
+            execute_command(&mut app, Command::DialogInputChar(character));
+        }
+        execute_command(&mut app, Command::DialogActivate);
+        settle(&mut app, &rx);
+
+        assert_eq!(app.git.branch_label(), "feature/x");
+    }
+
+    #[test]
+    fn a_branch_with_no_name_is_refused_before_git_sees_it() {
+        let repo = changed_repo();
+        let (mut app, _rx) = app_over(&repo);
+        execute_command(&mut app, Command::GitCreateBranch("  ".into()));
+        assert_eq!(app.git.busy(), None);
+        assert_eq!(
+            app.notifications.current().map(|n| n.message.as_str()),
+            Some("A branch needs a name")
+        );
+    }
+
+    #[test]
+    fn a_repository_with_one_branch_has_nothing_to_merge() {
+        let repo = changed_repo();
+        let (mut app, _rx) = app_over(&repo);
+        execute_command(&mut app, Command::GitMergePrompt);
+        assert!(app.dialog.is_none());
+        assert_eq!(
+            app.notifications.current().map(|n| n.message.as_str()),
+            Some("No other branch to merge")
+        );
+    }
+
+    #[test]
+    fn a_repository_with_no_commits_has_no_branches_to_pick_from() {
+        let repo = crate::git::testing::TestRepo::new();
+        repo.write("a.txt", "a\n");
+        let (mut app, _rx) = app_over(&repo);
+        execute_command(&mut app, Command::GitBranchPrompt);
+        assert!(app.dialog.is_none());
+        assert_eq!(
+            app.notifications.current().map(|n| n.message.as_str()),
+            Some("No branches yet — commit something first")
+        );
+    }
+
+    #[test]
+    fn a_branch_action_outside_a_repository_says_so_rather_than_opening_a_picker() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::fixture_in(dir.path());
+        execute_command(&mut app, Command::GitRefresh);
+
+        for command in [Command::GitBranchPrompt, Command::GitNewBranchPrompt] {
+            execute_command(&mut app, command);
+            assert!(app.dialog.is_none());
+            assert_eq!(
+                app.notifications.current().map(|n| n.message.as_str()),
+                Some("Not a Git repository")
+            );
+        }
     }
 
     #[test]

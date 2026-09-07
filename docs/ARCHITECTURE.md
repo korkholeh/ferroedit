@@ -138,19 +138,33 @@ no event handling of its own — it feeds the same `execute_command` path as the
 keyboard, the menu and the mouse, and a new dialog is a constructor rather than a new
 input mode.
 
-The body is the enum: `Message` for a confirmation, `Input` for a name (ADR-019). A
-dialog with a field has its own keymap table, because `Left` is a caret there and a
-button selection everywhere else, and `resolve` picks the table from the open dialog. A
-button whose command needs the typed text carries the operation alone
-(`Command::SubmitInput`); `activate_dialog_button` pairs it with the field's contents on
-the way out, because the field stops existing when the dialog closes.
+The body is the enum: `Message` for a confirmation, `Input` for a name (ADR-019), `List`
+for a choice — the branch picker, and the one case where no pane behind the dialog
+already lists the same things (ADR-035). A dialog with a field has its own keymap table,
+because `Left` is a caret there and a button selection everywhere else, and `resolve`
+picks the table from the open dialog. `Up` and `Down` are the list's axis the way `Left`
+and `Right` are the button row's; a body that is not a list ignores them.
+
+A button whose command needs something that does not exist yet carries a marker instead,
+and `activate_dialog_button` substitutes on the way out:
+
+| Button carries | Becomes | Because |
+|---|---|---|
+| `SubmitInput(op)` | `ApplyFileOp(op, text)` | the field stops existing when the dialog closes |
+| `SubmitCommit` | `GitCommit(text)` | the same, for a message |
+| `SubmitBranch` | `GitCreateBranch(text)` | the same, for a name |
+| `SubmitListChoice` | the highlighted row's own command | the choice is made after the button is built |
+
+The box's height comes from the body — `DialogState::body_height` — so a picker is as
+tall as its list while a message and an input stay at the five rows they always were.
 
 Modality is enforced at the two input boundaries, not inside `execute_command`:
 `event::keyboard::resolve` consults only the `Dialog` bindings while a dialog has
 focus (so no global shortcut can act behind an open prompt), and
 `event::mouse::hit_test` returns a button index or nothing at all. Everything a button
 runs happens with the dialog already closed, which is what keeps the recursion at one
-level.
+level — a button that opens a dialog of its own, like the picker's New…, replaces this
+one rather than nesting inside it.
 
 ## 7. Syntax highlighting
 

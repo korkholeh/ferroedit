@@ -14,6 +14,11 @@ use std::path::Path;
 use crate::app::focus::FocusTarget;
 use crate::app::input_field::InputField;
 use crate::commands::{Command, FileOp};
+use crate::git::models::Branch;
+
+/// The most rows a list body shows at once. Past it the list scrolls: a picker
+/// taller than a short terminal is a dialog that cannot be closed.
+pub const MAX_LIST_ROWS: usize = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DialogButton {
@@ -32,6 +37,17 @@ impl DialogButton {
     }
 }
 
+/// One row of a list body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListItem {
+    pub label: String,
+    /// What choosing this row runs.
+    pub command: Command,
+    /// Drawn with git's own `*`: the branch `HEAD` is already on. It is not the
+    /// selection — the selection is the highlight, and it starts here.
+    pub current: bool,
+}
+
 /// What a dialog shows above its buttons.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DialogBody {
@@ -39,6 +55,18 @@ pub enum DialogBody {
     Message(String),
     /// A prompt and a text field — the name a file operation needs.
     Input { prompt: String, field: InputField },
+    /// A prompt and a list to choose from — the branch picker (SPEC §33).
+    ///
+    /// ADR-019 left this open and ADR-029 deferred it, both for the same
+    /// reason: every list the editor needed until now had a pane behind it that
+    /// already listed the same things better. A branch list has no such pane
+    /// (ADR-035).
+    List {
+        prompt: String,
+        items: Vec<ListItem>,
+        selected: usize,
+        scroll: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,6 +237,116 @@ impl DialogState {
         )
     }
 
+    /// The branch picker (SPEC §33).
+    ///
+    /// The selection starts on the branch `HEAD` is already on, so opening the
+    /// picker and pressing Enter without reading is a no-op rather than a
+    /// checkout. New… is a button rather than the `n` of SPEC §33's sketch: a
+    /// letter bound in the dialog table would be bound in *every* dialog, and
+    /// `n` on a quit prompt must not create a branch.
+    pub fn switch_branch(branches: &[Branch], return_focus: FocusTarget) -> Self {
+        let items = Self::branch_items(branches, |branch| {
+            Command::GitSwitchBranch(branch.switch_target().to_string())
+        });
+        let selected = items.iter().position(|item| item.current).unwrap_or(0);
+        Self::list(
+            "Switch Branch",
+            branch_count(items.len()),
+            items,
+            selected,
+            vec![
+                DialogButton::new("Switch", Some(Command::SubmitListChoice)),
+                DialogButton::new("New…", Some(Command::GitNewBranchPrompt)),
+                DialogButton::new("Cancel", None),
+            ],
+            return_focus,
+        )
+    }
+
+    /// The merge picker (SPEC §35).
+    ///
+    /// The current branch is not in it: merging a branch into itself is the one
+    /// choice with no meaning, and leaving it out is better than a row that
+    /// reports "Already up to date."
+    pub fn merge_branch(branches: &[Branch], return_focus: FocusTarget) -> Self {
+        let others: Vec<Branch> = branches.iter().filter(|b| !b.is_head).cloned().collect();
+        let items = Self::branch_items(&others, |branch| Command::GitMerge(branch.name.clone()));
+        Self::list(
+            "Merge Branch",
+            branch_count(items.len()),
+            items,
+            0,
+            vec![
+                DialogButton::new("Merge", Some(Command::SubmitListChoice)),
+                DialogButton::new("Cancel", None),
+            ],
+            return_focus,
+        )
+    }
+
+    /// Asks for the name of a branch to create at `HEAD`.
+    pub fn new_branch(head: &str, return_focus: FocusTarget) -> Self {
+        Self::with_input(
+            "New Branch",
+            format!("Branch from {head}"),
+            "",
+            "Create",
+            Command::SubmitBranch,
+            return_focus,
+        )
+    }
+
+    /// Asked before a conflicted file is staged with its markers still in it.
+    ///
+    /// Staging a conflicted file is how git is told the conflict is resolved,
+    /// and the editor now has a merge flow that needs saying so (ADR-036). What
+    /// it must not do is let `<<<<<<<` reach a commit unremarked.
+    pub fn confirm_conflict_markers(path: &Path, return_focus: FocusTarget) -> Self {
+        let name = display_name(path);
+        Self::confirm(
+            "Conflict markers",
+            format!("{name} still has conflict markers."),
+            vec![
+                DialogButton::new("Cancel", None),
+                DialogButton::new("Stage Anyway", Some(Command::GitStageResolved)),
+            ],
+            return_focus,
+        )
+    }
+
+    fn branch_items(branches: &[Branch], command: impl Fn(&Branch) -> Command) -> Vec<ListItem> {
+        branches
+            .iter()
+            .map(|branch| ListItem {
+                label: branch.name.clone(),
+                command: command(branch),
+                current: branch.is_head,
+            })
+            .collect()
+    }
+
+    fn list(
+        title: &str,
+        prompt: String,
+        items: Vec<ListItem>,
+        selected: usize,
+        buttons: Vec<DialogButton>,
+        return_focus: FocusTarget,
+    ) -> Self {
+        Self {
+            title: title.into(),
+            body: DialogBody::List {
+                prompt,
+                items,
+                selected,
+                scroll: 0,
+            },
+            buttons,
+            selected: 0,
+            return_focus,
+        }
+    }
+
     /// The Help menu's About entry. One button, and it only dismisses.
     pub fn about(version: &str, return_focus: FocusTarget) -> Self {
         Self::confirm(
@@ -293,22 +431,122 @@ impl DialogState {
     pub fn field(&self) -> Option<&InputField> {
         match &self.body {
             DialogBody::Input { field, .. } => Some(field),
-            DialogBody::Message(_) => None,
+            _ => None,
         }
     }
 
     pub fn field_mut(&mut self) -> Option<&mut InputField> {
         match &mut self.body {
             DialogBody::Input { field, .. } => Some(field),
-            DialogBody::Message(_) => None,
+            _ => None,
         }
     }
 
-    /// The line above the buttons: the message, or the input's prompt.
+    /// The line above the buttons: the message, or the prompt of a body that
+    /// has one.
     pub fn prompt(&self) -> &str {
         match &self.body {
             DialogBody::Message(message) => message,
-            DialogBody::Input { prompt, .. } => prompt,
+            DialogBody::Input { prompt, .. } | DialogBody::List { prompt, .. } => prompt,
+        }
+    }
+
+    /// The rows a list body holds, and an empty slice for the bodies that are
+    /// not one — so the renderer and the layout can ask without matching.
+    pub fn items(&self) -> &[ListItem] {
+        match &self.body {
+            DialogBody::List { items, .. } => items,
+            _ => &[],
+        }
+    }
+
+    /// Which row the list highlights, and the first row it draws.
+    pub fn list_view(&self) -> (usize, usize) {
+        match &self.body {
+            DialogBody::List {
+                selected, scroll, ..
+            } => (*selected, *scroll),
+            _ => (0, 0),
+        }
+    }
+
+    /// The row the confirm button would act on.
+    pub fn selected_item(&self) -> Option<&ListItem> {
+        match &self.body {
+            DialogBody::List {
+                items, selected, ..
+            } => items.get(*selected),
+            _ => None,
+        }
+    }
+
+    /// Moves the list selection, clamped at both ends, and scrolls it into
+    /// view.
+    ///
+    /// Clamped rather than wrapping, unlike the button row: a picker is a list
+    /// like the explorer's, and a list that jumps from its last row to its
+    /// first under a held key is a list that loses the reader's place.
+    pub fn step_list(&mut self, delta: i16) {
+        let DialogBody::List {
+            items,
+            selected,
+            scroll,
+            ..
+        } = &mut self.body
+        else {
+            return;
+        };
+        if items.is_empty() {
+            *selected = 0;
+            *scroll = 0;
+            return;
+        }
+        let last = items.len() - 1;
+        *selected = if delta < 0 {
+            selected.saturating_sub(delta.unsigned_abs() as usize)
+        } else {
+            (*selected + delta as usize).min(last)
+        };
+        let height = MAX_LIST_ROWS.min(items.len());
+        if *selected < *scroll {
+            *scroll = *selected;
+        } else if *selected >= *scroll + height {
+            *scroll = *selected + 1 - height;
+        }
+        *scroll = (*scroll).min(items.len().saturating_sub(height));
+    }
+
+    /// Selects a row by its place in the *visible* window.
+    ///
+    /// The mouse reports a screen row and not an index into a list it cannot
+    /// see all of, so the scroll is added here rather than at the hit-test,
+    /// which has the rects but not the dialog. A visible row is by definition
+    /// already in view, so nothing has to be scrolled afterwards.
+    pub fn select_visible_row(&mut self, row: usize) {
+        let DialogBody::List {
+            items,
+            selected,
+            scroll,
+            ..
+        } = &mut self.body
+        else {
+            return;
+        };
+        if items.is_empty() {
+            return;
+        }
+        *selected = (*scroll + row).min(items.len() - 1);
+    }
+
+    /// How many rows the body needs, which is what the box's height is built
+    /// from.
+    pub fn body_height(&self) -> usize {
+        match &self.body {
+            // A message and a blank row under it: the box would look cramped
+            // with the buttons directly beneath the sentence.
+            DialogBody::Message(_) => 2,
+            DialogBody::Input { .. } => 2,
+            DialogBody::List { items, .. } => 1 + MAX_LIST_ROWS.min(items.len()).max(1),
         }
     }
 
@@ -327,6 +565,14 @@ impl DialogState {
     /// between buttons, and dismissing is the least surprising answer to that.
     pub fn command_at(&self, index: usize) -> Option<Command> {
         self.buttons.get(index).and_then(|b| b.command.clone())
+    }
+}
+
+/// `3 branches` — the line above a picker's list.
+fn branch_count(count: usize) -> String {
+    match count {
+        1 => "1 branch".to_string(),
+        count => format!("{count} branches"),
     }
 }
 
@@ -432,6 +678,138 @@ mod tests {
             DialogState::commit(1, FocusTarget::GitPanel).prompt(),
             "Message for 1 staged file"
         );
+    }
+
+    fn branches() -> Vec<Branch> {
+        vec![
+            Branch {
+                name: "main".into(),
+                is_head: true,
+                remote: false,
+            },
+            Branch {
+                name: "topic".into(),
+                is_head: false,
+                remote: false,
+            },
+            Branch {
+                name: "origin/topic".into(),
+                is_head: false,
+                remote: true,
+            },
+        ]
+    }
+
+    /// The picker opens on the branch you are already on, so Enter without
+    /// reading is a no-op rather than a checkout.
+    #[test]
+    fn the_branch_picker_starts_on_the_branch_head_is_already_on() {
+        let dialog = DialogState::switch_branch(&branches(), FocusTarget::GitPanel);
+        assert_eq!(dialog.prompt(), "3 branches");
+        assert_eq!(dialog.list_view(), (0, 0));
+        assert_eq!(dialog.selected_item().unwrap().label, "main");
+        assert!(dialog.selected_item().unwrap().current);
+        assert_eq!(dialog.buttons[dialog.selected].label, "Switch");
+        assert_eq!(dialog.command_at(0), Some(Command::SubmitListChoice));
+        assert_eq!(dialog.command_at(1), Some(Command::GitNewBranchPrompt));
+        assert_eq!(dialog.command_at(2), None);
+    }
+
+    /// A remote row switches by its short name: `git switch origin/topic`
+    /// would detach HEAD, which is not what clicking it means.
+    #[test]
+    fn a_remote_row_switches_to_the_local_branch_it_would_create() {
+        let dialog = DialogState::switch_branch(&branches(), FocusTarget::GitPanel);
+        let items = dialog.items();
+        assert_eq!(items[1].command, Command::GitSwitchBranch("topic".into()));
+        assert_eq!(items[2].label, "origin/topic");
+        assert_eq!(items[2].command, Command::GitSwitchBranch("topic".into()));
+    }
+
+    /// Merging a branch into itself has no meaning, so the current one is not
+    /// offered — and a merge takes the ref's full name, remote and all.
+    #[test]
+    fn the_merge_picker_leaves_out_the_branch_you_are_on() {
+        let dialog = DialogState::merge_branch(&branches(), FocusTarget::GitPanel);
+        let labels: Vec<&str> = dialog.items().iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, vec!["topic", "origin/topic"]);
+        assert_eq!(
+            dialog.items()[1].command,
+            Command::GitMerge("origin/topic".into())
+        );
+        assert_eq!(dialog.buttons[0].label, "Merge");
+    }
+
+    #[test]
+    fn the_list_selection_is_clamped_at_both_ends_rather_than_wrapping() {
+        let mut dialog = DialogState::merge_branch(&branches(), FocusTarget::GitPanel);
+        dialog.step_list(-1);
+        assert_eq!(
+            dialog.list_view().0,
+            0,
+            "the top does not wrap to the bottom"
+        );
+        dialog.step_list(5);
+        assert_eq!(dialog.list_view().0, 1, "and it stops at the last row");
+    }
+
+    #[test]
+    fn a_list_taller_than_the_box_scrolls_under_the_selection() {
+        let many: Vec<Branch> = (0..20)
+            .map(|i| Branch {
+                name: format!("b{i:02}"),
+                is_head: i == 0,
+                remote: false,
+            })
+            .collect();
+        let mut dialog = DialogState::switch_branch(&many, FocusTarget::GitPanel);
+        assert_eq!(dialog.body_height(), 1 + MAX_LIST_ROWS);
+
+        dialog.step_list(MAX_LIST_ROWS as i16);
+        let (selected, scroll) = dialog.list_view();
+        assert_eq!(selected, MAX_LIST_ROWS);
+        assert_eq!(scroll, 1, "the selected row is the last one shown");
+
+        // A click reports a screen row, which is an index into what is drawn.
+        dialog.select_visible_row(0);
+        assert_eq!(dialog.list_view(), (1, 1));
+        dialog.select_visible_row(99);
+        assert_eq!(
+            dialog.list_view().0,
+            19,
+            "past the end selects the last row"
+        );
+    }
+
+    #[test]
+    fn a_message_and_an_input_body_are_the_same_height_they_always_were() {
+        assert_eq!(
+            DialogState::unsaved_on_quit(1, FocusTarget::Editor).body_height(),
+            2
+        );
+        assert_eq!(
+            DialogState::rename(Path::new("/p/a.rs"), FocusTarget::Explorer).body_height(),
+            2
+        );
+    }
+
+    #[test]
+    fn the_conflict_dialog_defaults_to_not_staging_the_markers() {
+        let dialog =
+            DialogState::confirm_conflict_markers(Path::new("/p/c.txt"), FocusTarget::GitPanel);
+        assert_eq!(dialog.prompt(), "c.txt still has conflict markers.");
+        assert_eq!(dialog.buttons[dialog.selected].label, "Cancel");
+        assert_eq!(dialog.command_at(1), Some(Command::GitStageResolved));
+    }
+
+    #[test]
+    fn a_body_that_is_not_a_list_answers_the_list_questions_harmlessly() {
+        let mut dialog = DialogState::unsaved_on_quit(1, FocusTarget::Editor);
+        assert!(dialog.items().is_empty());
+        assert!(dialog.selected_item().is_none());
+        dialog.step_list(3);
+        dialog.select_visible_row(2);
+        assert_eq!(dialog.list_view(), (0, 0));
     }
 
     #[test]

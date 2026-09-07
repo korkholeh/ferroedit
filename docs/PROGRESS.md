@@ -1,6 +1,6 @@
 # Current Phase
 
-Phase 12 — Branches and merge (not started)
+Phase 13 — Diff viewer (not started)
 
 ## Completed
 
@@ -442,9 +442,58 @@ Phase 12 — Branches and merge (not started)
     command that starts a job is asserted to return while `git.busy()` is still `Some`.
   - 522 tests (was 489), including the pty checks below.
 
+- **Phase 12 — Branches and merge**
+  - `DialogBody::List` (ADR-035) — the variant ADR-019 left open and ADR-029 deferred,
+    with the rule they set: a list body earns its place only when no pane behind the
+    dialog already lists the same things better. A branch list is the first thing that
+    passes, and there is not going to be a branch pane in a sidebar that already holds a
+    tree and a status.
+  - The picker needs no new input mode. Its confirm button carries `SubmitListChoice`,
+    which `activate_dialog_button` replaces with the highlighted row's own command —
+    the same substitution that pairs `SubmitInput` with a name and `SubmitCommit` with a
+    message. `Up` and `Down` are the list's axis, bound in the dialog table; a body that
+    is not a list ignores them.
+  - The box's height is computed from the body now (`body_height`) rather than being a
+    constant, so a picker is as tall as its list while a message and an input stay at the
+    five rows they always were. The button row is placed from the bottom border.
+  - The selection starts on the branch `HEAD` is already on, so opening the picker and
+    pressing Enter without reading is a no-op and not a checkout. A click selects a row
+    without choosing it — the opposite of the explorer's rule (ADR-020), for the reason
+    ADR-020 gave: a click that acts is worth it when the action is cheap, and a checkout
+    is not.
+  - `GitService` gained `branches`, `switch_to`, `create_branch` and `merge`. One
+    `for-each-ref` with our own format rather than `git branch -a`, so nothing has to be
+    recovered from a display form that varies with the terminal and with `color.branch`.
+    `refs/remotes/origin/HEAD` is skipped: it is a symbolic ref to a branch already in
+    the list.
+  - Remote-tracking branches are offered and switched to by their *short* name:
+    `git switch origin/topic` would detach `HEAD`, while `git switch topic` creates the
+    local branch that clicking that row means. `switch` and not `checkout`, so a branch
+    name that is also a path cannot be read as a request to discard that file's changes.
+  - A merge that conflicts comes back as `GitError::Conflicted` and not as a failed
+    command (ADR-036): git wrote its complaint to *stdout*, exited non-zero, and left the
+    tree in exactly the state the panel exists to show.
+  - A stopped merge is read from `MERGE_HEAD` — a `stat` on a path `discover` already
+    learned, not another subprocess — and shown as `[merging]` in the panel title. It is
+    deliberately not `conflicts() > 0`: once every conflicted file is staged there are no
+    conflicts left and the merge is still uncommitted, which is the moment people get
+    lost.
+  - ADR-034's two refusals are paid off. A conflicted file can be staged, because that is
+    how git is told a conflict is resolved and there is now a merge in the editor that
+    needs saying so; a file that still holds a `<<<<<<< ` line asks first. `git pull`
+    loses `--ff-only` and gains no rebase flag of its own, so `pull.rebase` decides.
+  - `first_line` now prefers a line git marked `fatal:` or `error:` over the first one. A
+    failed `git pull` writes the fetch it managed, then a dozen hints, and only then says
+    what went wrong — the old rule would have shown the user `From /srv/repo`.
+  - Committing is refused while anything is conflicted and allowed during a merge even
+    with nothing newly staged, because a resolved merge still needs its commit.
+  - Panel keys: `b` opens the branch picker, `m` the merge picker. The Git menu gained
+    Branch…, New Branch… and Merge…
+  - 556 tests (was 522), including the pty checks below.
+
 ## In progress
 
-- Nothing. Phase 11 is closed.
+- Nothing. Phase 12 is closed.
 
 ## Known issues
 
@@ -550,8 +599,21 @@ Phase 12 — Branches and merge (not started)
 - **The status is re-read after every job, in the foreground.** Staging three files in
   three keystrokes is three `git status` runs. They are milliseconds each and they are
   correct; they are not batched.
-- **Pull is fast-forward only and a conflict cannot be staged** (ADR-034). A merge is
-  Phase 12, and until then both have to be done in a terminal.
+- **A branch cannot be deleted from the editor.** SPEC §33 says it can wait, and it is
+  the one branch operation that loses work.
+- **A rebase or a cherry-pick in progress is invisible.** Only `MERGE_HEAD` is looked at,
+  so `REBASE_HEAD` and `CHERRY_PICK_HEAD` leave the panel saying nothing while their
+  conflicts are listed like any other. The conflicted files are right; the sentence above
+  them is missing.
+- **The commit dialog does not prefill a merge message.** git writes one into `MERGE_MSG`
+  and the dialog ignores it, so finishing a merge means typing the subject again.
+- **A pull with divergent branches and no `pull.rebase` fails** with git's own advice
+  about configuring one (ADR-036). That is the honest answer and it is still one more
+  step than a user expected.
+- **`git switch` needs git 2.23.** Older git has `checkout` and not `switch`, and the
+  editor does not fall back to it.
+- **The marker check reads the file on the UI thread**, capped at a megabyte. A
+  conflicted file whose first marker is past that cap is staged without a question.
 - **`Enter` on a deleted row opens an empty buffer.** The path is not on disk, so it
   opens the way any missing path does — and `Ctrl+S` writes the file back into
   existence, which is recoverable but not obviously what the row was offering.
@@ -591,6 +653,31 @@ Phase 12 — Branches and merge (not started)
 Phase 2 through Phase 8 acceptance were verified by driving the real binary in a pty
 (the Phase 1 harness: fork a pty, set `TIOCSWINSZ`, write key and mouse bytes, replay
 the output through a minimal terminal emulator).
+
+### Phase 12
+
+Same harness. A scratch repository on `main` with a `topic` branch and a
+`feature/editor` whose change to `c.txt` conflicts with `main`'s.
+
+- **The picker.** `Ctrl+B`, `b`: `┌ Switch Branch ┐` over `3 branches`, the rows
+  `  feature/editor`, `* main`, `  topic` — git's own marker on the branch `HEAD` is on
+  — and `[ Switch ] [ New… ] [ Cancel ]`. `Down` then `Enter` put `Switched topic` on the
+  status bar, `Git — topic` in the panel title and `topic` in the right-hand readout.
+- **The merge picker leaves out the current branch.** `m` on `main` drew `2 branches`
+  with `feature/editor` and `topic` and no `main`.
+- **A merge that conflicts.** `Enter` on `feature/editor`: the title became
+  `Git — main [merging] (1)`, the row `UU c.txt`, and the status bar
+  `Merge failed: conflicts — resolve them in the panel, then commit` in the error colour.
+- **Staging a file with markers asks.** `Space` on `UU c.txt` drew
+  `┌ Conflict markers ┐` / `c.txt still has conflict markers.` with `[ Cancel ]`
+  selected and `[ Stage Anyway ]` beside it.
+- **The whole merge, finished inside the editor.** `Enter` on the conflicted row opened
+  `c.txt` with git's `<<<<<<< HEAD` / `=======` / `>>>>>>> feature/editor` in the buffer;
+  `Ctrl+A`, `resolved`, `Ctrl+S`; `Ctrl+B` twice back to the panel and `Space` — no
+  question this time, and the row became `M  c.txt` with `[merging]` still in the title;
+  `c`, `merge feature/editor`, `Enter` → `[main 31e2382] merge feature/editor`, the title
+  back to `Git — main` and the tree clean. `git log` in the shell beside it showed the
+  merge commit with both parents.
 
 ### Phase 11
 
@@ -836,17 +923,16 @@ reporting.
 
 ## Next
 
-- Phase 12: branches and merge. A branch picker, switch, create, merge and conflicted-file
-  display. This is where the `DialogBody::List` question ADR-019 left open and ADR-029
-  deferred finally has to be answered: a branch list has no pane behind it to delegate
-  to.
-- It is also where ADR-034's two refusals are paid off — a conflicted file that can be
-  staged once there is something to resolve it with, and a pull that is allowed to merge.
-- `GitService` still lacks `branches`, `switch_branch`, `create_branch`, `merge` and
-  `diff` of SPEC §29; `run_os` is the one place their env, their argument handling and
-  their timeout live, and the worker is the one place their `JobId` will.
+- Phase 13: the diff viewer. A read-only unified diff from `git diff -- <path>`, with
+  `+`/`−` colouring, for the row the panel's selection is on. It is the last of SPEC §29's
+  named operations that is still missing, and it is what a rename finally has somewhere to
+  show `old -> new` in (ADR-031).
+- A diff of a conflicted file is also what would let the marker check of ADR-036 become a
+  view rather than a question.
 - Cancelling a running job is worth doing when a second one wants it: the `JobId` exists,
   but the worker keeps no handle to the child it spawned.
+- `REBASE_HEAD` and `CHERRY_PICK_HEAD` are the same one-line check as `MERGE_HEAD`, and
+  the panel says nothing about either.
 - A filesystem watcher would close both the explorer's refresh gap and the git panel's.
   It is one dependency and one thread, and it is still Phase 14 rather than a phase of
   its own.

@@ -110,6 +110,41 @@ impl FileEntry {
     }
 }
 
+/// One entry of the branch picker (SPEC §33).
+///
+/// Remote-tracking branches are listed alongside local ones because checking
+/// out a colleague's freshly pushed branch is the common reason to open a
+/// picker at all. They are switched to by their short name — `git switch`
+/// creates the local tracking branch for it — which is what `switch_target`
+/// returns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Branch {
+    /// As `git branch -a` prints it: `main`, or `origin/feature` for a
+    /// remote-tracking one.
+    pub name: String,
+    /// The branch `HEAD` is on. Never true for a remote one.
+    pub is_head: bool,
+    pub remote: bool,
+}
+
+impl Branch {
+    /// The name to hand `git switch`.
+    ///
+    /// `git switch origin/feature` would detach `HEAD`; `git switch feature`
+    /// creates a local branch tracking it, which is what a person clicking
+    /// `origin/feature` in a picker means.
+    pub fn switch_target(&self) -> &str {
+        if self.remote {
+            // `origin/feature/x` -> `feature/x`: only the remote's own name is
+            // dropped, and a branch name may contain slashes of its own.
+            if let Some((_, rest)) = self.name.split_once('/') {
+                return rest;
+            }
+        }
+        &self.name
+    }
+}
+
 /// What `# branch.head` said.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Head {
@@ -132,6 +167,13 @@ pub struct RepoStatus {
     pub entries: Vec<FileEntry>,
     /// Whether `MAX_ENTRIES` cut the list short.
     pub truncated: bool,
+    /// A merge that stopped and has not been committed — `MERGE_HEAD` exists
+    /// (SPEC §35).
+    ///
+    /// It is not the same as "there are conflicts": once every conflicted file
+    /// has been staged the conflicts are gone and the merge is still waiting
+    /// for its commit, which is the state a user is most likely to be lost in.
+    pub merging: bool,
 }
 
 impl RepoStatus {
@@ -173,4 +215,9 @@ pub enum GitError {
     Io(#[from] std::io::Error),
     #[error("could not read git output: {0}")]
     Parse(String),
+    /// A merge that stopped on conflicts (SPEC §35). Not a failed command: git
+    /// did what it was asked and the tree is now in a state the panel shows and
+    /// the user has to finish.
+    #[error("conflicts — resolve them in the panel, then commit")]
+    Conflicted,
 }

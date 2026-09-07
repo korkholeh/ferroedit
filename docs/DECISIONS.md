@@ -789,3 +789,94 @@ says so, which is an error a person can act on from a shell.
 has to run the merge in a terminal until Phase 12. A conflict has to be resolved outside
 the editor. A signing key that wants a passphrase from a terminal turns a commit into an
 error message rather than a hang.
+
+---
+
+## ADR-035: The dialog body gains a list, and a picker is chosen with the confirm button
+
+**Decision.** `DialogBody` gains a third variant, `List { prompt, items, selected, scroll }`,
+where each `ListItem` carries the `Command` choosing it runs. The confirm button carries
+`SubmitListChoice`, which `activate_dialog_button` replaces with the highlighted row's own
+command — exactly as it replaces `SubmitInput` with a name and `SubmitCommit` with a
+message. `Up` and `Down` are bound in the dialog table to `DialogListMove`; a dialog
+with no list ignores them. The box's height is now computed from the body rather than
+being a constant.
+
+**Why.** ADR-019 left the list body open and ADR-029 deferred it with a rule: a list
+earns its place only when there is no pane behind the dialog that already lists the same
+things better. Open… and Save As… failed that test, because the explorer *is* the file
+list. A branch list passes it — there is no branch pane, and there is not going to be one
+in a sidebar that already holds a tree and a status.
+
+Reusing the submit-and-substitute pattern is what keeps the dialog free of event handling
+of its own (SPEC §40). `Enter` is `DialogActivate` on the default button, and the default
+button is Switch; nothing about a list needs a second activation path, and the mouse gets
+one behaviour rather than two.
+
+The selection starts on the branch `HEAD` is already on, so opening the picker and
+pressing `Enter` without reading checks out the branch you are on — a no-op, not a
+checkout. Clicking a row selects without choosing, which is the opposite of ADR-020's
+rule for the explorer, and for the reason ADR-020 gave: a click that acts saves a step
+when the action is cheap, and a checkout is not.
+
+**Consequence.** `DIALOG_HEIGHT` is gone and `body_height()` replaces it; a message and an
+input body both report two rows, so every box that existed before is unchanged at five.
+The button row is now placed from the bottom border rather than at a fixed offset. A list
+is capped at ten visible rows and scrolls past that, because a picker taller than a short
+terminal is a dialog that cannot be closed. `LayoutRects` gains `dialog_list` so the mouse
+hit-tests the rows the renderer drew, and the row a click reports is a *screen* row —
+the scroll is added in `select_visible_row`, which is the only place that knows it.
+
+---
+
+## ADR-036: Merge is a first-class outcome, and that is what unblocks ADR-034
+
+**Decision.** `git merge --no-edit <branch>` runs on the worker. A merge that stops on
+conflicts is reported as `GitError::Conflicted` rather than as a failed command. A stopped
+merge is detected by `MERGE_HEAD` in the repository directory and shown as `[merging]` in
+the panel title, independently of whether any conflict is left. Staging a conflicted file
+is now allowed — it is how git is told a conflict is resolved — and asks first when the
+file still contains a `<<<<<<< ` line. `git pull` loses its `--ff-only` and gains no
+rebase flag of its own.
+
+**Why.** ADR-034 refused both a merging pull and the staging of a conflicted file, and
+gave the same reason for each: there was nowhere in the editor for a conflict to be shown
+or finished. There is now. A user who starts a merge from the Git menu has to be able to
+complete it from the panel, and `git add` is the only gesture git offers for "I resolved
+this".
+
+`Conflicted` is a variant and not a message, because a conflicted merge is not a command
+that went wrong: git wrote its complaint to *stdout*, exited non-zero, and left the tree
+in precisely the state the panel exists to show. The status is what distinguishes the two,
+which costs nothing — the panel asks the same question a moment later anyway.
+
+`MERGE_HEAD` rather than `conflicts() > 0` because they are different states and the
+difference is where users get lost. Once every conflicted file has been staged there are
+no conflicts left and the merge is still uncommitted; a panel that stopped saying so at
+that moment would be silent exactly when the remaining step is least obvious. It is a
+`stat` on a path already known, not another subprocess.
+
+The marker check is the one thing worth keeping from ADR-034's caution. Only the
+`<<<<<<< ` opener is looked for, at the start of a line: it is the marker that cannot
+plausibly be a file's own content, and demanding all three would miss a half-finished
+resolution. The read is capped at a megabyte because it happens on the UI thread.
+
+Dropping `--ff-only` without adding `--no-rebase` is deliberate. Forcing a merge would
+override a user's `pull.rebase` as surely as `--ff-only` overrode it, and SPEC §32's rule
+is that the user's configuration is the one that applies. A divergence with nothing
+configured is git's own well-known complaint about exactly that, which is better advice
+than anything this editor could substitute for it — provided it reaches the screen, which
+is why `first_line` now prefers a line git marked `fatal:` or `error:` over the first one.
+A failed `git pull` writes the fetch it managed, then a dozen hints, and only then says
+what went wrong.
+
+**Consequence.** `GitService` holds the repository's git directory as well as its root, so
+`discover` reads both from one `rev-parse`. A commit is refused while anything is still
+conflicted, and allowed during a merge even with nothing newly staged — a resolved merge
+still needs its commit. `git switch` is used rather than `git checkout`, so a branch name
+that is also a path cannot be read as a request to discard that file's changes; it needs
+git 2.23. Remote-tracking branches are offered in the switch picker and switched to by
+their short name, because `git switch origin/topic` would detach `HEAD` while
+`git switch topic` creates the local branch that clicking that row means. Deleting a
+branch is still not possible from the editor — SPEC §33 says it can wait, and it is the
+one branch operation that loses work.

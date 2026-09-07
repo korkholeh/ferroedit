@@ -130,6 +130,42 @@ mod tests {
         assert!(screen.contains("Git — Pushing…"), "{screen}");
     }
 
+    /// SPEC §35: a stopped merge is a state the user has to finish, and it
+    /// outranks the ahead/behind counts in the title.
+    #[test]
+    fn the_panel_says_when_a_merge_is_unfinished() {
+        let mut app = app();
+        app.git.status.merging = true;
+        // Wide enough for the sidebar to reach its maximum: at 80 columns the
+        // panel is twenty cells and the title is clipped mid-word.
+        let screen = draw(&app, 130, 24).join("\n");
+        assert!(screen.contains("Git — main [merging] (4)"), "{screen}");
+    }
+
+    /// SPEC §33's picker: every branch, `*` on the one HEAD is on, and the
+    /// highlight where Enter would act.
+    #[test]
+    fn the_branch_picker_draws_its_list() {
+        use crate::git::models::Branch;
+        let branch = |name: &str, is_head| Branch {
+            name: name.into(),
+            is_head,
+            remote: false,
+        };
+        let mut app = app();
+        app.dialog = Some(crate::app::dialog::DialogState::switch_branch(
+            &[branch("main", true), branch("feature/editor", false)],
+            crate::app::focus::FocusTarget::GitPanel,
+        ));
+        let screen = draw(&app, 80, 24).join("\n");
+        assert!(screen.contains("Switch Branch"), "{screen}");
+        assert!(screen.contains("2 branches"), "{screen}");
+        assert!(screen.contains("* main"), "git's own marker: {screen}");
+        assert!(screen.contains("  feature/editor"), "{screen}");
+        assert!(screen.contains("[ Switch ]"), "{screen}");
+        assert!(screen.contains("[ New… ]"), "{screen}");
+    }
+
     #[test]
     fn a_workspace_that_is_not_a_repository_says_so_in_the_panel() {
         let mut app = app();

@@ -20,9 +20,15 @@ pub const MIN_HEIGHT: u16 = 8;
 /// Narrowest usable editor column count; the sidebar yields space first.
 const MIN_EDITOR_WIDTH: u16 = 20;
 
-/// A dialog is a border, a message, the input row (blank in a confirmation) and
-/// a row of buttons.
-const DIALOG_HEIGHT: u16 = 5;
+/// The `* ` a list row keeps for git's current-branch marker.
+const LIST_MARKER_WIDTH: usize = 2;
+
+/// What a dialog costs besides its body: two border rows and the button row.
+///
+/// It was a fixed `DIALOG_HEIGHT` until the branch picker, whose body is as
+/// tall as the list in it (ADR-035); a message and an input body both report a
+/// height of two, so the boxes that existed before are unchanged at five rows.
+const DIALOG_CHROME: u16 = 3;
 
 /// Narrow enough for a 40-column terminal, wide enough that two buttons and a
 /// short message are not squeezed onto each other.
@@ -100,6 +106,9 @@ pub struct LayoutRects {
     pub dialog: Option<Rect>,
     /// One rect per dialog button, in button order.
     pub dialog_buttons: Vec<Rect>,
+    /// The list body's own area, when the dialog has one: where the rows are
+    /// drawn, and what a click on a row is measured against.
+    pub dialog_list: Option<Rect>,
 }
 
 pub fn compute(area: Rect, app: &App) -> LayoutRects {
@@ -155,6 +164,10 @@ pub fn compute(area: Rect, app: &App) -> LayoutRects {
         (Some(rect), Some(state)) => button_rects(rect, &state.buttons),
         _ => Vec::new(),
     };
+    let dialog_list = match (dialog, app.dialog.as_ref()) {
+        (Some(rect), Some(state)) if !state.items().is_empty() => Some(list_rect(rect)),
+        _ => None,
+    };
 
     LayoutRects {
         too_small: false,
@@ -173,7 +186,21 @@ pub fn compute(area: Rect, app: &App) -> LayoutRects {
         status_bar,
         dialog,
         dialog_buttons,
+        dialog_list,
     }
+}
+
+/// The rows between a list dialog's prompt and its buttons.
+fn list_rect(popup: Rect) -> Rect {
+    // Border, prompt; and the button row plus the bottom border below.
+    let top = popup.y.saturating_add(2);
+    let height = popup.bottom().saturating_sub(2).saturating_sub(top);
+    Rect::new(
+        popup.x + 1,
+        top.min(popup.bottom()),
+        popup.width.saturating_sub(2),
+        height,
+    )
 }
 
 /// Splits the bar into its label, field, readout and buttons.
@@ -366,6 +393,14 @@ fn dialog_rect(area: Rect, dialog: &DialogState) -> Rect {
         dialog.title.width(),
         dialog.prompt().width(),
         buttons_row_width(&dialog.buttons) as usize,
+        // A branch name is the widest thing in a picker, and eliding one would
+        // hide the part that distinguishes `feature/a` from `feature/b`.
+        dialog
+            .items()
+            .iter()
+            .map(|item| item.label.width() + LIST_MARKER_WIDTH)
+            .max()
+            .unwrap_or(0),
     ]
     .into_iter()
     .max()
@@ -377,7 +412,9 @@ fn dialog_rect(area: Rect, dialog: &DialogState) -> Rect {
     };
     // Two cells of border and two of padding.
     let width = content.saturating_add(4).max(minimum).min(area.width);
-    let height = DIALOG_HEIGHT.min(area.height);
+    let height = (dialog.body_height() as u16)
+        .saturating_add(DIALOG_CHROME)
+        .min(area.height);
     Rect::new(
         area.x + (area.width - width) / 2,
         area.y + (area.height - height) / 2,
@@ -405,7 +442,9 @@ fn buttons_row_width(buttons: &[DialogButton]) -> u16 {
 fn button_rects(popup: Rect, buttons: &[DialogButton]) -> Vec<Rect> {
     let inner_width = popup.width.saturating_sub(2);
     let row = buttons_row_width(buttons);
-    let y = (popup.y + DIALOG_HEIGHT - 2).min(popup.bottom().saturating_sub(1));
+    // The row above the bottom border, wherever that is: a list body makes the
+    // box as tall as the list.
+    let y = popup.bottom().saturating_sub(2).max(popup.y);
     let mut x = popup.x + 1 + inner_width.saturating_sub(row) / 2;
     let end = popup.right().saturating_sub(1);
 
@@ -631,6 +670,62 @@ mod tests {
             assert!(button.width > 0, "all three fit at 80 columns");
             assert!(button.x >= previous);
             previous = button.right();
+        }
+    }
+
+    /// A list body makes the box as tall as the list, and the button row moves
+    /// with the bottom border rather than staying at a fixed row (ADR-035).
+    #[test]
+    fn a_picker_grows_with_its_list_and_keeps_its_buttons_inside() {
+        use crate::git::models::Branch;
+        let branches: Vec<Branch> = (0..6)
+            .map(|i| Branch {
+                name: format!("feature/{i}"),
+                is_head: i == 0,
+                remote: false,
+            })
+            .collect();
+        let mut app = App::fixture();
+        app.dialog = Some(crate::app::dialog::DialogState::switch_branch(
+            &branches,
+            crate::app::focus::FocusTarget::GitPanel,
+        ));
+        let rects = compute(Rect::new(0, 0, 80, 24), &app);
+        let popup = rects.dialog.expect("a box");
+        // Prompt, six rows, two borders and the button row.
+        assert_eq!(popup.height, 6 + 4);
+        let list = rects.dialog_list.expect("a list area");
+        assert_eq!(list.height, 6);
+        assert!(popup.contains(list.as_position()));
+        for button in &rects.dialog_buttons {
+            assert!(button.y < popup.bottom() - 1, "{button:?} in {popup:?}");
+            assert!(button.y >= list.bottom(), "below the list: {button:?}");
+        }
+    }
+
+    /// A terminal too short for the whole list must still draw a box that fits
+    /// in it, with nothing hanging outside the frame.
+    #[test]
+    fn a_picker_taller_than_the_terminal_is_clipped_rather_than_overflowing() {
+        use crate::git::models::Branch;
+        let branches: Vec<Branch> = (0..20)
+            .map(|i| Branch {
+                name: format!("b{i}"),
+                is_head: i == 0,
+                remote: false,
+            })
+            .collect();
+        let mut app = App::fixture();
+        app.dialog = Some(crate::app::dialog::DialogState::switch_branch(
+            &branches,
+            crate::app::focus::FocusTarget::GitPanel,
+        ));
+        let area = Rect::new(0, 0, 80, MIN_HEIGHT);
+        let rects = compute(area, &app);
+        let popup = rects.dialog.expect("a box");
+        assert!(popup.bottom() <= area.bottom(), "{popup:?} in {area:?}");
+        for button in &rects.dialog_buttons {
+            assert!(button.bottom() <= area.bottom(), "{button:?}");
         }
     }
 

@@ -27,7 +27,7 @@ binary, over SSH, with no runtime dependencies.
 
 ## Status
 
-**Pre-alpha — Phase 11 (Git actions).** `ferroedit file.txt` opens, edits
+**Pre-alpha — Phase 12 (Branches and merge).** `ferroedit file.txt` opens, edits
 and saves a real file: rope-backed buffer, grapheme-correct cursor movement, a viewport
 that scrolls both ways, and line endings written back the way they were found.
 `ferroedit new.txt` starts an empty buffer and creates the file on the first `Ctrl+S`.
@@ -91,7 +91,20 @@ while the editor keeps drawing and typing; when it finishes, the status bar gets
 own sentence about it — `[main 5944bbe] add the worker`, `Already up to date.`, or
 `Push failed: No configured push destination.` No credential handling is bundled: git
 runs with prompts turned off, so it uses your helper and your keys or it says why it
-could not. See [docs/PROGRESS.md](docs/PROGRESS.md) and
+could not.
+
+Branches are a picker: `b` in the panel (or Git → Branch…) lists every local branch and
+every remote-tracking one, with `*` on the branch you are on and the highlight starting
+there, so Enter without reading changes nothing. Picking a remote row creates the local
+branch that tracks it. `New…` is right there in the picker; `m` opens the same list to
+merge from.
+
+A merge that conflicts is a state the editor can finish. The panel title reads
+`Git — main [merging] (1)` and stays that way until the merge is committed — not just
+until the last conflict is gone, which is the moment people get lost. `Enter` on a
+conflicted row opens the file with git's markers in it, you resolve it in the editor,
+`Ctrl+S`, then `Space` stages it as resolved and `c` commits the merge. Staging a file
+that still has `<<<<<<<` in it asks first. See [docs/PROGRESS.md](docs/PROGRESS.md) and
 [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ```bash
@@ -134,7 +147,8 @@ ferroedit +42 main.rs  # open a file at line 42
 ## Requirements
 
 - A terminal with mouse support (iTerm2, Ghostty, Terminal.app, kitty, tmux, …).
-- The system `git` binary, for the Git panel. FerroEdit ships no Git implementation
+- The system `git` binary (2.23 or newer, for `git switch`), for the Git panel.
+  FerroEdit ships no Git implementation
   of its own — your existing credentials, SSH config and commit signing keep working.
 
 ## Features (MVP scope)
