@@ -1400,3 +1400,45 @@ forty the layout supports. Cancel ends the walk without undoing the answers alre
 given: each was final when it was made, and a save is not something to take back. That
 leaves a cancelled quit with the answered tabs closed and the rest untouched, which is
 what every editor that asks this question does.
+---
+
+## ADR-048: A fixture repository carries its own identity, because the code under test does not
+
+**Decision.** `TestRepo` writes `user.name`, `user.email` and `commit.gpgsign = false`
+into each fixture repository's own `.git/config`, rather than passing them only as
+environment variables on the commands the helper itself runs. `TestRepo::clone_from`
+exists so the one repository made by cloning gets the same treatment. `commit` drops its
+`-c commit.gpgsign=false`, which the repository config now covers.
+
+The CI `targets` job also stops failing a binary it should pass: `file` reports
+`static-pie linked` for what a current Rust and musl toolchain produces, and the step
+matched only the older spelling `statically linked`. Both are static, and an ELF
+interpreter is checked for separately as the half that does not depend on wording.
+
+**Why.** The environment `try_run` passes covers the commands *these helpers* run.
+`GitService` is the other thing running git in these tests, and it is the code under
+test: it passes the editor's own environment — `GIT_TERMINAL_PROMPT`, `GIT_EDITOR`,
+`GIT_OPTIONAL_LOCKS` — and deliberately no identity, because SPEC §32's rule is that the
+user's configuration is the one that applies. So every merge, pull and commit
+`GitService` made was resolving an identity from the machine, and the module's own
+promise — "a developer with `commit.gpgsign = true` gets the same results as CI" — was
+only half kept.
+
+It held on any developer's machine and failed on a runner, which is the worst shape for
+this: eleven tests went red on `empty ident name (for <runner@…>)` the first time CI
+reached them, and none of them were about identity. git derives a name from the
+password-file entry when nothing else supplies one; a personal account has a full name
+there and the `runner` user does not.
+
+Repository config is the fix rather than more environment variables because it is what
+both callers read without being told, and because it is what a repository a user actually
+works in already has. Environment would also have been *wrong* in the other direction:
+`GIT_AUTHOR_NAME` overrides config, so setting it in the test process would have masked
+the very resolution the tests exercise.
+
+**Consequence.** A test asserts the exact identity a `GitService` commit lands with, not
+merely that it has one: the failure being guarded against is the fixture silently
+falling back to the developer's own name, which is what makes this class of bug invisible
+until CI. The static-link assertion now accepts two spellings, so a future `file` that
+invents a third will need it added — the interpreter check is there so that a wording
+change alone cannot turn a dynamic binary green.

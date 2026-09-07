@@ -1080,7 +1080,7 @@ mod tests {
         // A second clone pushes a commit the first one has not seen.
         let other = tempfile::tempdir().unwrap();
         let clone = TestRepo::at(other.path());
-        clone.run(&["clone", "-q", remote.path().to_str().unwrap(), "."]);
+        clone.clone_from(remote.path());
         clone.write("theirs.txt", "theirs\n");
         clone.run(&["add", "."]);
         clone.commit("theirs");
@@ -1193,6 +1193,30 @@ mod tests {
             .diff(Path::new("-x.txt"), DiffSide::Worktree)
             .unwrap();
         assert_eq!((diff.added, diff.removed), (1, 1));
+    }
+
+    /// ADR-048: `GitService` passes the editor's own environment and no
+    /// identity of its own, so what it commits as comes out of the
+    /// repository's config — which is why the fixture has to put one there.
+    /// On a machine with no identity anywhere, which is what a CI runner is,
+    /// this failed with `empty ident name` and took ten other tests with it.
+    ///
+    /// The assertion is the exact name and not merely "some name": the bug it
+    /// guards against is the fixture falling back to whatever the developer's
+    /// machine would have supplied.
+    #[test]
+    fn what_the_service_commits_as_comes_from_the_repository() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "one\n");
+        repo.run(&["add", "."]);
+
+        let service = GitService::discover(repo.path()).unwrap();
+        service.commit("from the service").unwrap();
+
+        assert_eq!(
+            repo.run(&["log", "-1", "--format=%an <%ae>"]).trim(),
+            "FerroEdit Test <test@example.invalid>"
+        );
     }
 
     /// ADR-045, end to end against the real binary: `git diff` of an unmerged

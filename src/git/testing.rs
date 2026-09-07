@@ -6,6 +6,13 @@
 //! the machine's configuration — no global config, no system config, no
 //! signing — so a developer with `commit.gpgsign = true` gets the same results
 //! as CI.
+//!
+//! That isolation has to be written into the *repository* and not only into
+//! the environment these helpers pass, because `GitService` is the other thing
+//! running git here and it is production code: it passes the environment the
+//! editor passes, and reads whatever config the machine has (ADR-048). An
+//! identity in `.git/config` is what a repository a user works in already has,
+//! and it is the one place both callers look.
 
 use std::path::Path;
 use std::process::{Command, Output};
@@ -39,16 +46,46 @@ impl TestRepo {
             dir: Handle::Owned(tempfile::tempdir().expect("a temporary directory")),
         };
         repo.run(&["-c", "init.defaultBranch=main", "init", "-q"]);
+        repo.identify();
         repo
     }
 
     /// An empty handle over a directory that is about to become a repository —
-    /// a `git clone .` into it, which `new`'s `git init` would get in the way
-    /// of. The `TempDir` stays the caller's, so it outlives this.
+    /// a clone into it, which `new`'s `git init` would get in the way of. The
+    /// `TempDir` stays the caller's, so it outlives this.
+    ///
+    /// Use `clone_from` rather than running the clone by hand: a repository
+    /// with no identity in it is the thing this module exists to prevent.
     pub fn at(dir: &Path) -> Self {
         Self {
             dir: Handle::Borrowed(dir.to_path_buf()),
         }
+    }
+
+    /// Clones `remote` into this handle's directory and gives it an identity.
+    pub fn clone_from(&self, remote: &Path) {
+        self.run(&[
+            "clone",
+            "-q",
+            remote.to_str().expect("a temporary path is UTF-8"),
+            ".",
+        ]);
+        self.identify();
+    }
+
+    /// Writes the identity and the signing setting into `.git/config`.
+    ///
+    /// The environment variables `try_run` passes cover the commands *these*
+    /// helpers run and nothing else. `GitService` is the other caller and it
+    /// is the code under test: it passes the editor's own environment, so on a
+    /// machine with no `user.email` configured anywhere — a CI runner, which
+    /// is exactly where this was found — every merge, pull and commit it makes
+    /// fails with `empty ident name`. Repository config is what both of them
+    /// read, and it beats a global `commit.gpgsign = true` as well (ADR-048).
+    fn identify(&self) {
+        self.run(&["config", "user.name", "FerroEdit Test"]);
+        self.run(&["config", "user.email", "test@example.invalid"]);
+        self.run(&["config", "commit.gpgsign", "false"]);
     }
 
     pub fn path(&self) -> &Path {
@@ -92,7 +129,9 @@ impl TestRepo {
     }
 
     pub fn commit(&self, message: &str) {
-        self.run(&["-c", "commit.gpgsign=false", "commit", "-qam", message]);
+        // No `-c commit.gpgsign=false` here any more: `identify` wrote it into
+        // the repository, where `GitService`'s own commits see it too.
+        self.run(&["commit", "-qam", message]);
     }
 
     /// `git status --short`, one entry per line — the human-facing form the

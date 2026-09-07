@@ -69,10 +69,20 @@ jobs:
           else
             cargo build --release --target ${{ matrix.target }}
           fi
+      # `file` says "statically linked" for a classic static binary and
+      # "static-pie linked" for a position-independent one, which is what a
+      # current Rust + musl toolchain produces. Both are static, and matching
+      # only the first spelling is what made this step fail on a binary that
+      # was fine. The interpreter check is the half that cannot be spoofed by
+      # wording: a static binary names no ELF interpreter, and a dynamic one
+      # always does.
       - name: Assert the Linux binary is static
         if: matrix.cross
         run: |
           f=target/${{ matrix.target }}/release/ferroedit
           file "$f"
-          file "$f" | grep -q "statically linked" || {
+          file "$f" | grep -Eq "statically linked|static-pie linked" || {
             echo "::error::$f is not statically linked"; exit 1; }
+          if file "$f" | grep -q "interpreter"; then
+            echo "::error::$f has an ELF interpreter, so it is not static"; exit 1
+          fi

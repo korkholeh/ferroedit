@@ -683,6 +683,26 @@ and the per-file quit walk done)
     quitting past `Permission denied` is the worst thing the editor could do.
     `Command::QuitDiscarding` is deleted — nothing produced it any more.
   - 689 tests (was 685).
+  - **CI had never been green, and both reasons were ours** (ADR-048). The first push
+    that reached the `targets` job showed them.
+  - **Eleven Linux tests failed on `empty ident name (for <runner@…>)`.** `TestRepo`
+    passed an identity as environment variables on the commands *it* ran; `GitService` is
+    the other thing running git in those tests and it passes the editor's own environment
+    and deliberately no identity, because SPEC §32 says the user's configuration is the
+    one that applies. So it resolved an identity from the machine — a full name from the
+    password file on any developer's account, and nothing at all on a runner. The
+    identity now goes into each fixture repository's `.git/config`, which is what both
+    callers read and what a real repository already has.
+  - A test asserts the exact name a `GitService` commit lands with rather than that it
+    has one: the fixture quietly falling back to the developer's own name is what made
+    this invisible until CI.
+  - **x86_64 musl links, and always did.** The `Assert the Linux binary is static` step
+    matched `statically linked` and current Rust with musl produces `static-pie linked` —
+    both static. The check accepts both now and looks for an ELF interpreter separately,
+    so a wording change alone cannot pass a dynamic binary. The known issue "x86_64 musl
+    not yet built anywhere" is answered: `file` on the runner's artefact reads
+    `ELF 64-bit LSB pie executable, x86-64, static-pie linked, stripped`.
+  - 690 tests (was 689).
 
 ## In progress
 
@@ -695,11 +715,9 @@ and the per-file quit walk done)
 
 - **`cross` is unusable on this machine.** Both musl targets fail before the build
   starts: `couldn't install toolchain stable-x86_64-unknown-linux-gnu` (cross 0.2.5 on
-  an Apple Silicon host). Worked around locally with a plain `rust:alpine` container;
-  CI still uses `cross`, so the `targets` job is the thing to watch on the first push.
-- **x86_64 musl not yet built anywhere.** Only `aarch64` musl was verified locally.
-  R12 (aarch64 musl cross-compilation) is confirmed; the x86_64 musl link is still
-  CI-only.
+  an Apple Silicon host). Worked around locally with a plain `rust:alpine` container; CI
+  uses `cross` and builds both targets there, so this is a local inconvenience rather
+  than a gap in coverage.
 - **The status bar's readout changes width as the window does.** Pieces leave as the
   terminal narrows and come back as it grows (ADR-039), so the left edge of the readout
   moves. That movement is the cost of not clipping the notification; the position stays
@@ -1266,8 +1284,9 @@ Phase 14 continues. What is left of it, roughly in order of how much it is worth
 
 - What is still unchecked by hand, as after every phase: the real target terminals —
   iTerm2, Ghostty, Terminal.app, tmux, plain ssh.
-- The CI `targets` job has still not been seen green — x86_64 musl has not been linked
-  anywhere, and the release binaries the phase owes are downstream of it.
+- The CI run that proves the two fixes of ADR-048 has not come back yet. x86_64 musl is
+  linked and static on the runner; what is left downstream is the release binaries
+  themselves.
 - A worker for the explorer's directory reads is the last of the known issues above that
   Phase 14 named as its own and has not answered.
 - Reloading has no merge and does not offer one: Reload takes the file, Keep Mine keeps
