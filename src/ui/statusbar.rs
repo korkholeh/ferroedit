@@ -66,7 +66,10 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 /// The left half never shrinks below this. A bar that is all readout and no
 /// file name — or no notification — has stopped being a status bar, so the
 /// readout gives way rather than the sentence next to it.
-const MIN_LEFT: u16 = 18;
+///
+/// Twenty is `Opened src/main.rs` and a space at either end: the shortest
+/// sentence the editor actually says about a file it has just opened.
+const MIN_LEFT: u16 = 20;
 
 /// Separator between the readout's pieces.
 const GAP: &str = "   ";

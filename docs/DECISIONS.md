@@ -936,3 +936,82 @@ than leave a change that is no longer there. A diff over `MAX_LINES` is cut with
 in the title, the ADR-027 rule for one more unbounded thing. And ADR-031's rename has
 somewhere to go at last: git's own `rename from` / `rename to` lines are in the header
 the viewer draws.
+
+---
+
+## ADR-038: The help screen is the keymap, rendered — and it takes `Unimplemented` with it
+
+**Decision.** Help ▸ Shortcuts and `F1` open a read-only pager over `docs::sections()`,
+the same table `docs/SHORTCUTS.md` is generated from (ADR-028). It is drawn over the
+whole body — sidebar, tab bar and editor — with `FocusTarget::Help`, the diff viewer's
+keys, and the diff viewer's rule: it closes as soon as focus moves to another pane. Its
+lines are laid out against the pane's width on demand rather than stored. With it,
+`Command::Unimplemented` is deleted: the help screen was the last menu entry that did
+not resolve to a real command.
+
+**Why.** A help screen written by hand is a help screen that is wrong within two phases.
+Phase 9 already made the keymap the single source for the document; the screen is a
+second reader of the same data, so a key on screen, a key in the file and a key that is
+actually bound are one row of one table by construction, and the tests that check the
+document check the screen too.
+
+Over the body rather than over the editor, unlike the diff viewer, because the two panes
+want different things. A diff wants to be read *beside* the file tree while deciding what
+to stage; a key table wants width, and at 60 columns the editor pane is 44 of them —
+enough for `Ctrl+Shift+Tab / Ctrl+PageUp` and not much else. Covering the sidebar costs
+nothing, because nothing under a help screen is being consulted while it is open. The
+menu bar stays above it, which is also how the screen is dismissed with the mouse alone.
+
+The same focus rule as ADR-037, and for the same reason: a pane the user cannot see is a
+pane the user is typing behind. It is now one check covering both, at the end of the one
+mutation entry point.
+
+Laying the lines out on demand is what makes the notes wrap honestly. They are prose, so
+they reflow when the window changes width, and a scroll offset counted against a layout
+that no longer exists would jump on a resize. It is a few dozen rows of static text once
+a frame — cheaper than storing a layout and remembering to invalidate it.
+
+Deleting `Unimplemented` is the phase's own acceptance made structural. It existed so a
+menu entry could be wired before its feature landed and say so rather than doing nothing;
+every entry now resolves, so keeping the variant would only preserve the ability to add a
+new dead one. A test asserting the list is empty is a weaker statement than a type that
+cannot express the case.
+
+**Consequence.** A key label wider than the column — `Ctrl+Shift+Tab / Ctrl+PageUp` is
+the only one — sits proud of the other rows rather than being cut, because a truncated
+key is a key nobody can press. The screen covers the tab bar, so no tab can be clicked
+while it is open; `Ctrl+Tab` still switches, and the switch closes the screen. Typing,
+the mouse and the terminal's own limits are prose in `src/docs.rs` and reachable only
+through `docs/SHORTCUTS.md`; the screen says so on its last line rather than growing
+three more sections of text nobody scrolls to. And a future phase that wants to ship a
+menu entry ahead of its feature has to add the placeholder back deliberately.
+
+---
+
+## ADR-039: The status bar's readout has a drop order, not a format string
+
+**Decision.** The right-hand readout — position, selection count, encoding, line ending,
+language, branch, focus — is built as a list of pieces, each with a drop order. When the
+readout will not fit in the width left after an eighteen-column floor for the left half,
+pieces leave in that order until it does: encoding first, then the focus label, the
+language, the branch, the line ending and the selection count. The cursor position is
+never dropped.
+
+**Why.** This was a known issue from Phase 3: the readout was one `format!` of fixed
+length, so at 60 columns it took its space and the notification beside it was clipped to
+whatever was left. That is backwards. The readout is a reference — it says the same thing
+on almost every file — and the notification is the one part of the bar that is telling
+the user something they do not already know, often the reason a command did nothing.
+
+The order is by how much a piece is worth reading. `UTF-8` is the same on every file the
+MVP opens and goes first. The focus label is a debugging aid that a user learns to read
+off the borders instead. The language is on screen in the colours; the branch is in the
+git panel; `CRLF` is the surprising one and outlives them. A selection count is transient
+and is only shown while it is true, so it is nearly last. `Ln 1, Col 1` is what a status
+bar is for.
+
+**Consequence.** The readout changes width as the window does, and pieces reappear when
+the terminal grows. That movement is the cost of the fix, and it is bounded: the left
+edge of the readout is the only thing that moves, and the position stays at the right. At
+40 columns — the minimum layout width — the bar is a notification and a position, which
+is the honest content of a 40-column status bar.

@@ -27,7 +27,7 @@ binary, over SSH, with no runtime dependencies.
 
 ## Status
 
-**Pre-alpha — Phase 13 (Diff viewer).** `ferroedit file.txt` opens, edits
+**Pre-alpha — Phase 14 (Polish, in progress).** `ferroedit file.txt` opens, edits
 and saves a real file: rope-backed buffer, grapheme-correct cursor movement, a viewport
 that scrolls both ways, and line endings written back the way they were found.
 `ferroedit new.txt` starts an empty buffer and creates the file on the first `Ctrl+S`.
@@ -69,9 +69,9 @@ and `Alt+A` replaces every hit as a single undo step. `F3` works with the bar cl
 Everything on the bar is clickable, and all of it is on the Search menu too — which is
 the way out for terminals that swallow Alt.
 
-Every menu entry and every shortcut runs a real command, and
-[docs/SHORTCUTS.md](docs/SHORTCUTS.md) is generated from the keymap itself rather than
-written beside it. `Ctrl+O` opens a path from outside the workspace and File → Save As…
+Every menu entry and every shortcut runs a real command — there is no longer a menu item
+wired to a placeholder — and both [docs/SHORTCUTS.md](docs/SHORTCUTS.md) and the `F1`
+help screen are generated from the keymap itself rather than written beside it. `Ctrl+O` opens a path from outside the workspace and File → Save As…
 writes the current buffer somewhere else, keeping its undo history.
 
 The Git panel is real, and it is the system `git` you already have: FerroEdit runs
@@ -171,8 +171,8 @@ ferroedit +42 main.rs  # open a file at line 42
 
 ## Keyboard shortcuts
 
-See [docs/SHORTCUTS.md](docs/SHORTCUTS.md) — generated from the keymap tables, so it
-cannot drift from the code. Regenerate it with `ferroedit --dump-shortcuts >
+`F1` (or Help → Shortcuts) shows them in the editor. The same tables render
+[docs/SHORTCUTS.md](docs/SHORTCUTS.md), so neither can drift from the code. Regenerate it with `ferroedit --dump-shortcuts >
 docs/SHORTCUTS.md`, or `FERROEDIT_UPDATE_DOCS=1 cargo test`; a plain `cargo test` fails
 when the checked-in copy is stale (ADR-028).
 

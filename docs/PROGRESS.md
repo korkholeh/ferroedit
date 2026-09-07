@@ -1,6 +1,6 @@
 # Current Phase
 
-Phase 13 — Diff viewer (complete)
+Phase 14 — Polish (in progress: help screen and status bar done)
 
 ## Completed
 
@@ -442,40 +442,6 @@ Phase 13 — Diff viewer (complete)
     command that starts a job is asserted to return while `git.busy()` is still `Some`.
   - 522 tests (was 489), including the pty checks below.
 
-- **Phase 13 — Diff viewer**
-  - `GitService::diff` runs `git diff` (or `git diff --cached`) for one path, with
-    `--no-color` and `--no-ext-diff` passed rather than inherited: a user with
-    `color.ui = always` would otherwise get escape sequences drawn as text, and
-    `diff.external` is somebody else's program writing somebody else's format.
-  - `git/diff.rs` classifies each line once, when it is read — header, hunk, addition,
-    removal, context, meta — so `ui/diff.rs` reads colours out of the state the way
-    every other renderer does (ARCHITECTURE invariant 4). `--- a/x` and `+++ b/x` are
-    headers and not a change, which is the one classification order that matters.
-  - The viewer is a pane over the editor, not a split and not a dialog: a diff wants
-    the width, and the editor behind it is not being typed into while it is up. It
-    closes as soon as another pane takes focus, enforced in one place at the end of
-    `execute_command` (ADR-037).
-  - Which file: the git panel's selected row while the panel has focus, and the file
-    being edited anywhere else — the Git menu's Diff, pressed mid-edit, means "this
-    one". Which side: what has not been staged when there is any, and what has been
-    when there is not, with `s` to see the other one and the title always saying which
-    is on screen.
-  - An untracked file says why it has no diff instead of opening empty, and a diff
-    that has nothing in it never opens a pane at all.
-  - The viewer follows the file it is showing: every `git status` refresh re-reads it,
-    so staging what is on screen closes it rather than leaving a change that is no
-    longer unstaged. `F5` is the manual form.
-  - A pager's keys — arrows, `PageUp`/`PageDown`, `Space`, `Home`/`End`, `Left`/`Right`
-    by eight columns for lines wider than the pane, `Esc` to close — and the wheel over
-    it scrolls it. Nothing types: an unbound letter in a read-only pane does nothing.
-  - Long lines scroll sideways rather than wrapping, with tabs expanded and wide
-    characters split by an edge drawn as the cells they occupy — the editor's own rule,
-    because a diff whose `+` and `−` stopped lining up is a diff nobody can read.
-  - `MAX_LINES` caps a diff at 5000 lines with `(cut)` in the title, the ADR-027
-    reason: a generated file's rewrite is a diff nobody reads and megabytes nobody
-    asked to allocate.
-  - 599 tests (was 556), including the pty checks below.
-
 - **Phase 12 — Branches and merge**
   - `DialogBody::List` (ADR-035) — the variant ADR-019 left open and ADR-029 deferred,
     with the rule they set: a list body earns its place only when no pane behind the
@@ -525,9 +491,75 @@ Phase 13 — Diff viewer (complete)
     Branch…, New Branch… and Merge…
   - 556 tests (was 522), including the pty checks below.
 
+- **Phase 13 — Diff viewer**
+  - `GitService::diff` runs `git diff` (or `git diff --cached`) for one path, with
+    `--no-color` and `--no-ext-diff` passed rather than inherited: a user with
+    `color.ui = always` would otherwise get escape sequences drawn as text, and
+    `diff.external` is somebody else's program writing somebody else's format.
+  - `git/diff.rs` classifies each line once, when it is read — header, hunk, addition,
+    removal, context, meta — so `ui/diff.rs` reads colours out of the state the way
+    every other renderer does (ARCHITECTURE invariant 4). `--- a/x` and `+++ b/x` are
+    headers and not a change, which is the one classification order that matters.
+  - The viewer is a pane over the editor, not a split and not a dialog: a diff wants
+    the width, and the editor behind it is not being typed into while it is up. It
+    closes as soon as another pane takes focus, enforced in one place at the end of
+    `execute_command` (ADR-037).
+  - Which file: the git panel's selected row while the panel has focus, and the file
+    being edited anywhere else — the Git menu's Diff, pressed mid-edit, means "this
+    one". Which side: what has not been staged when there is any, and what has been
+    when there is not, with `s` to see the other one and the title always saying which
+    is on screen.
+  - An untracked file says why it has no diff instead of opening empty, and a diff
+    that has nothing in it never opens a pane at all.
+  - The viewer follows the file it is showing: every `git status` refresh re-reads it,
+    so staging what is on screen closes it rather than leaving a change that is no
+    longer unstaged. `F5` is the manual form.
+  - A pager's keys — arrows, `PageUp`/`PageDown`, `Space`, `Home`/`End`, `Left`/`Right`
+    by eight columns for lines wider than the pane, `Esc` to close — and the wheel over
+    it scrolls it. Nothing types: an unbound letter in a read-only pane does nothing.
+  - Long lines scroll sideways rather than wrapping, with tabs expanded and wide
+    characters split by an edge drawn as the cells they occupy — the editor's own rule,
+    because a diff whose `+` and `−` stopped lining up is a diff nobody can read.
+  - `MAX_LINES` caps a diff at 5000 lines with `(cut)` in the title, the ADR-027
+    reason: a generated file's rewrite is a diff nobody reads and megabytes nobody
+    asked to allocate.
+  - 599 tests (was 556), including the pty checks below.
+
+- **Phase 14 — Polish** (in progress)
+  - **The help screen** (SPEC §6). `F1` and Help ▸ Shortcuts open a read-only pager over
+    `docs::sections()` — the same table `docs/SHORTCUTS.md` is generated from, so a key
+    on screen, a key in the file and a key that is bound are one row of one keymap
+    (ADR-038). It answers the last menu entry that did nothing.
+  - It covers the whole body, sidebar and tab bar included, rather than only the editor
+    the diff viewer covers: a key table wants width, and at 60 columns the editor pane is
+    44 of them. The menu bar stays above it, which is how it is dismissed with the mouse
+    alone. Its keys are the diff viewer's — arrows, `PageUp`/`PageDown`, `Space`,
+    `Home`/`End`, `Esc`, and `q` because nothing here types — and the wheel over it
+    scrolls it.
+  - It dies with its focus, by the same one check at the end of `execute_command` that
+    ADR-037 wrote for the viewer, now covering both. A menu or a dialog drawn over it
+    leaves it open and hands focus back.
+  - The lines are laid out against the pane's width on demand rather than stored, so the
+    notes re-wrap on a resize instead of stranding the scroll against a layout that no
+    longer exists. A key label wider than the column keeps its own gap rather than being
+    cut — a truncated key is a key nobody can press.
+  - **`Command::Unimplemented` is deleted.** Every menu entry now resolves to a real
+    command, so the placeholder would only preserve the ability to add a new dead one; a
+    type that cannot express the case is a stronger statement than the test that used to
+    name the exceptions.
+  - **The status bar gives way on a narrow terminal** (ADR-039), closing the Phase 3
+    known issue. The right-hand readout is a list of pieces with a drop order rather than
+    one `format!`: past a floor of eighteen columns for the left half, the encoding goes
+    first, then the focus label, the language, the branch, the line ending and the
+    selection count. `Ln 1, Col 1` is never dropped. At 60 columns a notification is no
+    longer clipped to make room for text that is the same on every file.
+  - 622 tests (was 599), including the pty check below.
+
 ## In progress
 
-- Nothing. Phase 13 is closed.
+- Phase 14. The help screen and the responsive status bar have landed; the rest of the
+  phase's list — a filesystem watcher, a cap on the undo stack, the error-message pass,
+  the README screenshot and the release binaries — has not.
 
 ## Known issues
 
@@ -538,9 +570,10 @@ Phase 13 — Diff viewer (complete)
 - **x86_64 musl not yet built anywhere.** Only `aarch64` musl was verified locally.
   R12 (aarch64 musl cross-compilation) is confirmed; the x86_64 musl link is still
   CI-only.
-- **The status bar crowds itself at 60 columns.** The notification is clipped to make
-  room for the fixed `Ln/Col … focus` readout. Correct, but a responsive readout
-  (dropping the encoding and focus label when narrow) belongs in Phase 14.
+- **The status bar's readout changes width as the window does.** Pieces leave as the
+  terminal narrows and come back as it grows (ADR-039), so the left edge of the readout
+  moves. That movement is the cost of not clipping the notification; the position stays
+  at the right edge, which is where the eye returns to.
 - **Mouse capture takes over terminal text selection.** Shift-drag is the escape hatch
   in most terminals. Expected, and unchanged from SPEC §27.
 - **OSC52 is write-only, and silently so.** The terminal never says whether it took
@@ -703,6 +736,37 @@ Phase 13 — Diff viewer (complete)
 Phase 2 through Phase 8 acceptance were verified by driving the real binary in a pty
 (the Phase 1 harness: fork a pty, set `TIOCSWINSZ`, write key and mouse bytes, replay
 the output through a minimal terminal emulator).
+
+### Phase 14
+
+Same harness, at 100x30, 60x20 and 40x12 (the minimum layout width). The emulator now
+replays the whole output stream for each snapshot rather than feeding it in chunks — a
+read can split an escape sequence, and the garbled cells that produced were the harness's
+and not the editor's.
+
+- **`F1` at 100x30.** `┌ Keyboard shortcuts ───┐` over the whole body, the sidebar
+  included, with the menu bar still on the row above it and `1/172` in the bottom right.
+  `Anywhere` as the first heading, its note wrapped to two lines, then `Ctrl+Q  Quit,
+  asking first when a tab has unsaved changes` and the rest of the global table. The
+  focus readout said `Help`.
+- **The over-wide label.** `Ctrl+Shift+Tab / Ctrl+PageUp` sits proud of the column and
+  keeps two spaces before `Previous tab`, exactly as intended: the row is wider than the
+  others rather than cut.
+- **Paging.** `End` went to `147/172` — the input dialog's table and the closing sentence
+  about `docs/SHORTCUTS.md` — and `Home` came back to `1/172`. `q` closed it and the
+  document reappeared underneath with focus back on the editor.
+- **`F1` at 40x12.** The notes re-wrapped to five lines, the key column narrowed, and the
+  readout said `1/201` — 201 lines against 172 at 100 columns, which is the wrapping
+  being counted honestly rather than a stored layout being reused.
+- **The status bar at 60x20.** `Opened src/main.rs      Ln 1, Col 1   Rust   main
+  Editor`: `UTF-8` dropped and the notification whole, where before it was clipped.
+- **The status bar at 40x12.** `Opened src/main.rs  Ln 1, Col 1   main` — position and
+  branch, and the sentence still intact.
+- **Quit.** `Ctrl+Q` from inside the help screen still exits 0 with the terminal
+  restored: the global table is underneath the screen's own.
+- `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test`
+  (with and without `native-clipboard`) — all clean, 622 tests, zero warnings.
 
 ### Phase 13
 
@@ -998,9 +1062,8 @@ reporting.
 
 ## Next
 
-- Phase 14 — polish. The help screen is the one menu entry still wired to
-  `Unimplemented`, and `docs/SHORTCUTS.md` is already generated from the tables it would
-  show.
+Phase 14 continues. What is left of it, roughly in order of how much it is worth:
+
 - A filesystem watcher would close the explorer's refresh gap, the git panel's and now
   the viewer's. It is one dependency and one thread, and it is the largest single
   improvement left in Phase 14.
@@ -1014,4 +1077,10 @@ reporting.
 - What is still unchecked by hand, as after every phase: the real target terminals —
   iTerm2, Ghostty, Terminal.app, tmux, plain ssh.
 - The CI `targets` job has still not been seen green — x86_64 musl has not been linked
-  anywhere.
+  anywhere, and the release binaries the phase owes are downstream of it.
+- The error-message pass the phase names has not been done as a pass: the messages that
+  were written with their features read well, and nobody has read them all side by side.
+- A cap on the undo stack, a worker for the explorer's directory reads, and per-file
+  answers on the quit prompt are the three known issues above that Phase 14 named as its
+  own.
+- No README screenshot yet; the block at the top of it is still a hand-drawn mockup.
