@@ -1,0 +1,1 @@
+//! UI: diff rendering.

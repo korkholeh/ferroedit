@@ -1,0 +1,679 @@
+//! Rendering. Every function here is read-only over `&App`.
+
+pub mod dialog;
+pub mod diff;
+pub mod editor;
+pub mod explorer;
+pub mod field;
+pub mod git;
+pub mod layout;
+pub mod menu;
+pub mod search;
+pub mod statusbar;
+pub mod tabs;
+pub mod theme;
+
+use ratatui::style::Style;
+use ratatui::widgets::{Block, Paragraph, Wrap};
+use ratatui::Frame;
+
+use crate::app::App;
+use layout::{LayoutRects, MIN_HEIGHT, MIN_WIDTH};
+use theme::Theme;
+
+/// Draws one frame. Takes the rects rather than computing them so the main loop
+/// and the renderer can never disagree about where a pane is — which is what
+/// makes mouse hit-testing against the *last drawn* frame correct.
+pub fn render(frame: &mut Frame, app: &App, rects: &LayoutRects, theme: &Theme) {
+    let area = frame.area();
+    frame.render_widget(
+        Block::new().style(Style::new().bg(theme.background).fg(theme.foreground)),
+        area,
+    );
+
+    if rects.too_small {
+        let notice = Paragraph::new(format!(
+            "Terminal too small\n{}x{} — need at least {MIN_WIDTH}x{MIN_HEIGHT}",
+            area.width, area.height
+        ))
+        .style(Style::new().fg(theme.warning))
+        .wrap(Wrap { trim: true });
+        frame.render_widget(notice, area);
+        return;
+    }
+
+    explorer::render(frame, app, rects.explorer, theme);
+    git::render(frame, app, rects.git_panel, theme);
+    tabs::render(frame, app, rects, theme);
+    editor::render(frame, app, rects.editor, theme);
+    search::render(frame, app, rects, theme);
+    statusbar::render(frame, app, rects.status_bar, theme);
+    menu::render(frame, app, rects, theme);
+    // A dialog is modal, so it draws last of all — over the menu's popup too.
+    dialog::render(frame, app, rects, theme);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::focus::FocusTarget;
+    use crate::editor::coords::VisualCol;
+    use crate::editor::cursor::Motion;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::{Position, Rect};
+    use ratatui::Terminal;
+
+    fn app() -> App {
+        App::fixture()
+    }
+
+    /// Renders one frame and returns the buffer as one string per row.
+    fn draw(app: &App, width: u16, height: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let theme = Theme::default();
+        terminal
+            .draw(|frame| {
+                let rects = layout::compute(frame.area(), app);
+                render(frame, app, &rects, &theme);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_zone_paints_at_the_acceptance_size() {
+        let rows = draw(&app(), 60, 20);
+        let screen = rows.join("\n");
+
+        assert!(rows[0].contains("File"), "menu bar missing: {:?}", rows[0]);
+        assert!(rows[0].contains("Help"));
+        assert!(screen.contains("ferroedit-test"), "explorer header missing");
+        assert!(screen.contains("main.rs"), "tab bar / explorer missing");
+        assert!(screen.contains("Git — main"), "git panel missing");
+        assert!(screen.contains("fn main() {"), "editor content missing");
+        assert!(
+            rows[19].contains("Ln 1, Col 1"),
+            "status bar missing: {:?}",
+            rows[19]
+        );
+    }
+
+    #[test]
+    fn the_gutter_numbers_the_editor_lines() {
+        let screen = draw(&app(), 80, 24).join("\n");
+        assert!(screen.contains(" 1  fn main() {"));
+        assert!(screen.contains(" 3  }"));
+    }
+
+    #[test]
+    fn an_open_menu_paints_its_items_and_bound_shortcuts_over_the_editor() {
+        let mut app = app();
+        app.menu.open = Some(0);
+        app.focus = FocusTarget::Menu;
+        let rows = draw(&app, 80, 24);
+        let screen = rows.join("\n");
+        assert!(screen.contains("Quit"));
+        assert!(
+            screen.contains("Ctrl+Q"),
+            "the bound shortcut must be shown"
+        );
+        assert!(screen.contains("Ctrl+S"), "Save is bound from Phase 2");
+        assert!(screen.contains("Ctrl+N"), "New File is bound from Phase 6");
+        assert!(screen.contains("Ctrl+O"), "Open is bound from Phase 9");
+        // Save As has no key at all (ADR-028), so its row must show none: the
+        // menu advertises what is bound and nothing else.
+        let save_as = rows
+            .iter()
+            .find(|row| row.contains("Save As"))
+            .expect("the File menu is open");
+        assert!(
+            !save_as.contains("Ctrl"),
+            "an unbound entry must not advertise a key: {save_as:?}"
+        );
+    }
+
+    /// The background colours of one row, so a test can see what is
+    /// highlighted rather than only what is written.
+    fn row_backgrounds(app: &App, width: u16, height: u16, row: u16) -> Vec<ratatui::style::Color> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let theme = Theme::default();
+        terminal
+            .draw(|frame| {
+                let rects = layout::compute(frame.area(), app);
+                render(frame, app, &rects, &theme);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..width).map(|x| buffer[(x, row)].bg).collect()
+    }
+
+    /// The foreground colour of every cell on one row.
+    fn row_foregrounds(app: &App, width: u16, height: u16, row: u16) -> Vec<ratatui::style::Color> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let theme = Theme::default();
+        terminal
+            .draw(|frame| {
+                let rects = layout::compute(frame.area(), app);
+                render(frame, app, &rects, &theme);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..width).map(|x| buffer[(x, row)].fg).collect()
+    }
+
+    #[test]
+    fn the_editor_paints_the_colours_the_highlighter_chose() {
+        let mut app = app();
+        // The fixture's first tab is `main.rs`, and nothing has been drawn yet,
+        // so this is also the run loop's own first sync.
+        app.sync_highlight();
+        assert_eq!(app.tabs[0].highlights.language(), "Rust");
+
+        let rects = layout::compute(Rect::new(0, 0, 80, 24), &app);
+        let gutter = (rects.editor.x + 4) as usize;
+        let foregrounds = row_foregrounds(&app, 80, 24, rects.editor.y);
+        let theme = Theme::default();
+
+        // `fn main() {` — the keyword, then the function name.
+        assert_eq!(
+            foregrounds[gutter], theme.syntax.keyword,
+            "`fn` is a keyword"
+        );
+        assert_eq!(
+            foregrounds[gutter + 3],
+            theme.syntax.function,
+            "`main` is a function name"
+        );
+    }
+
+    #[test]
+    fn selected_code_keeps_its_syntax_colours() {
+        let mut app = app();
+        app.sync_highlight();
+        // Select `fn main` — a keyword and a function name in one selection.
+        app.tabs[0].document.place_cursor(0, VisualCol(0));
+        app.tabs[0].document.extend_to(0, VisualCol(7));
+
+        let rects = layout::compute(Rect::new(0, 0, 80, 24), &app);
+        let gutter = (rects.editor.x + 4) as usize;
+        let row = rects.editor.y;
+        let theme = Theme::default();
+        let foregrounds = row_foregrounds(&app, 80, 24, row);
+        let backgrounds = row_backgrounds(&app, 80, 24, row);
+
+        assert_eq!(backgrounds[gutter], theme.editor_selection.bg.unwrap());
+        assert_eq!(
+            foregrounds[gutter], theme.syntax.keyword,
+            "the selection sets a background only, so the keyword is still purple"
+        );
+        assert_eq!(foregrounds[gutter + 3], theme.syntax.function);
+    }
+
+    #[test]
+    fn a_selection_is_painted_behind_the_text_it_covers() {
+        let mut app = app();
+        // Select `main` on the first line: four cells, after `fn `.
+        app.tabs[0].document.place_cursor(0, VisualCol(3));
+        app.tabs[0].document.extend_to(0, VisualCol(7));
+        let rects = layout::compute(Rect::new(0, 0, 80, 24), &app);
+        let row = rects.editor.y;
+        let gutter = rects.editor.x + 4;
+
+        let backgrounds = row_backgrounds(&app, 80, 24, row);
+        let theme = Theme::default();
+        let selected = theme.editor_selection.bg.unwrap();
+        let highlighted: Vec<usize> = backgrounds
+            .iter()
+            .enumerate()
+            .filter(|(_, bg)| **bg == selected)
+            .map(|(x, _)| x)
+            .collect();
+        assert_eq!(
+            highlighted,
+            ((gutter + 3) as usize..(gutter + 7) as usize).collect::<Vec<_>>(),
+            "exactly the four cells of `main` are highlighted"
+        );
+    }
+
+    #[test]
+    fn the_status_bar_counts_the_selection_only_while_there_is_one() {
+        let mut app = app();
+        assert!(!draw(&app, 80, 24).join("\n").contains("Sel "));
+        app.tabs[0].document.select_all();
+        let screen = draw(&app, 80, 24).join("\n");
+        assert!(screen.contains("Sel 36"), "no selection count: {screen}");
+    }
+
+    /// Draws one frame and reports where the terminal's cursor ended up.
+    ///
+    /// The backend starts at the origin, which the editor can never place the
+    /// cursor on — so an unchanged origin means "no caret was drawn".
+    fn draw_cursor(app: &App, width: u16, height: u16) -> Position {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.set_cursor_position(Position::new(0, 0)).unwrap();
+        let theme = Theme::default();
+        terminal
+            .draw(|frame| {
+                let rects = layout::compute(frame.area(), app);
+                render(frame, app, &rects, &theme);
+            })
+            .unwrap();
+        terminal.get_cursor_position().unwrap()
+    }
+
+    #[test]
+    fn the_terminal_cursor_sits_on_the_document_cursor_while_the_editor_has_focus() {
+        let mut app = app();
+        app.active_mut()
+            .unwrap()
+            .document
+            .place_cursor(1, VisualCol(4));
+
+        let rects = layout::compute(Rect::new(0, 0, 80, 24), &app);
+        // The gutter is two digits plus two cells of padding, so text column 4
+        // is eight cells into the pane.
+        let expected = Position::new(rects.editor.x + 4 + 4, rects.editor.y + 1);
+        assert_eq!(draw_cursor(&app, 80, 24), expected);
+    }
+
+    #[test]
+    fn an_unfocused_editor_shows_no_caret() {
+        let mut app = app();
+        app.focus = FocusTarget::Explorer;
+        assert_eq!(draw_cursor(&app, 80, 24), Position::new(0, 0));
+    }
+
+    #[test]
+    fn a_long_line_scrolls_horizontally_under_the_cursor() {
+        let mut app = app();
+        app.tabs[0] = crate::app::Tab::scratch("wide.txt", &"abcdefghij".repeat(30));
+        app.editor_view = crate::app::EditorView {
+            width: 60,
+            height: 22,
+        };
+        app.active_mut()
+            .unwrap()
+            .document
+            .move_cursor(Motion::End, 22);
+        let view = app.editor_view;
+        app.active_mut().unwrap().follow_cursor(view);
+
+        let screen = draw(&app, 80, 24).join("\n");
+        assert!(
+            screen.contains("hij"),
+            "the end of the line must be on screen"
+        );
+        assert!(
+            !screen.contains(" 1  abcdefghij"),
+            "the start of the line has scrolled off"
+        );
+    }
+
+    #[test]
+    fn the_status_bar_follows_the_cursor() {
+        let mut app = app();
+        app.active_mut()
+            .unwrap()
+            .document
+            .move_cursor(Motion::Down, 24);
+        app.active_mut()
+            .unwrap()
+            .document
+            .move_cursor(Motion::End, 24);
+        let rows = draw(&app, 80, 24);
+        assert!(
+            rows[23].contains("Ln 2, Col 23"),
+            "status bar: {:?}",
+            rows[23]
+        );
+    }
+
+    #[test]
+    fn an_empty_app_says_so_instead_of_drawing_an_editor() {
+        let app = App::new(crate::app::workspace::Workspace::from_arg(None).unwrap());
+        let screen = draw(&app, 80, 24).join("\n");
+        assert!(screen.contains("No file open"));
+    }
+
+    #[test]
+    fn an_open_dialog_paints_over_everything_including_the_menu() {
+        let mut app = app();
+        app.menu.open = Some(0);
+        app.dialog = Some(crate::app::dialog::DialogState::unsaved_changes(
+            1,
+            "editor.rs",
+            FocusTarget::Editor,
+        ));
+        app.focus = FocusTarget::Dialog;
+        let screen = draw(&app, 80, 24).join("\n");
+
+        assert!(screen.contains("Unsaved changes"), "no title: {screen}");
+        assert!(screen.contains("editor.rs has unsaved changes."));
+        assert!(screen.contains("[ Save ]"));
+        assert!(screen.contains("[ Don't Save ]"));
+        assert!(screen.contains("[ Cancel ]"));
+
+        // At a size where the modal box and the menu popup overlap, the box is
+        // the one on top: it draws after everything else.
+        let small = draw(&app, 40, 8).join("\n");
+        assert!(small.contains("Unsaved changes"));
+        assert!(
+            !small.contains("New File"),
+            "the popup shows through the modal box: {small}"
+        );
+    }
+
+    #[test]
+    fn the_selected_dialog_button_is_the_highlighted_one() {
+        let mut app = app();
+        app.dialog = Some(crate::app::dialog::DialogState::unsaved_changes(
+            0,
+            "main.rs",
+            FocusTarget::Editor,
+        ));
+        app.focus = FocusTarget::Dialog;
+        let rects = layout::compute(Rect::new(0, 0, 80, 24), &app);
+        let row = rects.dialog_buttons[0].y;
+        let theme = Theme::default();
+        let highlighted = theme.dialog_button_selected.bg.unwrap();
+
+        let backgrounds = row_backgrounds(&app, 80, 24, row);
+        let cells: Vec<usize> = backgrounds
+            .iter()
+            .enumerate()
+            .filter(|(_, bg)| **bg == highlighted)
+            .map(|(x, _)| x)
+            .collect();
+        let save = rects.dialog_buttons[0];
+        assert_eq!(
+            cells,
+            (save.x as usize..save.right() as usize).collect::<Vec<_>>(),
+            "exactly the default button is highlighted"
+        );
+    }
+
+    #[test]
+    fn a_dialog_hides_the_caret_because_the_editor_no_longer_has_focus() {
+        let mut app = app();
+        app.dialog = Some(crate::app::dialog::DialogState::unsaved_on_quit(
+            1,
+            FocusTarget::Editor,
+        ));
+        app.focus = FocusTarget::Dialog;
+        assert_eq!(draw_cursor(&app, 80, 24), Position::new(0, 0));
+    }
+
+    #[test]
+    fn a_too_small_terminal_shows_a_notice_instead_of_a_broken_layout() {
+        let screen = draw(&app(), 30, 6).join("\n");
+        assert!(screen.contains("Terminal too small"));
+        assert!(!screen.contains("fn main()"));
+    }
+
+    #[test]
+    fn rendering_never_panics_across_a_wide_range_of_sizes() {
+        let mut app = app();
+        for width in [1, 20, 39, 40, 60, 100, 200] {
+            for height in [1, 5, 8, 20, 60] {
+                let _ = draw(&app, width, height);
+            }
+        }
+        // Again with the widest modal box open, which is the thing most likely
+        // to run off a narrow frame.
+        app.dialog = Some(crate::app::dialog::DialogState::unsaved_changes(
+            0,
+            "a-very-long-file-name-indeed.rs",
+            FocusTarget::Editor,
+        ));
+        app.focus = FocusTarget::Dialog;
+        for width in [1, 20, 39, 40, 60, 100, 200] {
+            for height in [1, 5, 8, 20, 60] {
+                let _ = draw(&app, width, height);
+            }
+        }
+    }
+
+    // --- Phase 6 ------------------------------------------------------------
+
+    /// An app over a real directory, which is what the explorer draws from.
+    fn tree_app(dir: &tempfile::TempDir) -> App {
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}").unwrap();
+        std::fs::write(dir.path().join("README.md"), "# hi").unwrap();
+        App::fixture_in(dir.path())
+    }
+
+    #[test]
+    fn the_explorer_draws_the_real_tree_with_a_marker_per_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = tree_app(&dir);
+        let screen = draw(&app, 80, 24);
+        assert!(
+            screen.iter().any(|row| row.contains("▶ src")),
+            "a closed directory points right: {screen:?}"
+        );
+        assert!(screen.iter().any(|row| row.contains("  README.md")));
+
+        app.sidebar
+            .tree
+            .expand(&std::fs::canonicalize(dir.path().join("src")).unwrap());
+        let screen = draw(&app, 80, 24);
+        assert!(screen.iter().any(|row| row.contains("▼ src")));
+        assert!(
+            screen.iter().any(|row| row.contains("    main.rs")),
+            "and its contents are indented one level: {screen:?}"
+        );
+    }
+
+    #[test]
+    fn an_empty_workspace_says_so_rather_than_drawing_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = App::fixture_in(dir.path());
+        let screen = draw(&app, 80, 24).join("\n");
+        assert!(screen.contains("(empty or ignored)"), "{screen}");
+    }
+
+    #[test]
+    fn the_selected_row_is_highlighted_in_the_explorer() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = tree_app(&dir);
+        app.sidebar.selected = 1;
+        let rects = layout::compute(Rect::new(0, 0, 80, 24), &app);
+        // One row of the panel is its title.
+        let backgrounds = row_backgrounds(&app, 80, 24, rects.explorer.y + 2);
+        let selected = Theme::default().selection.bg.unwrap();
+        assert!(
+            backgrounds.contains(&selected),
+            "the second row is painted as the selection"
+        );
+    }
+
+    #[test]
+    fn the_file_being_edited_is_marked_in_the_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = tree_app(&dir);
+        app.open_path(&dir.path().join("README.md"), None).unwrap();
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let theme = Theme::default();
+        terminal
+            .draw(|frame| {
+                let rects = layout::compute(frame.area(), &app);
+                render(frame, &app, &rects, &theme);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let bold = (0..24)
+            .flat_map(|y| (0..20).map(move |x| (x, y)))
+            .filter(|(x, y)| {
+                buffer[(*x, *y)]
+                    .modifier
+                    .contains(ratatui::style::Modifier::BOLD)
+            })
+            .map(|(x, y)| buffer[(x, y)].symbol().to_string())
+            .collect::<String>();
+        assert!(
+            bold.contains("README.md"),
+            "the active file is the bold one in the sidebar: {bold:?}"
+        );
+    }
+
+    #[test]
+    fn an_input_dialog_draws_its_prompt_its_field_and_the_caret() {
+        let mut app = app();
+        app.dialog = Some(crate::app::dialog::DialogState::new_file(
+            std::path::Path::new("/project/src"),
+            FocusTarget::Editor,
+        ));
+        app.focus = FocusTarget::Dialog;
+        if let Some(field) = app.dialog.as_mut().unwrap().field_mut() {
+            field.insert_str("notes.md");
+        }
+
+        let screen = draw(&app, 80, 24);
+        let joined = screen.join("\n");
+        assert!(joined.contains("New File"), "the title");
+        assert!(joined.contains("Create in src"), "the prompt");
+        assert!(joined.contains("notes.md"), "what has been typed");
+        assert!(joined.contains("[ Create ]") && joined.contains("[ Cancel ]"));
+
+        // The caret sits just past the text, inside the box.
+        let rects = layout::compute(Rect::new(0, 0, 80, 24), &app);
+        let area = rects.dialog.expect("a dialog rect");
+        assert_eq!(
+            draw_cursor(&app, 80, 24),
+            Position::new(area.x + 2 + "notes.md".len() as u16, area.y + 2)
+        );
+    }
+
+    #[test]
+    fn a_confirmation_dialog_puts_no_caret_on_the_screen() {
+        let mut app = app();
+        app.dialog = Some(crate::app::dialog::DialogState::unsaved_on_quit(
+            1,
+            FocusTarget::Editor,
+        ));
+        app.focus = FocusTarget::Dialog;
+        assert_eq!(draw_cursor(&app, 80, 24), Position::new(0, 0));
+    }
+    /// The fixture with the find bar open over a query that hits.
+    fn searching(query: &str, replacing: bool) -> App {
+        let mut app = app();
+        app.tabs = vec![crate::app::Tab::scratch(
+            "notes.txt",
+            "fn main() {\n    println!(\"hello\");\n}",
+        )];
+        app.active_tab = Some(0);
+        crate::commands::execute::execute_command(
+            &mut app,
+            if replacing {
+                crate::commands::Command::ReplaceOpen
+            } else {
+                crate::commands::Command::SearchOpen
+            },
+        );
+        for ch in query.chars() {
+            crate::commands::execute::execute_command(
+                &mut app,
+                crate::commands::Command::SearchInputChar(ch),
+            );
+        }
+        app.sync_search();
+        app
+    }
+
+    #[test]
+    fn the_find_bar_shows_the_query_and_how_many_it_matched() {
+        let app = searching("l", false);
+        let screen = draw(&app, 80, 24).join("\n");
+        assert!(screen.contains("Find:"), "the bar is drawn: {screen}");
+        assert!(screen.contains("[Aa]"), "and its case toggle");
+        // `l` appears four times in `println!("hello")` plus none elsewhere.
+        let count = app.search.count_label();
+        assert!(screen.contains(&count), "the readout says {count}");
+    }
+
+    #[test]
+    fn the_replace_bar_adds_a_row_with_two_buttons() {
+        let app = searching("l", true);
+        let screen = draw(&app, 80, 24).join("\n");
+        assert!(screen.contains("Repl:"));
+        assert!(screen.contains("[Replace]"));
+        assert!(screen.contains("[All]"));
+    }
+
+    #[test]
+    fn the_bar_takes_its_rows_out_of_the_editor() {
+        let plain = layout::compute(Rect::new(0, 0, 80, 24), &app());
+        let searching = searching("l", true);
+        let with_bar = layout::compute(Rect::new(0, 0, 80, 24), &searching);
+        assert_eq!(with_bar.editor.height, plain.editor.height - 2);
+        assert_eq!(
+            with_bar.search.as_ref().map(|s| s.bar.height),
+            Some(2),
+            "one row to find and one to replace"
+        );
+    }
+
+    #[test]
+    fn every_hit_is_painted_and_the_current_one_is_the_selection() {
+        let mut app = searching("println", false);
+        crate::commands::execute::execute_command(&mut app, crate::commands::Command::FindNext);
+
+        let rects = layout::compute(Rect::new(0, 0, 80, 24), &app);
+        // `println` is on the second line, four spaces in.
+        let row = rects.editor.y + 1;
+        let gutter = (rects.editor.x + 4) as usize;
+        let theme = Theme::default();
+        let backgrounds = row_backgrounds(&app, 80, 24, row);
+        assert_eq!(
+            backgrounds[gutter + 4],
+            theme.editor_selection.bg.unwrap(),
+            "the current hit is the selection"
+        );
+
+        // A second hit, not current, is painted with the match background.
+        let mut app = searching("l", false);
+        crate::commands::execute::execute_command(&mut app, crate::commands::Command::FindNext);
+        let backgrounds = row_backgrounds(&app, 80, 24, rects.editor.y + 1);
+        assert!(
+            backgrounds.contains(&theme.search_match.bg.unwrap()),
+            "the hits that are not current still show"
+        );
+    }
+
+    #[test]
+    fn the_caret_is_in_the_bar_while_the_bar_has_focus() {
+        let app = searching("fn", false);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let theme = Theme::default();
+        terminal
+            .draw(|frame| {
+                let rects = layout::compute(frame.area(), &app);
+                render(frame, &app, &rects, &theme);
+            })
+            .unwrap();
+        let rects = layout::compute(Rect::new(0, 0, 80, 24), &app);
+        let bar = rects.search.as_ref().unwrap().bar;
+        assert_eq!(
+            terminal.get_cursor_position().unwrap(),
+            Position::new(rects.search.as_ref().unwrap().query.x + 2, bar.y),
+            "after the two characters of the query"
+        );
+    }
+
+    #[test]
+    fn the_bar_still_draws_on_a_terminal_too_narrow_for_its_buttons() {
+        let app = searching("x", true);
+        // 40 columns is the minimum layout; the sidebar leaves the bar ~24.
+        let screen = draw(&app, 40, 12).join("\n");
+        assert!(screen.contains("Find:"), "the field survives: {screen}");
+    }
+}

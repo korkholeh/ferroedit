@@ -1,0 +1,63 @@
+%YAML 1.2
+---
+# Hand-written for FerroEdit: syntect's default set has no Dockerfile, and
+# SPEC §21 asks for one. Instructions, comments, strings and variables — the
+# four things that carry the meaning of a Dockerfile.
+name: Dockerfile
+file_extensions:
+  - Dockerfile
+  - dockerfile
+  - Containerfile
+  - dockerignore
+first_line_match: '^\s*(?i:from)\s+\S+'
+scope: source.dockerfile
+
+contexts:
+  main:
+    - match: '^\s*#\s*(syntax|escape|check)\s*='
+      scope: comment.line.number-sign.directive.dockerfile
+      push: comment_body
+    - match: '#'
+      scope: punctuation.definition.comment.dockerfile
+      push: comment_body
+
+    - match: '^\s*(?i:(ONBUILD)\s+)?(?i:(ADD|ARG|CMD|COPY|ENTRYPOINT|ENV|EXPOSE|FROM|HEALTHCHECK|LABEL|MAINTAINER|RUN|SHELL|STOPSIGNAL|USER|VOLUME|WORKDIR))\b'
+      captures:
+        1: keyword.control.dockerfile
+        2: keyword.control.dockerfile
+    - match: '\b(?i:(AS))\b'
+      scope: keyword.operator.dockerfile
+
+    - include: strings
+    - include: variables
+
+    - match: '\\$'
+      scope: constant.character.escape.continuation.dockerfile
+
+  comment_body:
+    - meta_scope: comment.line.number-sign.dockerfile
+    - match: $
+      pop: true
+
+  strings:
+    - match: '"'
+      scope: punctuation.definition.string.begin.dockerfile
+      push:
+        - meta_scope: string.quoted.double.dockerfile
+        - match: '\\.'
+          scope: constant.character.escape.dockerfile
+        - match: '"'
+          scope: punctuation.definition.string.end.dockerfile
+          pop: true
+        - include: variables
+    - match: "'"
+      scope: punctuation.definition.string.begin.dockerfile
+      push:
+        - meta_scope: string.quoted.single.dockerfile
+        - match: "'"
+          scope: punctuation.definition.string.end.dockerfile
+          pop: true
+
+  variables:
+    - match: '\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*'
+      scope: variable.other.dockerfile

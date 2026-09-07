@@ -1,0 +1,64 @@
+[package]
+name = "ferroedit"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "A modern desktop-like text editor that happens to run in a terminal"
+license = "MIT"
+repository = "https://github.com/korkholeh/ferroedit"
+readme = "README.md"
+build = "build.rs"
+# The grammars baked into the dump by `build.rs` (ADR-022).
+include = ["src/**/*", "assets/**/*", "build.rs", "Cargo.toml", "README.md", "LICENSE*"]
+keywords = ["editor", "tui", "terminal", "text-editor"]
+categories = ["text-editors", "command-line-utilities"]
+
+[dependencies]
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["bracketed-paste"] }
+ropey = "1.6"
+unicode-segmentation = "1.12"
+unicode-width = "0.2"
+# `regex-fancy` swaps C oniguruma for pure-Rust fancy-regex, which is what keeps
+# static musl builds working (ADR-003). The runtime needs nothing else: the
+# grammars arrive as the dump `build.rs` writes, so syntect's own bundled
+# assets — and the YAML and plist loaders that build them — would be a second
+# copy of ~2 MB in the binary (ADR-022).
+syntect = { version = "5.2", default-features = false, features = [
+    "parsing",
+    "regex-fancy",
+    "dump-load",
+] }
+ignore = "0.4"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+directories = "5"
+anyhow = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+log = "0.4"
+simplelog = "0.12"
+arboard = { version = "3", optional = true }
+
+[build-dependencies]
+# Same features as the runtime dependency: the dump `build.rs` writes has to be
+# readable by the parser the binary links against.
+syntect = { version = "5.2", default-features = false, features = ["default-fancy"] }
+
+[dev-dependencies]
+insta = "1"
+tempfile = "3"
+
+[features]
+default = []
+# Native system clipboard. Off by default: pulls X11/Wayland libs on Linux,
+# breaks the pure-static goal, and is useless over SSH (ADR-005).
+native-clipboard = ["dep:arboard"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+# No panic = "abort": unwinding keeps TerminalGuard::drop running, which is the
+# second half of the terminal-restore safety net (ADR-006).

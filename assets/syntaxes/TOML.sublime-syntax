@@ -1,0 +1,96 @@
+%YAML 1.2
+---
+# Hand-written for FerroEdit: syntect's default set has no TOML, and SPEC §21
+# asks for it. Deliberately small — enough to colour a Cargo.toml or a config
+# file correctly, not a complete grammar.
+name: TOML
+file_extensions:
+  - toml
+  - tml
+  - Cargo.lock
+  - Pipfile
+scope: source.toml
+
+contexts:
+  main:
+    - include: comments
+    - include: tables
+    - include: keys
+    - include: values
+
+  comments:
+    - match: '#'
+      scope: punctuation.definition.comment.toml
+      push:
+        - meta_scope: comment.line.number-sign.toml
+        - match: $
+          pop: true
+
+  tables:
+    - match: '^\s*(\[\[)([^\]]*)(\]\])'
+      captures:
+        1: punctuation.definition.table.toml
+        2: entity.name.section.toml
+        3: punctuation.definition.table.toml
+    - match: '^\s*(\[)([^\]]*)(\])'
+      captures:
+        1: punctuation.definition.table.toml
+        2: entity.name.section.toml
+        3: punctuation.definition.table.toml
+
+  keys:
+    - match: '(?:^|[,{])\s*("[^"]*"|''[^'']*''|[A-Za-z0-9_.\-]+)\s*(=)'
+      captures:
+        1: entity.name.tag.toml
+        2: keyword.operator.assignment.toml
+
+  values:
+    - include: strings
+    - match: '\b(true|false)\b'
+      scope: constant.language.toml
+    - match: '\b\d{4}-\d{2}-\d{2}([Tt ]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})?)?'
+      scope: constant.other.datetime.toml
+    - match: '[+-]?\b(0x[0-9A-Fa-f_]+|0o[0-7_]+|0b[01_]+|(inf|nan)|\d[\d_]*(\.[\d_]+)?([eE][+-]?\d+)?)\b'
+      scope: constant.numeric.toml
+    - match: '[\[\]{},]'
+      scope: punctuation.separator.toml
+
+  strings:
+    - match: '"""'
+      scope: punctuation.definition.string.begin.toml
+      push:
+        - meta_scope: string.quoted.triple.toml
+        - match: '"""'
+          scope: punctuation.definition.string.end.toml
+          pop: true
+        - include: escapes
+    - match: "'''"
+      scope: punctuation.definition.string.begin.toml
+      push:
+        - meta_scope: string.quoted.triple.literal.toml
+        - match: "'''"
+          scope: punctuation.definition.string.end.toml
+          pop: true
+    - match: '"'
+      scope: punctuation.definition.string.begin.toml
+      push:
+        - meta_scope: string.quoted.double.toml
+        - match: '"'
+          scope: punctuation.definition.string.end.toml
+          pop: true
+        - match: $
+          pop: true
+        - include: escapes
+    - match: "'"
+      scope: punctuation.definition.string.begin.toml
+      push:
+        - meta_scope: string.quoted.single.literal.toml
+        - match: "'"
+          scope: punctuation.definition.string.end.toml
+          pop: true
+        - match: $
+          pop: true
+
+  escapes:
+    - match: '\\(u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|[btnfr"\\]|\s*$)'
+      scope: constant.character.escape.toml

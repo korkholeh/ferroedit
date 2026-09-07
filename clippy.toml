@@ -1,0 +1,4 @@
+# Rendering and git parsing hand around plenty of small structs; the default
+# threshold fires on legitimate ratatui-shaped code.
+too-many-arguments-threshold = 8
+type-complexity-threshold = 300
