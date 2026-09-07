@@ -1147,3 +1147,59 @@ empty stack has always produced. The budget is a constant, not a setting: the fi
 behind it exists so the tests can use a small one, and nobody has asked for the option.
 The redo stack is fed from the undo stack, so the pair is bounded by twice the budget
 rather than by it.
+
+---
+
+## ADR-043: A buffer follows its file when it can, and asks when it cannot
+
+**Decision.** Every open tab remembers what its file was — modification time and length —
+the last time the buffer and the disk agreed, which is the moment it was opened, reloaded
+or saved. When the watcher reports a change in the worktree, every tab is stat'd against
+its stamp. A clean buffer whose file moved is re-read where it stands, silently. A
+modified one is marked and left alone, and the question is put to the user: Keep Mine, or
+Reload. The reload is a single undo step, so `Ctrl+Z` gives the unsaved work back.
+`F5` in the editor is the same reload, asked for deliberately.
+
+**Why.** ADR-040 made the gap visible and did not close it: a `git checkout` in another
+terminal updated the explorer and the git panel while the document the user was looking
+at stayed as it was, and the first hint of it was a save that quietly undid somebody
+else's commit. Half a feature is worse here than none, because the panes that *did*
+update are what makes the stale buffer look current.
+
+The split between reloading and asking is the whole design. A clean buffer holds nothing
+that is not also on disk, so re-reading it cannot lose anything and a prompt would only
+be a keystroke charged for nothing. A modified buffer is the only copy of that work, and
+no filesystem event — a build, a formatter, a branch switch — is allowed to spend it.
+
+Asking is not free either, which is why the question is asked *once* per change and only
+for the tab on screen. The watcher reports every burst in the workspace, so a mark that
+did not remember having been raised would re-open the same dialog on every `cargo build`.
+A background tab keeps its mark in the tab bar and is asked about when it comes forward:
+a modal question about a document the user cannot see is a question about nothing.
+
+The reload being undoable is what makes Reload a safe button rather than a one-way door.
+It costs one step holding both versions of the file, which is what ADR-042's budget is
+for — and the alternative, a reload that clears the history, makes the one destructive
+action in the editor also the only one that cannot be taken back.
+
+Default is Keep Mine. Every other confirmation in the editor is opened by the user, and
+this one is opened by a filesystem event: it can arrive between two keystrokes, so the
+reflex `Enter` must be the answer that does nothing.
+
+The stamp is mtime *and* length because neither is enough alone — a coarse-grained
+filesystem hides a rewrite inside one second, and a one-character change by another
+editor keeps the length. Together they miss only a same-second edit that also preserves
+the length. The alternative, reading every open file back on every event to compare it,
+would make a build in the next terminal cost the size of the working set; a hash would
+cost the same read. The stamp is taken *before* the read, not after, so a writer that
+finishes between the two is reported rather than recorded as the state the buffer holds.
+
+**Consequence.** A file deleted under a clean buffer is not closed and not emptied: the
+buffer is the last copy, so it is marked, said once, and saving it puts the file back.
+The same under a modified buffer is a question with one answer, because there is nothing
+to reload from. A save answers the question by overwriting whatever the file became —
+the editor does not offer a merge, and SPEC has never asked for one. The marker shares
+the dirty marker's cell in the tab bar rather than taking one of its own; a stale tab is
+nearly always a modified one, and the tab bar is already short of cells. Without a
+watcher — the best-effort case ADR-040 leaves open — none of this runs on its own, and
+`F5` in the editor is the manual door to all of it.

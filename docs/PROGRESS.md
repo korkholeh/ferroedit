@@ -1,6 +1,7 @@
 # Current Phase
 
-Phase 14 — Polish (in progress: help screen and status bar done)
+Phase 14 — Polish (in progress: help screen, status bar, watcher, undo budget and
+external reload done)
 
 ## Completed
 
@@ -584,13 +585,38 @@ Phase 14 — Polish (in progress: help screen and status bar done)
   - A long notification now takes the width it needs from the readout rather than only
     what a constant floor left it: `Nothing staged — finish the rebase with …` lost three
     characters at 110 columns before this.
-  - 641 tests (was 599), including the pty checks below.
+  - **A buffer follows its file when it can, and asks when it cannot** (ADR-043) — the
+    gap ADR-040 made visible and did not close. Every tab remembers what its file was —
+    mtime and length — the last time the two agreed, and a worktree change stats them all
+    against it.
+  - A clean buffer is re-read where it stands and says nothing: everything in it is also
+    on disk, so a prompt would be a keystroke charged for nothing. A modified one is
+    marked and left alone, because it is the only copy of that work.
+  - The question — Keep Mine, or Reload — is asked once per change and only for the tab
+    on screen; a background tab keeps its mark in the tab bar and is asked when it comes
+    forward. Keep Mine is the default: this dialog is opened by a filesystem event rather
+    than by the user, so it can arrive between two keystrokes.
+  - The reload is one undo step, so `Ctrl+Z` gives the unsaved work back — the byte
+    budget of ADR-042 is what keeps holding both versions bounded. A save answers the
+    question by overwriting whatever the file became, and settles the tab the same way.
+  - A file deleted under a clean buffer is not closed and not emptied: the buffer is the
+    last copy, so it is said once and marked, and saving it puts the file back.
+  - `F5` in the editor is the same reload asked for deliberately, which is what "show me
+    what is really there" already means in the explorer, the git panel and the diff
+    viewer. It is also the whole feature's manual door on a machine where the watcher
+    would not start.
+  - **`ferroedit a.txt` opened a workspace called `/`.** `Path::parent` of a bare file
+    name is the *empty* path rather than `None`, so the fallback next to it never fired
+    and the root canonicalised to nothing: no tree, no repository, and nothing for the
+    watcher to watch. Found by the first smoke test of the reload, which is exactly the
+    case a pty harness reaches and a unit test with `tempdir` paths never does.
+  - 665 tests (was 641), including the pty checks below.
 
 ## In progress
 
-- Phase 14. The help screen and the responsive status bar have landed; the rest of the
-  phase's list — a filesystem watcher, a cap on the undo stack, the error-message pass,
-  the README screenshot and the release binaries — has not.
+- Phase 14. The help screen, the responsive status bar, the watcher, the undo budget and
+  reloading a buffer whose file changed have landed; the error-message pass, the README
+  screenshot and the release binaries have not.
 
 ## Known issues
 
@@ -1126,9 +1152,6 @@ reporting.
 
 Phase 14 continues. What is left of it, roughly in order of how much it is worth:
 
-- Reloading a buffer whose file changed on disk. The watcher made the gap visible and did
-  not close it: the panes update and the document does not. It needs a prompt, because a
-  buffer with unsaved edits cannot simply be replaced.
 - Cancelling a running job is worth doing when a second one wants it: the `JobId`
   exists, but the worker keeps no handle to the child it spawned.
 - A diff of a conflicted file is now a view rather than a question (ADR-036), but it is
@@ -1140,7 +1163,9 @@ Phase 14 continues. What is left of it, roughly in order of how much it is worth
   anywhere, and the release binaries the phase owes are downstream of it.
 - The error-message pass the phase names has not been done as a pass: the messages that
   were written with their features read well, and nobody has read them all side by side.
-- A cap on the undo stack, a worker for the explorer's directory reads, and per-file
-  answers on the quit prompt are the three known issues above that Phase 14 named as its
-  own.
+- A worker for the explorer's directory reads and per-file answers on the quit prompt are
+  the two known issues above that Phase 14 named as its own and has not answered.
+- Reloading has no merge and does not offer one: Reload takes the file, Keep Mine keeps
+  the buffer, and a save overwrites. Nothing in SPEC asks for a third answer, and the
+  reload being undoable is what makes the pair enough.
 - No README screenshot yet; the block at the top of it is still a hand-drawn mockup.
