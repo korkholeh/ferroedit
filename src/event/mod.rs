@@ -9,14 +9,21 @@ use std::thread;
 
 use crossterm::event::{self as term, Event, KeyEvent, KeyEventKind, MouseEvent};
 
-/// Everything the main loop can be woken by. Git and filesystem workers push
-/// their own variants into the same channel from Phase 6 onwards.
+use crate::git::JobOutcome;
+
+/// Everything the main loop can be woken by.
+///
+/// `GitJob` is the first variant that does not come from the terminal: the git
+/// worker pushes finished jobs into the same channel, so a push that completes
+/// wakes the loop exactly as a key press does and nothing has to poll
+/// (ADR-033).
 #[derive(Debug, Clone)]
 pub enum AppEvent {
     Key(KeyEvent),
     Mouse(MouseEvent),
     Paste(String),
     Resize(u16, u16),
+    GitJob(JobOutcome),
 }
 
 /// Reads terminal events on a dedicated thread.

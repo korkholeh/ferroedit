@@ -27,7 +27,7 @@ binary, over SSH, with no runtime dependencies.
 
 ## Status
 
-**Pre-alpha — Phase 10 (Git status).** `ferroedit file.txt` opens, edits
+**Pre-alpha — Phase 11 (Git actions).** `ferroedit file.txt` opens, edits
 and saves a real file: rope-backed buffer, grapheme-correct cursor movement, a viewport
 that scrolls both ways, and line endings written back the way they were found.
 `ferroedit new.txt` starts an empty buffer and creates the file on the first `Ctrl+S`.
@@ -81,8 +81,17 @@ branch, how far ahead of or behind its upstream it is, and every changed file in
 own two-column form — `M` for modified, `A` for added, `D` for deleted, `R` for renamed,
 `U` for a conflict and `?` for untracked. It refreshes itself after a save, a create, a
 rename or a delete, and `F5` re-reads it after something changed the tree from outside.
-A directory that is not a repository simply says so. Staging, committing, pulling and
-pushing are the next phase. See [docs/PROGRESS.md](docs/PROGRESS.md) and
+A directory that is not a repository simply says so.
+
+The panel acts, too. `Space` stages the selected file and unstages it again, `a` and `u`
+do the same for everything at once, `c` asks for a commit message, `Enter` opens the
+file, and Pull and Push are Git menu entries. Everything that writes to the repository
+runs on a worker thread, so a push over a slow link shows `Git — Pushing…` in the panel
+while the editor keeps drawing and typing; when it finishes, the status bar gets git's
+own sentence about it — `[main 5944bbe] add the worker`, `Already up to date.`, or
+`Push failed: No configured push destination.` No credential handling is bundled: git
+runs with prompts turned off, so it uses your helper and your keys or it says why it
+could not. See [docs/PROGRESS.md](docs/PROGRESS.md) and
 [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ```bash

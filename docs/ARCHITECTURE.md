@@ -168,11 +168,28 @@ highlight-from-scratch equals highlight-after-random-edits.
 
 `std::thread` + `mpsc`, no async runtime (ADR-002). Reading `git status` is not one of
 the long operations: it is a local read taken on the UI thread, on demand, after
-anything that changes the tree (ADR-030). Long git operations get a `JobId`;
-the UI shows `Pushing…` and the worker replies with
-`AppEvent::GitJobDone(JobId, Result<Output, GitError>)`. Every git subprocess runs with
-`GIT_TERMINAL_PROMPT=0`, `GIT_OPTIONAL_LOCKS=0` and `-c core.pager=cat` plus a timeout,
-so a credential prompt surfaces as an actionable error instead of a frozen worker.
+anything that changes the tree (ADR-030). Everything that *writes* to the repository —
+stage, unstage, commit, pull, push — runs on the git worker instead (ADR-033): one
+thread, one `mpsc` in, and the loop's own `AppEvent` channel out.
+
+```
+GitState::start(GitJob)  ──►  [git worker]  ──►  AppEvent::GitJob(JobOutcome)
+                                                        │
+                                                        ▼
+                                          Command::GitJobFinished(outcome)
+```
+
+Jobs are named by `JobId` and run serially, in submission order, so a commit queued
+behind the staging it depends on sees that staging finish. The panel title shows the
+oldest running job's `Pushing…` for as long as it runs, which a four-second notification
+cannot. The outcome comes back as a `Command`, so the worker mutates `App` through the
+same single door as the keyboard — which is why `JobOutcome` carries an error *string*
+and not a `GitError`: a `Command` has to be `Clone` and `Eq`.
+
+Every git subprocess runs with `GIT_TERMINAL_PROMPT=0`, `GIT_OPTIONAL_LOCKS=0`,
+`GIT_EDITOR=true` and `-c core.pager=cat` plus a timeout — ten seconds for a local
+command, two minutes for one that reaches a remote — so a credential prompt surfaces as
+an actionable error instead of a frozen worker.
 
 ## 9. Terminal lifecycle
 

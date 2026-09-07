@@ -77,6 +77,13 @@ fn run(cli: &Cli) -> Result<()> {
         app.clipboard.outward_name()
     );
     open_cli_files(&mut app, cli);
+
+    // The one channel every producer writes into: the input thread, and the git
+    // worker with the operations that must not block a frame (ADR-033). It is
+    // built before the panel is, because attaching the worker is what lets the
+    // panel run anything at all.
+    let (tx, rx) = mpsc::channel();
+    app.git.attach_worker(tx.clone());
     // The git panel is drawn from a status, and a status is a subprocess: it
     // runs once here, before the first frame, and after that only when
     // something has changed (SPEC §30).
@@ -93,7 +100,6 @@ fn run(cli: &Cli) -> Result<()> {
         panic!("--panic-test: forcing a panic to verify terminal restore");
     }
 
-    let (tx, rx) = mpsc::channel();
     spawn_input_thread(tx);
 
     let mut rects = LayoutRects::default();
@@ -272,6 +278,10 @@ fn handle_event(app: &mut App, rects: &LayoutRects, event: AppEvent) {
             // every iteration, so there is nothing else to do.
             None
         }
+        // A finished background job. It becomes a `Command` like everything
+        // else, so the worker mutates `App` through the same single door as the
+        // keyboard (ARCHITECTURE invariant 3).
+        AppEvent::GitJob(outcome) => Some(Command::GitJobFinished(outcome)),
     };
 
     if let Some(command) = command {

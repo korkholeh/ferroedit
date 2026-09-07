@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use crate::app::focus::FocusTarget;
 use crate::app::search::SearchField;
 use crate::editor::cursor::Motion;
+use crate::git::JobOutcome;
 
 /// An operation that needs a name or a path typed before it can run
 /// (SPEC §20, §40).
@@ -100,6 +101,29 @@ pub enum Command {
     /// Everything that changes a file refreshes the status on its own; this is
     /// for a change made outside the editor.
     GitRefresh,
+    /// Opens the file the git panel's selection is on.
+    GitOpenSelected,
+    /// Stages or unstages the selected file (SPEC §31). Both run on the worker,
+    /// like every other command that writes to the repository (ADR-033).
+    GitStage,
+    GitUnstage,
+    /// Stages the selected file when anything about it is unstaged, and
+    /// unstages it when it is not — the one key that does the obvious thing.
+    GitToggleStage,
+    GitStageAll,
+    GitUnstageAll,
+    /// Asks for a commit message (SPEC §32). `GitCommit` is what commits.
+    GitCommitPrompt,
+    /// Runs the commit with whatever the open dialog holds. Only the dialog's
+    /// button carries this; activating it turns it into `GitCommit`.
+    SubmitCommit,
+    GitCommit(String),
+    GitPull,
+    GitPush,
+    /// A job the worker has finished. The only command no user can produce: the
+    /// run loop makes it out of an `AppEvent::GitJob` so that a background
+    /// result reaches `App` through the same door as everything else.
+    GitJobFinished(JobOutcome),
 
     /// Asks for a name and then creates a file, a directory, or a new name for
     /// what is selected (SPEC §20).
@@ -285,6 +309,20 @@ impl Command {
             Self::ToggleHiddenFiles => "Show or hide ignored and hidden files".into(),
 
             Self::GitRefresh => "Re-read the repository status".into(),
+            Self::GitOpenSelected => "Open the selected changed file".into(),
+            Self::GitStage => "Stage the selected file".into(),
+            Self::GitUnstage => "Unstage the selected file".into(),
+            Self::GitToggleStage => {
+                "Stage the selected file, or unstage it when it is staged".into()
+            }
+            Self::GitStageAll => "Stage every change".into(),
+            Self::GitUnstageAll => "Unstage every change".into(),
+            Self::GitCommitPrompt => "Commit what is staged — asks for a message".into(),
+            Self::SubmitCommit => "Commit with the message that was typed".into(),
+            Self::GitCommit(_) => "Commit what is staged".into(),
+            Self::GitPull => "Pull from the upstream branch".into(),
+            Self::GitPush => "Push to the upstream branch".into(),
+            Self::GitJobFinished(_) => "Report a finished background git job".into(),
 
             Self::NewFilePrompt => "New file — asks for a name".into(),
             Self::NewDirectoryPrompt => "New folder — asks for a name".into(),
@@ -429,9 +467,9 @@ pub struct MenuDef {
 
 /// Menu bar contents (SPEC §6, §24).
 ///
-/// Every entry resolves to a real command except the four Git ones and the Help
-/// screen, which are Phase 11 and Phase 14; `docs/SHORTCUTS.md` is generated
-/// from this table and says so, so the list cannot quietly grow.
+/// Every entry resolves to a real command except the Help screen, which is
+/// Phase 14; `docs/SHORTCUTS.md` is generated from this table and says so, so
+/// the list cannot quietly grow.
 ///
 /// There is deliberately no shortcut column here: the menu reads the key labels
 /// out of `event::keyboard::BINDINGS`, so an entry can never advertise a key
@@ -492,10 +530,13 @@ pub static MENUS: &[MenuDef] = &[
         title: "Git",
         items: &[
             item("Refresh", Command::GitRefresh),
-            item("Stage All", Command::Unimplemented("Stage All")),
-            item("Commit…", Command::Unimplemented("Commit")),
-            item("Pull", Command::Unimplemented("Pull")),
-            item("Push", Command::Unimplemented("Push")),
+            item("Stage", Command::GitStage),
+            item("Unstage", Command::GitUnstage),
+            item("Stage All", Command::GitStageAll),
+            item("Unstage All", Command::GitUnstageAll),
+            item("Commit…", Command::GitCommitPrompt),
+            item("Pull", Command::GitPull),
+            item("Push", Command::GitPush),
         ],
     },
     MenuDef {

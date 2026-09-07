@@ -289,6 +289,44 @@ pub static BINDINGS: &[Binding] = &[
         Command::GitRefresh,
         "F5",
     ),
+    // Enter opens the file, as it does in the explorer. Space is the toggle
+    // because it is the key a list of checkboxes has trained everyone to press,
+    // and the panel is a list of things that are either staged or not.
+    sidebar(
+        FocusTarget::GitPanel,
+        KeyCode::Enter,
+        Command::GitOpenSelected,
+        "Enter",
+    ),
+    sidebar(
+        FocusTarget::GitPanel,
+        KeyCode::Char(' '),
+        Command::GitToggleStage,
+        "Space",
+    ),
+    // Plain letters, which cost nothing here: the panel is a list and not a
+    // text field, so an unbound letter does nothing at all rather than typing.
+    sidebar(
+        FocusTarget::GitPanel,
+        KeyCode::Char('a'),
+        Command::GitStageAll,
+        "a",
+    ),
+    sidebar(
+        FocusTarget::GitPanel,
+        KeyCode::Char('u'),
+        Command::GitUnstageAll,
+        "u",
+    ),
+    sidebar(
+        FocusTarget::GitPanel,
+        KeyCode::Char('c'),
+        Command::GitCommitPrompt,
+        "c",
+    ),
+    // Pull and push have no key on purpose: they are the two operations that
+    // reach the network, and a single letter next to `c` is not the gesture for
+    // something that changes what other people see. Both are Git menu entries.
 ];
 
 /// Keys of a dialog that types (SPEC §40).
@@ -677,8 +715,16 @@ mod tests {
             FocusTarget::GitPanel,
             FocusTarget::Menu,
         ] {
-            assert_eq!(resolve(key(KeyCode::Char('a'), NONE), focus), None);
+            // `z` is bound in none of the three. The git panel does bind a few
+            // plain letters (Phase 11), which is only safe *because* an unbound
+            // one still resolves to nothing rather than typing.
+            assert_eq!(resolve(key(KeyCode::Char('z'), NONE), focus), None);
         }
+        assert_eq!(
+            resolve(key(KeyCode::Char('a'), NONE), FocusTarget::GitPanel),
+            Some(Command::GitStageAll),
+            "a letter the panel binds is a command, not a character"
+        );
         // The two that do take a letter, and put it in different places.
         assert_eq!(
             resolve(key(KeyCode::Char('a'), NONE), FocusTarget::Editor),

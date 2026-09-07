@@ -717,3 +717,75 @@ its iterator across them for exactly that reason. `MAX_ENTRIES` caps the list at
 paths, with a `truncated` flag the title shows as `(5000+)` — the ADR-027 argument, for
 the same reason: a mass rewrite must not turn one status into a hundred megabytes of
 allocations.
+
+---
+
+## ADR-033: Everything that writes to the repository goes through one worker thread
+
+**Decision.** Stage, unstage, stage-all, unstage-all, commit, pull and push run on a
+single `std::thread` fed by an `mpsc` queue. Each submission gets a `JobId`; the thread
+runs them serially in submission order and replies on the main loop's own `AppEvent`
+channel, which the loop turns into `Command::GitJobFinished` so the answer mutates `App`
+through the same door as a key press. Reading the status stays on the UI thread, exactly
+as ADR-030 left it. `JobOutcome` carries `Result<String, String>` — git's own sentence,
+or the reason it failed.
+
+**Why.** This is the phase ADR-030 deferred to. `pull` and `push` are network-bound and
+`commit` runs the user's hooks, so none of them has an upper bound a frame can wait for
+(SPEC §34, §37). One thread and one channel is what SPEC §37 asks for, and a handful of
+subprocesses is not a reason to take on an async runtime.
+
+Staging is on the worker too, though it is fast, because it takes the index lock — and a
+lock another git is holding is exactly the case that turns a millisecond into ten
+seconds. Serial rather than parallel for the same reason: two of these racing for the
+index would produce a failure the user did not cause, and a commit queued behind the
+staging it depends on has to see that staging finish.
+
+The error is flattened to a string at the worker's edge because a `Command` has to be
+`Clone` and `PartialEq` and `GitError` is neither. Nothing downstream matches on the
+variant — `App` only ever shows the message — so nothing is lost, and the invariant that
+`execute_command` is the sole mutator is kept rather than special-cased.
+
+`Pushing…` goes in the panel *title*, not only on the status bar: a notification expires
+after four seconds (SPEC §39) and a push over a slow link does not, so the title is the
+only place that can say "still running" for as long as it is true.
+
+**Consequence.** The `GitService` travels with each job rather than living on the thread,
+so a repository rediscovered under the editor cannot be answered about by a worker
+holding the old root. `GitState` without a worker refuses jobs with a message instead of
+spawning one, which is the state every headless test is in. A network command gets a
+two-minute timer rather than the local ten seconds: killing an honest push after ten
+seconds would be worse than the pause the worker exists to prevent. And a job's failure
+is reported as `Push failed: <reason>` — git's own `git push failed:` prefix is dropped,
+because it would say it twice and because "git reset failed" is not what a user who
+pressed Space to unstage a file asked for.
+
+---
+
+## ADR-034: Pull is fast-forward only, and a conflicted file is not staged
+
+**Decision.** `git pull --ff-only`. Staging or unstaging a file whose `XY` pair contains
+`U` is refused with a message naming the file. `GIT_EDITOR=true` is set on every
+invocation. No credential handling of any kind is bundled.
+
+**Why.** Both halves are the same argument: Phase 11 owns the operations, and Phase 12
+owns merging. A pull that merges can conflict, and a conflict needs a resolution UI that
+does not exist yet — refusing with git's own "Not possible to fast-forward, aborting" is
+a state the user can act on; a surprise merge commit made by an editor is not. `git add`
+on a conflicted file is git's way of asserting "I resolved this", and the editor has no
+diff and no conflict view to justify that assertion on the user's behalf.
+
+`GIT_EDITOR=true` is not optional once commit is on the menu. A command that opens
+`core.editor` would put a second full-screen program on the terminal the TUI is drawing
+to. `true` exits 0 with an empty file, and every command here already supplies its own
+message.
+
+Credentials are SPEC §32's explicit instruction and worth restating: the system binary
+is used precisely so the user's helper, keys and signing configuration are the ones that
+apply (ADR-001). With `GIT_TERMINAL_PROMPT=0`, a helper that wants a terminal fails and
+says so, which is an error a person can act on from a shell.
+
+**Consequence.** A user whose workflow is "pull, then merge" gets a refusal instead, and
+has to run the merge in a terminal until Phase 12. A conflict has to be resolved outside
+the editor. A signing key that wants a passphrase from a terminal turns a commit into an
+error message rather than a hang.

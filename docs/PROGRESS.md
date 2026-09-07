@@ -1,6 +1,6 @@
 # Current Phase
 
-Phase 11 — Git actions (not started)
+Phase 12 — Branches and merge (not started)
 
 ## Completed
 
@@ -392,9 +392,59 @@ Phase 11 — Git actions (not started)
     developer who signs commits gets what CI gets.
   - 489 tests (was 444), including the pty check below.
 
+- **Phase 11 — Git actions**
+  - `git/worker.rs`: one `std::thread`, one `mpsc` queue in, and the main loop's own
+    `AppEvent` channel out (ADR-033). `GitJob` is what goes in, `JobOutcome` — a
+    `JobId`, the job, and `Result<String, String>` — is what comes back, and the loop
+    turns it into `Command::GitJobFinished` so a background result mutates `App` through
+    the same door as a key press. The error is flattened to a string at the worker's
+    edge because a `Command` has to be `Clone` and `Eq`, and nothing downstream ever
+    matched on the variant.
+  - `AppEvent` has its first non-terminal variant. Jobs run serially in submission
+    order: they take the index lock, and a commit queued behind the staging it depends
+    on has to see that staging finish.
+  - `GitService` gained `stage`, `unstage`, `stage_all`, `unstage_all`, `commit`, `pull`
+    and `push`. `run` now takes `OsString` arguments, so a pathspec goes to git as the
+    bytes the status printed rather than as a lossy transcription of them — ADR-032's
+    promise, finally exercised end to end.
+  - Unstaging is `git reset -q --`, not `git restore --staged`: the latter resolves
+    `HEAD` and so fails outright in a repository with no commits yet, which is exactly
+    where a file staged by mistake is most likely.
+  - `GIT_EDITOR=true` joins the env every invocation gets. A commit that opened
+    `core.editor` would be a second full-screen program on the terminal the TUI is
+    drawing to. Network commands get a two-minute timer instead of the local ten
+    seconds; killing an honest push at ten would be worse than the pause the worker
+    exists to prevent.
+  - The panel has keys now: `Space` stages the selected row and unstages it again, `a`
+    and `u` do it for everything, `c` opens the commit dialog, `Enter` opens the file.
+    Pull and Push are deliberately menu-only — a single letter is not the gesture for
+    the two operations that change what other people see.
+  - The commit dialog is the existing input dialog with a different submission:
+    `DialogState::with_input` takes the `Command` the confirm button carries, so
+    `SubmitCommit` is paired with the typed message exactly as `SubmitInput` is paired
+    with a file name. The prompt says how many files the commit will include, because
+    the panel behind it is covered. An empty message and an empty commit are both
+    refused before git sees them.
+  - `Pushing…` goes in the panel title as well as on the status bar (SPEC §34): a
+    notification expires after four seconds and a push does not, so the title is the one
+    place that can say "still running" for as long as it is true.
+  - A failure reads `Push failed: No configured push destination.` — the job's own noun
+    plus git's reason, with git's `git push failed:` prefix dropped so it is not said
+    twice and so an unstage does not report itself as `git reset`.
+  - Conflicted files are refused rather than staged (ADR-034), and `pull` is
+    `--ff-only`: both are Phase 12's, and asserting a resolution on the user's behalf is
+    not something an editor with no diff view should do.
+  - The Git menu is fully wired — Refresh, Stage, Unstage, Stage All, Unstage All,
+    Commit…, Pull, Push — and `Unimplemented` is down to one entry, the Phase 14 help
+    screen, with the test that names it updated to match.
+  - The acceptance as tests: a push against a real bare remote on disk clears the panel's
+    ahead count, a push with no remote comes back as an actionable sentence, and the
+    command that starts a job is asserted to return while `git.busy()` is still `Some`.
+  - 522 tests (was 489), including the pty checks below.
+
 ## In progress
 
-- Nothing. Phase 10 is closed.
+- Nothing. Phase 11 is closed.
 
 ## Known issues
 
@@ -491,14 +541,29 @@ Phase 11 — Git actions (not started)
 - **The status is read in the foreground.** It is a local read and takes milliseconds,
   but it happens on the UI thread, so the frame that triggers it waits for it — bounded
   by the ten-second kill timer, which is the pathological case (a held index lock) and
-  not the normal one. The worker thread arrives in Phase 11 with the operations that
-  genuinely cannot block: pull, push, fetch (ADR-030).
+  not the normal one. Everything that *writes* runs on the worker (ADR-033); the read
+  did not move, and a `git status` behind a held lock is still a pause.
+- **A job cannot be cancelled.** There is no Esc that stops a push against an
+  unreachable host; the two-minute timer is what ends it. The `JobId` that would let one
+  be addressed is already there, and a cancel is a kill of a subprocess the worker does
+  not currently keep a handle to.
+- **The status is re-read after every job, in the foreground.** Staging three files in
+  three keystrokes is three `git status` runs. They are milliseconds each and they are
+  correct; they are not batched.
+- **Pull is fast-forward only and a conflict cannot be staged** (ADR-034). A merge is
+  Phase 12, and until then both have to be done in a terminal.
+- **`Enter` on a deleted row opens an empty buffer.** The path is not on disk, so it
+  opens the way any missing path does — and `Ctrl+S` writes the file back into
+  existence, which is recoverable but not obviously what the row was offering.
+- **A commit is not amendable, and there is no Undo for a git action.** Stage, unstage
+  and commit are one-way from inside the editor; `git reset` in a terminal is the way
+  back from a commit.
+- **The commit dialog is one line.** `InputField` is a single-line field, so a commit
+  body — the blank line and the paragraphs after the subject — cannot be typed. A
+  multi-line body needs a text area, which is a Phase 14 shape and not a Phase 11 one.
 - **Nothing watches the filesystem.** A `git checkout` in another terminal shows up on
   the next save, file operation or `F5`, not by itself. Same trade as the explorer's,
   and the watcher is Phase 14 for both.
-- **The panel has no keys of its own beyond `F5`.** Selecting a row does nothing yet:
-  staging, unstaging and opening the selected file are Phase 11 and Phase 13. The four
-  Git menu entries are still `Unimplemented` for the same reason.
 - **A rename shows only its new path.** The original is parsed and kept on the entry;
   there is nowhere in a sixteen-column sidebar to draw `old -> new`, and the diff viewer
   of Phase 13 is where it has somewhere to go.
@@ -526,6 +591,30 @@ Phase 11 — Git actions (not started)
 Phase 2 through Phase 8 acceptance were verified by driving the real binary in a pty
 (the Phase 1 harness: fork a pty, set `TIOCSWINSZ`, write key and mouse bytes, replay
 the output through a minimal terminal emulator).
+
+### Phase 11
+
+Same harness. A scratch repository with one commit, a modified file, an untracked file
+and a bare repository on disk as its `origin`.
+
+- **Staging from the panel.** `Ctrl+B` into the git panel, then `Space`: ` M a.txt`
+  became `M  a.txt` and the status bar said `Staged`. `Down`, `Space`: ` ? c.txt` became
+  `A  c.txt`. `a` staged both at once and said `Staged every change`.
+- **Commit.** `c` drew `┌ Commit ┐` with `Message for 2 staged files`, `[ Commit ]`
+  selected and the focus readout on `Dialog`. Typing `phase eleven` and pressing `Enter`
+  left the panel reading `Git — main ↑1` with `working tree clean`, and
+  `git log -1 --pretty=%s` in the shell beside it printed `phase eleven`.
+- **The Git menu.** `F10`, `Right`×5 opened it with all eight entries and their keys:
+  Refresh `F5`, Stage, Unstage, Stage All `a`, Unstage All `u`, Commit… `c`, Pull, Push.
+  Activating Push cleared the `↑1` from the title and put `Pushed` on the status bar;
+  `git status -sb` agreed (`## main...origin/main`).
+- **A push that does not return.** A repository whose `origin` is `https://192.0.2.1/`
+  (reserved, unroutable): the panel title read `Git — Pushing…` and the status bar
+  `Pushing…`, and the editor kept drawing and responding — `Ctrl+B` twice moved focus
+  from `Editor` to `Explorer` with the push still hanging. This is the Phase 11
+  acceptance: the network never reaches the event loop.
+- **A push that fails.** A repository with no remote: `Push failed: No configured push
+  destination.` on the status bar in the error colour, once, with no doubled prefix.
 
 ### Phase 10
 
@@ -747,16 +836,17 @@ reporting.
 
 ## Next
 
-- Phase 11: git actions. Stage, unstage, commit, pull and push — and the worker thread
-  they are the reason for. `AppEvent` gains its first non-terminal variant, the four
-  `Unimplemented` Git menu entries get their commands, and `FileEntry`'s index/worktree
-  split (already parsed, already drawn) is what stage and unstage act on.
-- The panel's own keys come with those actions: a row that can be staged is a row worth
-  selecting, and `Enter` on one should open the file.
-- `GitService` has `status` and nothing else. `commit`, `pull`, `push`, `branches`,
-  `switch_branch`, `merge` and `diff` are named in SPEC §29 and arrive with the phases
-  that need them; `run` is already the one place their env, their argument handling and
-  their timeout live.
+- Phase 12: branches and merge. A branch picker, switch, create, merge and conflicted-file
+  display. This is where the `DialogBody::List` question ADR-019 left open and ADR-029
+  deferred finally has to be answered: a branch list has no pane behind it to delegate
+  to.
+- It is also where ADR-034's two refusals are paid off — a conflicted file that can be
+  staged once there is something to resolve it with, and a pull that is allowed to merge.
+- `GitService` still lacks `branches`, `switch_branch`, `create_branch`, `merge` and
+  `diff` of SPEC §29; `run_os` is the one place their env, their argument handling and
+  their timeout live, and the worker is the one place their `JobId` will.
+- Cancelling a running job is worth doing when a second one wants it: the `JobId` exists,
+  but the worker keeps no handle to the child it spawned.
 - A filesystem watcher would close both the explorer's refresh gap and the git panel's.
   It is one dependency and one thread, and it is still Phase 14 rather than a phase of
   its own.

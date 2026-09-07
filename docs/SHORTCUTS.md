@@ -89,13 +89,18 @@ The file tree (SPEC §18, §20). The operations act on the selected row, not on 
 
 ## Git panel
 
-The changed-files list. It gains its own keys with the Git actions of Phase 11.
+The changed-files list (SPEC §31). Everything that writes to the repository runs on a worker thread, so none of these keys blocks a frame (ADR-033).
 
 | Keys | Action |
 |---|---|
 | `Up` | Move the sidebar selection up |
 | `Down` | Move the sidebar selection down |
 | `F5` | Re-read the repository status |
+| `Enter` | Open the selected changed file |
+| `Space` | Stage the selected file, or unstage it when it is staged |
+| `a` | Stage every change |
+| `u` | Unstage every change |
+| `c` | Commit what is staged — asks for a message |
 
 ## Find bar
 
@@ -204,10 +209,13 @@ Every item is a command, and the *Shortcut* column is the same lookup the menu i
 | View | Focus Git | — | — |
 | View | Focus Editor | — | — |
 | Git | Refresh | `F5` | Git panel |
-| Git | Stage All *(not implemented yet)* | — | — |
-| Git | Commit… *(not implemented yet)* | — | — |
-| Git | Pull *(not implemented yet)* | — | — |
-| Git | Push *(not implemented yet)* | — | — |
+| Git | Stage | — | — |
+| Git | Unstage | — | — |
+| Git | Stage All | `a` | Git panel |
+| Git | Unstage All | `u` | Git panel |
+| Git | Commit… | `c` | Git panel |
+| Git | Pull | — | — |
+| Git | Push | — | — |
 | Help | Shortcuts *(not implemented yet)* | — | — |
 | Help | About | — | — |
 

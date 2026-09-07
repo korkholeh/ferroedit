@@ -191,6 +191,24 @@ impl DialogState {
         )
     }
 
+    /// Asks for a commit message (SPEC §32).
+    ///
+    /// The prompt says how many files the commit will include, because the
+    /// panel behind the dialog is covered by it and "commit what, exactly?" is
+    /// the question a user has at this moment. Commit is the default button:
+    /// the dialog was opened on purpose and nothing here is destructive.
+    pub fn commit(staged: usize, return_focus: FocusTarget) -> Self {
+        let files = if staged == 1 { "file" } else { "files" };
+        Self::with_input(
+            "Commit",
+            format!("Message for {staged} staged {files}"),
+            "",
+            "Commit",
+            Command::SubmitCommit,
+            return_focus,
+        )
+    }
+
     /// The Help menu's About entry. One button, and it only dismisses.
     pub fn about(version: &str, return_focus: FocusTarget) -> Self {
         Self::confirm(
@@ -230,6 +248,30 @@ impl DialogState {
         operation: FileOp,
         return_focus: FocusTarget,
     ) -> Self {
+        Self::with_input(
+            title,
+            prompt,
+            value,
+            confirm_label,
+            Command::SubmitInput(operation),
+            return_focus,
+        )
+    }
+
+    /// The same shape for a submission that is not a file operation.
+    ///
+    /// Phase 11's commit message is the first: it is a prompt, a field and a
+    /// confirm button like every other input dialog, but what it submits is a
+    /// git job and not a path. `submit` is the command the button carries, and
+    /// `activate_dialog_button` is what pairs it with the typed text.
+    fn with_input(
+        title: &str,
+        prompt: String,
+        value: &str,
+        confirm_label: &str,
+        submit: Command,
+        return_focus: FocusTarget,
+    ) -> Self {
         Self {
             title: title.into(),
             body: DialogBody::Input {
@@ -237,7 +279,7 @@ impl DialogState {
                 field: InputField::new(value),
             },
             buttons: vec![
-                DialogButton::new(confirm_label, Some(Command::SubmitInput(operation))),
+                DialogButton::new(confirm_label, Some(submit)),
                 DialogButton::new("Cancel", None),
             ],
             selected: 0,
@@ -375,6 +417,20 @@ mod tests {
             Some(Command::SubmitInput(FileOp::CreateFile {
                 parent: PathBuf::from("/p/src")
             }))
+        );
+    }
+
+    #[test]
+    fn the_commit_dialog_asks_for_a_message_and_says_what_it_will_commit() {
+        let dialog = DialogState::commit(3, FocusTarget::GitPanel);
+        assert_eq!(dialog.prompt(), "Message for 3 staged files");
+        assert_eq!(dialog.field().unwrap().value, "");
+        assert_eq!(dialog.buttons[dialog.selected].label, "Commit");
+        assert_eq!(dialog.command_at(0), Some(Command::SubmitCommit));
+        assert_eq!(dialog.command_at(1), None);
+        assert_eq!(
+            DialogState::commit(1, FocusTarget::GitPanel).prompt(),
+            "Message for 1 staged file"
         );
     }
 

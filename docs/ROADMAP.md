@@ -20,8 +20,8 @@ Phases are ordered by dependency, not by importance. Each phase ends green on
 | 8 | Search/replace: `Ctrl+F`/`Ctrl+H`, next/prev, case toggle, replace-all as one undo | Replace-all undoes in a single step | ✅ done |
 | 9 | Menus + command wiring: full `Command` enum, keymap table, generated `SHORTCUTS.md` | Every menu item and shortcut resolves to a `Command` | ✅ done |
 | 10 | Git status: `GitService`, porcelain=v2 parser, sidebar, non-repo state | Status matches `git status` on fixture repos | ✅ done |
-| 11 | Git actions: worker thread, stage/unstage, commit, pull, push | A push never blocks the UI; prompt failures are actionable | ⬜ next |
-| 12 | Branches + merge: picker, switch, create, merge, conflict display | ⬜ |
+| 11 | Git actions: worker thread, stage/unstage, commit, pull, push | A push never blocks the UI; prompt failures are actionable | ✅ done |
+| 12 | Branches + merge: picker, switch, create, merge, conflict display | ⬜ next |
 | 13 | Diff viewer: read-only unified diff with +/− coloring | ⬜ |
 | 14 | Polish: help screen, small-terminal layout, error pass, profiling, release binaries | SPEC §60 acceptance list passes end to end | ⬜ |
 

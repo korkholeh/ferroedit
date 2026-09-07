@@ -4,10 +4,13 @@
 //! — a save, a file operation, an explicit refresh — and never once a frame.
 //! `App` owns one of these; `ui/git.rs` reads it and nothing else writes it.
 
+use std::collections::VecDeque;
 use std::path::Path;
+use std::sync::mpsc::Sender;
 
+use crate::event::AppEvent;
 use crate::git::models::{FileEntry, GitError, RepoStatus};
-use crate::git::GitService;
+use crate::git::{GitJob, GitService, GitWorker, JobId, JobOutcome};
 
 /// What the panel has to say for itself.
 ///
@@ -29,6 +32,15 @@ pub enum GitAvailability {
 #[derive(Debug, Default)]
 pub struct GitState {
     repo: Option<GitService>,
+    /// The background thread the write operations run on (ADR-033). `None`
+    /// until the main loop attaches one, which is also the state every headless
+    /// test starts in — a `GitState` with no worker refuses jobs instead of
+    /// spawning a thread nobody asked for.
+    worker: Option<GitWorker>,
+    /// Jobs submitted and not yet answered, oldest first. A queue rather than a
+    /// single slot because the worker runs them in order: staging three files
+    /// in three keystrokes must not be three refusals.
+    running: VecDeque<(JobId, GitJob)>,
     pub availability: GitAvailability,
     pub status: RepoStatus,
     pub selected: usize,
@@ -78,11 +90,78 @@ impl GitState {
         }
     }
 
+    /// The worker is deliberately left alone: it is a thread, not repository
+    /// state, and a job already in flight still has an answer to deliver.
     fn set_unavailable(&mut self, availability: GitAvailability) {
         self.repo = None;
         self.status = RepoStatus::default();
         self.availability = availability;
         self.clamp();
+    }
+
+    /// Gives the panel a worker thread to run its write operations on.
+    ///
+    /// Called once, from the run loop, with the loop's own event channel — the
+    /// finished job has to arrive where the key presses do (ADR-033).
+    pub fn attach_worker(&mut self, events: Sender<AppEvent>) {
+        self.worker = Some(GitWorker::spawn(events));
+    }
+
+    /// Queues a job, returning the line to show while it runs.
+    ///
+    /// The `Err` is a sentence for the status bar, not a failure to handle:
+    /// there are exactly two, and both mean "this cannot be started", not
+    /// "this went wrong".
+    pub fn start(&mut self, job: GitJob) -> Result<&'static str, String> {
+        let Some(repo) = self.repo.clone() else {
+            return Err(self.summary());
+        };
+        let Some(worker) = self.worker.as_mut() else {
+            return Err("Git operations need the worker thread".to_string());
+        };
+        let progress = job.progress();
+        match worker.submit(job.clone(), repo) {
+            Some(id) => {
+                self.running.push_back((id, job));
+                Ok(progress)
+            }
+            None => Err("The git worker has stopped".to_string()),
+        }
+    }
+
+    /// Takes a finished job off the queue.
+    ///
+    /// An id that is not there is not an error: the repository can be
+    /// rediscovered while a job is in flight, and the answer to a job from
+    /// before that is still worth showing even though nothing is waiting for it.
+    pub fn finish(&mut self, outcome: &JobOutcome) {
+        self.running.retain(|(id, _)| *id != outcome.id);
+    }
+
+    /// What the panel title says while something is running — the oldest job,
+    /// because that is the one actually in git's hands.
+    pub fn busy(&self) -> Option<&'static str> {
+        self.running.front().map(|(_, job)| job.progress())
+    }
+
+    /// The repository root, for turning a status path into one to open.
+    pub fn root(&self) -> Option<&Path> {
+        self.repo.as_ref().map(GitService::root)
+    }
+
+    /// The entry the panel's selection is on.
+    pub fn selected_entry(&self) -> Option<&FileEntry> {
+        self.status.entries.get(self.selected)
+    }
+
+    /// How many files have something staged — what a commit would include, and
+    /// what decides whether asking for a message is worth doing at all.
+    pub fn staged_count(&self) -> usize {
+        self.status
+            .entries
+            .iter()
+            .filter(|entry| !entry.is_conflicted() && entry.index.is_change())
+            .count()
     }
 
     pub fn is_repository(&self) -> bool {
@@ -173,6 +252,8 @@ impl GitState {
         };
         Self {
             repo: None,
+            worker: None,
+            running: VecDeque::new(),
             availability: GitAvailability::Repository,
             status: RepoStatus {
                 head: Some(Head::Branch("main".into())),
@@ -188,6 +269,12 @@ impl GitState {
             selected: 0,
             scroll: 0,
         }
+    }
+
+    /// Puts a job on the queue with no worker behind it, so the in-progress
+    /// title can be drawn and asserted without starting a thread.
+    pub fn pretend_running(&mut self, job: GitJob) {
+        self.running.push_back((JobId(0), job));
     }
 }
 
@@ -297,6 +384,67 @@ mod tests {
         git.selected = 1;
         git.follow_selection(4);
         assert_eq!(git.scroll, 1);
+    }
+
+    #[test]
+    fn a_job_cannot_be_started_outside_a_repository_or_without_a_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut git = GitState::default();
+        git.discover(dir.path());
+        assert_eq!(
+            git.start(GitJob::StageAll),
+            Err("Not a Git repository".to_string())
+        );
+
+        let repo = TestRepo::new();
+        let mut git = GitState::default();
+        git.discover(repo.path());
+        assert_eq!(
+            git.start(GitJob::StageAll),
+            Err("Git operations need the worker thread".to_string()),
+            "a panel with no worker refuses rather than spawning one"
+        );
+        assert_eq!(git.busy(), None);
+    }
+
+    #[test]
+    fn the_oldest_running_job_is_the_one_the_title_names() {
+        let mut git = GitState::default();
+        assert_eq!(git.busy(), None);
+        git.pretend_running(GitJob::Push);
+        git.pretend_running(GitJob::Pull);
+        assert_eq!(git.busy(), Some("Pushing…"), "the one git actually has");
+    }
+
+    #[test]
+    fn finishing_a_job_that_is_not_on_the_queue_is_not_an_error() {
+        let mut git = GitState::default();
+        git.pretend_running(GitJob::Push);
+        // A rediscovery can drop the queue under an outcome already in flight.
+        git.finish(&JobOutcome {
+            id: JobId(99),
+            job: GitJob::Pull,
+            result: Ok("Pulled".into()),
+        });
+        assert_eq!(git.busy(), Some("Pushing…"));
+        git.finish(&JobOutcome {
+            id: JobId(0),
+            job: GitJob::Push,
+            result: Ok("Pushed".into()),
+        });
+        assert_eq!(git.busy(), None);
+    }
+
+    #[test]
+    fn only_the_staged_side_of_a_row_counts_towards_a_commit() {
+        let mut git = GitState::fixture();
+        // The fixture holds one added file, one modified, one deleted and one
+        // untracked; only the added one has anything in the index.
+        assert_eq!(git.staged_count(), 1);
+        git.status
+            .entries
+            .push(entry("conflict.rs", Change::Unmerged, Change::Unmerged));
+        assert_eq!(git.staged_count(), 1, "a conflict is not staged work");
     }
 
     #[test]

@@ -44,8 +44,9 @@ const SECTIONS: &[(Option<FocusTarget>, &str, &str)] = &[
     (
         Some(FocusTarget::GitPanel),
         "Git panel",
-        "The changed-files list. It gains its own keys with the Git actions of \
-         Phase 11.",
+        "The changed-files list (SPEC §31). Everything that writes to the \
+         repository runs on a worker thread, so none of these keys blocks a \
+         frame (ADR-033).",
     ),
     (
         Some(FocusTarget::Search),
@@ -293,8 +294,8 @@ mod tests {
             .collect();
         assert_eq!(
             pending,
-            vec!["Stage All", "Commit…", "Pull", "Push", "Shortcuts"],
-            "the Git four land in Phase 11 and the help screen in Phase 14"
+            vec!["Shortcuts"],
+            "the Git entries landed in Phase 11; the help screen is Phase 14"
         );
     }
 

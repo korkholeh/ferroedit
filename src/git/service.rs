@@ -6,6 +6,7 @@
 //! builds a command line for a shell to re-split, so a file called
 //! `; rm -rf ~` is a file name and not a surprise (SPEC §29).
 
+use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -23,6 +24,15 @@ use super::parser::parse_status;
 /// an error the panel can show, and a wedged one is an editor that never draws
 /// another frame (ARCHITECTURE §8).
 const TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The same for the three commands that talk to a remote (SPEC §37).
+///
+/// A fetch over a slow link is not a wedged process, and killing an honest
+/// push after ten seconds would be worse than the pause it was meant to
+/// prevent — the pause is not on the UI thread at all, because these run on
+/// the worker (ADR-033). Two minutes is past any transfer a person waits for
+/// at a keyboard and still short of a run that will never end.
+const NETWORK_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// How often the child is checked while it runs. Small enough that a status
 /// costs no visible time, large enough not to spin a core.
@@ -94,10 +104,97 @@ impl GitService {
         )?;
         parse_status(&output)
     }
+
+    /// `git add -- <paths>` (SPEC §31).
+    ///
+    /// One invocation for the whole list, and the paths go in as `OsStr`: they
+    /// are the bytes git printed in the status, so a name that is not UTF-8
+    /// goes back exactly as it came (ADR-032).
+    pub fn stage(&self, paths: &[PathBuf]) -> Result<String, GitError> {
+        self.with_paths(&["add", "--"], paths)
+    }
+
+    /// `git reset -q -- <paths>`.
+    ///
+    /// `git restore --staged` is the modern spelling and the one SPEC §31
+    /// sketches, but it resolves `HEAD` and therefore fails outright in a
+    /// repository that has no commits yet — which is precisely the repository
+    /// where a file staged by mistake is most likely. `reset` does the same
+    /// job and does it on an unborn branch too.
+    pub fn unstage(&self, paths: &[PathBuf]) -> Result<String, GitError> {
+        self.with_paths(&["reset", "-q", "--"], paths)
+    }
+
+    /// Everything the status lists, in one go — new files included.
+    pub fn stage_all(&self) -> Result<String, GitError> {
+        run(&self.root, &["add", "-A"])?;
+        Ok(String::new())
+    }
+
+    pub fn unstage_all(&self) -> Result<String, GitError> {
+        run(&self.root, &["reset", "-q", "--"])?;
+        Ok(String::new())
+    }
+
+    /// Commits what is staged, with the message the dialog collected.
+    ///
+    /// Nothing about the user's configuration is overridden: their hooks, their
+    /// signing key and their identity are the ones a commit from a shell would
+    /// use (SPEC §32). A signing key that wants a passphrase from a terminal is
+    /// the case `GIT_TERMINAL_PROMPT=0` turns into an error message instead of
+    /// a hang.
+    pub fn commit(&self, message: &str) -> Result<String, GitError> {
+        let output = run(&self.root, &["commit", "-m", message])?;
+        Ok(first_line_of(&output))
+    }
+
+    /// `git pull --ff-only` (SPEC §34).
+    ///
+    /// Fast-forward only, deliberately: a pull that merges can conflict, and a
+    /// conflict needs the resolution UI that Phase 12 owns. Refusing with
+    /// git's own "Not possible to fast-forward" is a state the user can act on;
+    /// a surprise merge commit made by an editor is not (ADR-034).
+    pub fn pull(&self) -> Result<String, GitError> {
+        let output = run_with(&self.root, &["pull", "--ff-only"], NETWORK_TIMEOUT)?;
+        Ok(first_line_of(&output))
+    }
+
+    /// `git push`, with whatever `push.default` and the branch's upstream say.
+    pub fn push(&self) -> Result<String, GitError> {
+        let output = run_with(&self.root, &["push"], NETWORK_TIMEOUT)?;
+        Ok(first_line_of(&output))
+    }
+
+    /// A fixed head followed by a pathspec list. An empty list runs nothing:
+    /// `git add --` with no paths is `git add` with no paths, which is not what
+    /// any caller here means.
+    fn with_paths(&self, head: &[&str], paths: &[PathBuf]) -> Result<String, GitError> {
+        if paths.is_empty() {
+            return Ok(String::new());
+        }
+        let mut args: Vec<OsString> = head.iter().map(OsString::from).collect();
+        args.extend(paths.iter().map(|path| path.as_os_str().to_os_string()));
+        run_os(&self.root, &args, TIMEOUT)?;
+        Ok(String::new())
+    }
 }
 
 /// Runs one git command and returns its standard output.
 fn run(dir: &Path, args: &[&str]) -> Result<Vec<u8>, GitError> {
+    run_with(dir, args, TIMEOUT)
+}
+
+fn run_with(dir: &Path, args: &[&str], timeout: Duration) -> Result<Vec<u8>, GitError> {
+    let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+    run_os(dir, &args, timeout)
+}
+
+/// The one place a git subprocess is spawned.
+///
+/// Arguments are `OsString` rather than `&str` because a pathspec is a path,
+/// and a path is bytes: transcoding one through `String` on the way to `git
+/// add` would stage a different file than the status listed (ADR-032).
+fn run_os(dir: &Path, args: &[OsString], timeout: Duration) -> Result<Vec<u8>, GitError> {
     let started = Instant::now();
     let mut command = Command::new("git");
     command
@@ -111,6 +208,12 @@ fn run(dir: &Path, args: &[&str]) -> Result<Vec<u8>, GitError> {
         // terminal that belongs to the editor; with it, git fails and says so,
         // which is an error the user can act on (ARCHITECTURE §8).
         .env("GIT_TERMINAL_PROMPT", "0")
+        // A commit or a merge that wants a message opens `core.editor`, which
+        // would be a second full-screen program on the terminal the TUI is
+        // drawing to. `true` exits 0 with an empty file, so git falls back to
+        // whatever message it was already given — and the commands here always
+        // give it one.
+        .env("GIT_EDITOR", "true")
         // Reading status must not take the index lock: the user may well have a
         // git running in the terminal next door.
         .env("GIT_OPTIONAL_LOCKS", "0")
@@ -126,8 +229,11 @@ fn run(dir: &Path, args: &[&str]) -> Result<Vec<u8>, GitError> {
         }
     })?;
 
-    let name = args.first().copied().unwrap_or("git").to_string();
-    let (status, stdout, stderr) = wait_with_timeout(child, &name)?;
+    let name = args.first().map_or_else(
+        || "git".to_string(),
+        |arg| arg.to_string_lossy().into_owned(),
+    );
+    let (status, stdout, stderr) = wait_with_timeout(child, &name, timeout)?;
     log::debug!(
         "git {name} finished in {:?} ({} bytes)",
         started.elapsed(),
@@ -150,13 +256,14 @@ fn run(dir: &Path, args: &[&str]) -> Result<Vec<u8>, GitError> {
 fn wait_with_timeout(
     mut child: Child,
     name: &str,
+    timeout: Duration,
 ) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), GitError> {
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let out_reader = thread::spawn(move || read_all(stdout));
     let err_reader = thread::spawn(move || read_all(stderr));
 
-    let deadline = Instant::now() + TIMEOUT;
+    let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait()? {
             Some(status) => break status,
@@ -166,7 +273,7 @@ fn wait_with_timeout(
                 let _ = child.wait();
                 return Err(GitError::TimedOut {
                     command: name.to_string(),
-                    seconds: TIMEOUT.as_secs(),
+                    seconds: timeout.as_secs(),
                 });
             }
             None => thread::sleep(POLL),
@@ -205,6 +312,20 @@ fn first_line(stderr: &[u8]) -> String {
         .unwrap_or(trimmed)
         .trim_start_matches("fatal: ")
         .trim_start_matches("error: ")
+        .to_string()
+}
+
+/// The first non-empty line git wrote to standard output, which is the
+/// sentence worth putting on the status bar: `[main 5944bbe] message` for a
+/// commit, `Already up to date.` for a pull. An empty answer is normal — a
+/// plain push says nothing on stdout — and the caller supplies the wording for
+/// that case.
+fn first_line_of(stdout: &[u8]) -> String {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
         .to_string()
 }
 
@@ -361,6 +482,181 @@ mod tests {
         let status = GitService::discover(repo.path()).unwrap().status().unwrap();
         assert_eq!(status.upstream.as_deref(), Some("upstream"));
         assert_eq!((status.ahead, status.behind), (1, 0));
+    }
+
+    /// A helper the action tests share: a repository with one commit and a
+    /// bare remote it is set up to push to. No network is involved — a path is
+    /// a perfectly good git remote, and it exercises the same code.
+    fn repo_with_remote() -> (TestRepo, tempfile::TempDir) {
+        let repo = TestRepo::new();
+        let remote = tempfile::tempdir().unwrap();
+        repo.run(&[
+            "-c",
+            "init.defaultBranch=main",
+            "init",
+            "-q",
+            "--bare",
+            remote.path().to_str().unwrap(),
+        ]);
+        repo.write("a.txt", "a\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+        repo.run(&["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        repo.run(&["push", "-q", "-u", "origin", "main"]);
+        (repo, remote)
+    }
+
+    #[test]
+    fn staging_and_unstaging_move_a_file_between_the_two_columns() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+        repo.write("a.txt", "b\n");
+        let service = GitService::discover(repo.path()).unwrap();
+
+        service.stage(&[PathBuf::from("a.txt")]).unwrap();
+        assert_eq!(repo.short_status(), vec!["M  a.txt"]);
+        service.unstage(&[PathBuf::from("a.txt")]).unwrap();
+        assert_eq!(repo.short_status(), vec![" M a.txt"]);
+    }
+
+    /// SPEC §31's four operations, and the one that has to work before there is
+    /// a `HEAD` to reset to.
+    #[test]
+    fn stage_all_and_unstage_all_work_before_the_first_commit() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.write("b.txt", "b\n");
+        let service = GitService::discover(repo.path()).unwrap();
+
+        service.stage_all().unwrap();
+        assert_eq!(repo.short_status(), vec!["A  a.txt", "A  b.txt"]);
+        service.unstage_all().unwrap();
+        assert_eq!(repo.short_status(), vec!["?? a.txt", "?? b.txt"]);
+    }
+
+    #[test]
+    fn a_deletion_is_staged_like_any_other_change() {
+        let repo = TestRepo::new();
+        repo.write("gone.txt", "x\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+        std::fs::remove_file(repo.path().join("gone.txt")).unwrap();
+
+        GitService::discover(repo.path())
+            .unwrap()
+            .stage(&[PathBuf::from("gone.txt")])
+            .unwrap();
+        assert_eq!(repo.short_status(), vec!["D  gone.txt"]);
+    }
+
+    /// ADR-032's promise, exercised end to end: a name that is not UTF-8 is
+    /// staged as the bytes git printed, not as a lossy transcription of them.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_is_not_utf8_is_staged_by_its_bytes() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let repo = TestRepo::new();
+        let name = PathBuf::from(OsStr::from_bytes(b"caf\xe9.txt"));
+        // APFS and HFS+ reject a name that is not valid UTF-8 at the syscall,
+        // so on macOS there is no such file to stage and nothing to check. The
+        // ADR is about the platforms where one can exist.
+        if std::fs::write(repo.path().join(&name), "x\n").is_err() {
+            return;
+        }
+
+        let service = GitService::discover(repo.path()).unwrap();
+        let untracked = service.status().unwrap().entries[0].path.clone();
+        assert_eq!(untracked, name);
+        service.stage(&[untracked]).unwrap();
+
+        let staged = service.status().unwrap();
+        assert_eq!(staged.entries.len(), 1);
+        assert_eq!(staged.entries[0].index, Change::Added);
+    }
+
+    #[test]
+    fn a_pathspec_list_that_is_empty_runs_nothing() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "a\n");
+        let service = GitService::discover(repo.path()).unwrap();
+        service.stage(&[]).unwrap();
+        assert_eq!(repo.short_status(), vec!["?? a.txt"], "still untracked");
+    }
+
+    #[test]
+    fn a_commit_reports_the_line_git_printed_for_it() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.run(&["add", "."]);
+
+        let said = GitService::discover(repo.path())
+            .unwrap()
+            .commit("first")
+            .unwrap();
+        assert!(said.contains("first"), "{said:?}");
+        assert!(repo.short_status().is_empty(), "nothing left to commit");
+    }
+
+    #[test]
+    fn committing_with_nothing_staged_fails_with_gits_own_words() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+
+        let err = GitService::discover(repo.path())
+            .unwrap()
+            .commit("empty")
+            .unwrap_err();
+        assert!(matches!(err, GitError::Failed { .. }), "{err:?}");
+    }
+
+    /// The Phase 11 acceptance, minus the thread: a real push against a real
+    /// remote, and the ahead count it clears.
+    #[test]
+    fn a_push_sends_the_local_commits_and_clears_the_ahead_count() {
+        let (repo, _remote) = repo_with_remote();
+        repo.write("a.txt", "b\n");
+        repo.commit("second");
+
+        let service = GitService::discover(repo.path()).unwrap();
+        assert_eq!(service.status().unwrap().ahead, 1);
+        service.push().unwrap();
+        assert_eq!(service.status().unwrap().ahead, 0);
+    }
+
+    #[test]
+    fn a_pull_with_nothing_to_fetch_says_so() {
+        let (repo, _remote) = repo_with_remote();
+        let said = GitService::discover(repo.path()).unwrap().pull().unwrap();
+        assert!(said.contains("up to date"), "{said:?}");
+    }
+
+    /// `GIT_TERMINAL_PROMPT=0` turns the question git would otherwise ask into
+    /// a sentence the status bar can show — the Phase 11 acceptance for
+    /// failures.
+    #[test]
+    fn a_push_with_no_remote_fails_with_an_actionable_message() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+
+        let err = GitService::discover(repo.path())
+            .unwrap()
+            .push()
+            .unwrap_err();
+        match err {
+            GitError::Failed { command, message } => {
+                assert_eq!(command, "push");
+                assert!(message.contains("destination"), "{message}");
+            }
+            other => panic!("expected a failure, got {other:?}"),
+        }
     }
 
     #[test]

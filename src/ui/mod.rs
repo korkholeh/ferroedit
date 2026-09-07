@@ -120,6 +120,16 @@ mod tests {
         );
     }
 
+    /// SPEC §34: while a network operation runs, the panel says so — and keeps
+    /// saying so, which a four-second notification cannot.
+    #[test]
+    fn the_panel_title_says_what_is_running() {
+        let mut app = app();
+        app.git.pretend_running(crate::git::GitJob::Push);
+        let screen = draw(&app, 80, 24).join("\n");
+        assert!(screen.contains("Git — Pushing…"), "{screen}");
+    }
+
     #[test]
     fn a_workspace_that_is_not_a_repository_says_so_in_the_panel() {
         let mut app = app();

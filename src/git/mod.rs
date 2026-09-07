@@ -8,3 +8,4 @@ pub mod testing;
 pub mod worker;
 
 pub use service::GitService;
+pub use worker::{GitJob, GitWorker, JobId, JobOutcome};

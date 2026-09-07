@@ -87,6 +87,14 @@ fn title(app: &App) -> String {
     if !app.git.is_repository() {
         return " Git ".to_string();
     }
+    // SPEC §34 asks for `Pushing…` while a network operation runs. It goes in
+    // the title rather than only on the status bar because a notification
+    // expires after four seconds and a push over a slow link does not: the
+    // title is the one place that can say "still running" for as long as it is
+    // true (ADR-033).
+    if let Some(progress) = app.git.busy() {
+        return format!(" Git — {progress} ");
+    }
     let status = &app.git.status;
     let mut title = format!(" Git — {}", status.head_label());
     if status.ahead > 0 {

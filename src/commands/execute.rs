@@ -13,6 +13,7 @@ use crate::commands::{Command, FileOp, MENUS};
 use crate::editor::coords::VisualCol;
 use crate::editor::document::Document;
 use crate::filesystem;
+use crate::git::{GitJob, JobOutcome};
 
 pub fn execute_command(app: &mut App, command: Command) {
     log::debug!("command {command:?} (focus {:?})", app.focus);
@@ -51,6 +52,20 @@ pub fn execute_command(app: &mut App, command: Command) {
             app.notifications.info("Explorer refreshed");
         }
         Command::GitRefresh => git_rescan(app),
+        Command::GitOpenSelected => git_open_selected(app),
+        Command::GitStage => git_stage_selected(app, true),
+        Command::GitUnstage => git_stage_selected(app, false),
+        Command::GitToggleStage => git_toggle_stage(app),
+        Command::GitStageAll => start_git_job(app, GitJob::StageAll),
+        Command::GitUnstageAll => start_git_job(app, GitJob::UnstageAll),
+        Command::GitCommitPrompt => prompt_commit(app),
+        // The dialog is what pairs this with the message typed into it, exactly
+        // as `SubmitInput` is paired with a name; see `activate_dialog_button`.
+        Command::SubmitCommit => log::warn!("a commit was submitted with no dialog open"),
+        Command::GitCommit(message) => git_commit(app, &message),
+        Command::GitPull => start_git_job(app, GitJob::Pull),
+        Command::GitPush => start_git_job(app, GitJob::Push),
+        Command::GitJobFinished(outcome) => finish_git_job(app, &outcome),
         Command::ToggleHiddenFiles => toggle_hidden_files(app),
 
         Command::NewFilePrompt => prompt_new(app, false),
@@ -499,11 +514,10 @@ fn activate_dialog_button(app: &mut App, index: usize) {
     let Some(dialog) = app.dialog.as_ref() else {
         return;
     };
+    let typed = || dialog.field().map(|f| f.value.clone()).unwrap_or_default();
     let command = match dialog.command_at(index) {
-        Some(Command::SubmitInput(operation)) => {
-            let name = dialog.field().map(|f| f.value.clone()).unwrap_or_default();
-            Some(Command::ApplyFileOp(operation, name))
-        }
+        Some(Command::SubmitInput(operation)) => Some(Command::ApplyFileOp(operation, typed())),
+        Some(Command::SubmitCommit) => Some(Command::GitCommit(typed())),
         other => other,
     };
     close_dialog(app);
@@ -1035,6 +1049,126 @@ fn git_rescan(app: &mut App) {
     app.notifications.info(app.git.summary());
 }
 
+/// Opens the file the panel's selection is on.
+///
+/// The status lists repository-relative paths, so the root is what turns one
+/// back into something to open — and the root is the repository's, not the
+/// workspace's, which matters when the editor was opened in a subdirectory.
+fn git_open_selected(app: &mut App) {
+    let Some(entry) = app.git.selected_entry() else {
+        app.notifications.info("Nothing selected in the Git panel");
+        return;
+    };
+    let Some(root) = app.git.root() else {
+        app.notifications.warning(app.git.summary());
+        return;
+    };
+    let path = root.join(&entry.path);
+    match app.open_path(&path, None) {
+        Ok(()) => app.notifications.info(format!("Opened {}", path.display())),
+        Err(err) => {
+            log::error!("could not open {}: {err}", path.display());
+            app.notifications.error(format!("{err}"));
+        }
+    }
+}
+
+/// Stages or unstages the selected file (SPEC §31).
+fn git_stage_selected(app: &mut App, stage: bool) {
+    let Some(entry) = app.git.selected_entry() else {
+        app.notifications.info("Nothing selected in the Git panel");
+        return;
+    };
+    // `git add` on a conflicted file is git's way of saying "I resolved this",
+    // and the editor has no diff and no conflict view to justify that claim
+    // yet. Refusing is honest; asserting a resolution the user has not made is
+    // not (ADR-034).
+    if entry.is_conflicted() {
+        let name = entry.path.display().to_string();
+        app.notifications.warning(format!(
+            "{name} is conflicted — resolve it outside the editor"
+        ));
+        return;
+    }
+    let paths = vec![entry.path.clone()];
+    let job = if stage {
+        GitJob::Stage(paths)
+    } else {
+        GitJob::Unstage(paths)
+    };
+    start_git_job(app, job);
+}
+
+/// The one key that does the obvious thing: stage what is not staged, and
+/// unstage what is.
+///
+/// "Not staged" is the worktree side of the `XY` pair being anything but
+/// unmodified — which covers an untracked file, whose index side is blank
+/// because there is nothing in the index to describe.
+fn git_toggle_stage(app: &mut App) {
+    let unstaged = app
+        .git
+        .selected_entry()
+        .is_some_and(|entry| entry.worktree.is_change());
+    git_stage_selected(app, unstaged);
+}
+
+/// Asks for a commit message, when there is something to commit (SPEC §32).
+///
+/// Refusing an empty commit here rather than letting git refuse it costs one
+/// check and saves the user typing a message for a commit that was never going
+/// to happen.
+fn prompt_commit(app: &mut App) {
+    if !app.git.is_repository() {
+        app.notifications.warning(app.git.summary());
+        return;
+    }
+    let staged = app.git.staged_count();
+    if staged == 0 {
+        app.notifications.info("Nothing staged to commit");
+        return;
+    }
+    let return_focus = dialog_return_focus(app);
+    open_dialog(app, DialogState::commit(staged, return_focus));
+}
+
+fn git_commit(app: &mut App, message: &str) {
+    let message = message.trim();
+    if message.is_empty() {
+        app.notifications.warning("A commit needs a message");
+        return;
+    }
+    start_git_job(app, GitJob::Commit(message.to_string()));
+}
+
+/// Hands a job to the worker and says so (SPEC §34).
+///
+/// This returns immediately in every case: the subprocess runs on the worker
+/// thread and the answer arrives later as `GitJobFinished`, so the frame that
+/// started a push is drawn without waiting for the network (ADR-033).
+fn start_git_job(app: &mut App, job: GitJob) {
+    match app.git.start(job) {
+        Ok(progress) => app.notifications.info(progress),
+        Err(why) => app.notifications.error(why),
+    }
+}
+
+/// Reports a finished job and re-reads the status it changed.
+fn finish_git_job(app: &mut App, outcome: &JobOutcome) {
+    app.git.finish(outcome);
+    match &outcome.result {
+        Ok(said) => app.notifications.info(said.clone()),
+        Err(why) => {
+            let what = outcome.job.label();
+            app.notifications.error(format!("{what} failed: {why}"));
+        }
+    }
+    // Even a failure can have changed the repository — a pull that fetched and
+    // then refused to fast-forward has moved the remote-tracking branch — so
+    // the status is re-read either way.
+    refresh_git(app);
+}
+
 fn scroll_sidebar(app: &mut App, delta: i16) {
     let max = sidebar_len(app).saturating_sub(1);
     match app.sidebar.mode {
@@ -1101,6 +1235,7 @@ mod tests {
     use super::*;
     use crate::editor::coords::CharIdx;
     use crate::editor::cursor::Motion;
+    use crate::event::AppEvent;
 
     fn app() -> App {
         App::fixture()
@@ -1207,6 +1342,322 @@ mod tests {
         assert_eq!(
             app.git.entries()[0].worktree,
             crate::git::models::Change::Deleted
+        );
+    }
+
+    // --- git actions (SPEC §31, §32, §34) ---------------------------------
+
+    /// An app over a real repository, with the git panel focused and a worker
+    /// attached — the state the editor is in when these keys are pressed.
+    ///
+    /// The receiver comes back with it because a job's answer arrives on the
+    /// run loop's channel, and a headless test is its own run loop.
+    fn app_over(
+        repo: &crate::git::testing::TestRepo,
+    ) -> (App, std::sync::mpsc::Receiver<AppEvent>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::fixture_in(repo.path());
+        app.git.attach_worker(tx);
+        app.sidebar.mode = SidebarMode::Git;
+        app.focus = FocusTarget::GitPanel;
+        app.git_rows = 10;
+        execute_command(&mut app, Command::GitRefresh);
+        (app, rx)
+    }
+
+    /// Runs the loop's job-draining step: block for one outcome, feed it back
+    /// through `execute_command`, and keep going while anything is in flight.
+    fn settle(app: &mut App, rx: &std::sync::mpsc::Receiver<AppEvent>) {
+        while app.git.busy().is_some() {
+            let event = rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the git worker answers");
+            let AppEvent::GitJob(outcome) = event else {
+                panic!("expected a git outcome, got {event:?}");
+            };
+            execute_command(app, Command::GitJobFinished(outcome));
+        }
+    }
+
+    /// A repository with one commit, one modified file and one untracked file.
+    fn changed_repo() -> crate::git::testing::TestRepo {
+        let repo = crate::git::testing::TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+        repo.write("a.txt", "b\n");
+        repo.write("new.txt", "new\n");
+        repo
+    }
+
+    /// The Phase 11 acceptance: the command that starts a git job returns
+    /// before git has finished, and the panel says what is running.
+    #[test]
+    fn a_job_returns_immediately_and_the_panel_says_what_is_running() {
+        let repo = changed_repo();
+        let (mut app, rx) = app_over(&repo);
+
+        execute_command(&mut app, Command::GitStageAll);
+        assert_eq!(app.git.busy(), Some("Staging everything…"));
+        assert_eq!(
+            app.notifications.current().map(|n| n.message.as_str()),
+            Some("Staging everything…"),
+            "SPEC §34's in-progress line"
+        );
+
+        settle(&mut app, &rx);
+        assert_eq!(app.git.busy(), None);
+        assert_eq!(
+            app.notifications.current().map(|n| n.message.as_str()),
+            Some("Staged every change")
+        );
+    }
+
+    #[test]
+    fn stage_all_and_unstage_all_move_every_row_and_refresh_the_panel() {
+        let repo = changed_repo();
+        let (mut app, rx) = app_over(&repo);
+        assert_eq!(app.git.entries().len(), 2);
+
+        execute_command(&mut app, Command::GitStageAll);
+        settle(&mut app, &rx);
+        assert_eq!(app.git.staged_count(), 2, "{:?}", app.git.entries());
+
+        execute_command(&mut app, Command::GitUnstageAll);
+        settle(&mut app, &rx);
+        assert_eq!(app.git.staged_count(), 0, "{:?}", app.git.entries());
+    }
+
+    /// Space is the panel's one-key workflow: stage what is not staged, and
+    /// unstage it again when it is.
+    #[test]
+    fn the_space_key_stages_the_selected_row_and_then_unstages_it() {
+        let repo = changed_repo();
+        let (mut app, rx) = app_over(&repo);
+        let selected = app.git.selected_entry().unwrap().path.clone();
+
+        execute_command(&mut app, Command::GitToggleStage);
+        settle(&mut app, &rx);
+        let entry = app
+            .git
+            .entries()
+            .iter()
+            .find(|e| e.path == selected)
+            .expect("still listed");
+        assert!(entry.index.is_change(), "{entry:?}");
+        assert!(!entry.worktree.is_change(), "{entry:?}");
+
+        execute_command(&mut app, Command::GitToggleStage);
+        settle(&mut app, &rx);
+        let entry = app
+            .git
+            .entries()
+            .iter()
+            .find(|e| e.path == selected)
+            .expect("still listed");
+        assert!(!entry.index.is_change(), "{entry:?}");
+    }
+
+    #[test]
+    fn staging_with_an_empty_panel_says_so_and_starts_nothing() {
+        let repo = crate::git::testing::TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+        let (mut app, _rx) = app_over(&repo);
+
+        execute_command(&mut app, Command::GitStage);
+        assert_eq!(app.git.busy(), None);
+        assert_eq!(
+            app.notifications.current().map(|n| n.message.as_str()),
+            Some("Nothing selected in the Git panel")
+        );
+    }
+
+    /// ADR-034: `git add` on a conflicted file is an assertion the editor has
+    /// no view to justify yet, so it refuses rather than making it.
+    #[test]
+    fn a_conflicted_file_is_not_staged() {
+        let repo = crate::git::testing::TestRepo::new();
+        repo.write("c.txt", "base\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+        repo.run(&["checkout", "-q", "-b", "other"]);
+        repo.write("c.txt", "theirs\n");
+        repo.commit("theirs");
+        repo.run(&["checkout", "-q", "main"]);
+        repo.write("c.txt", "ours\n");
+        repo.commit("ours");
+        let _ = repo.try_run(&["merge", "other"]);
+
+        let (mut app, _rx) = app_over(&repo);
+        assert_eq!(app.git.status.conflicts(), 1);
+        execute_command(&mut app, Command::GitToggleStage);
+
+        assert_eq!(app.git.busy(), None, "nothing was submitted");
+        let message = app.notifications.current().unwrap().message.clone();
+        assert!(message.contains("conflicted"), "{message}");
+    }
+
+    #[test]
+    fn committing_asks_for_a_message_and_then_commits_what_is_staged() {
+        let repo = changed_repo();
+        let (mut app, rx) = app_over(&repo);
+        execute_command(&mut app, Command::GitStageAll);
+        settle(&mut app, &rx);
+
+        execute_command(&mut app, Command::GitCommitPrompt);
+        let dialog = app.dialog.as_ref().expect("a commit dialog");
+        assert_eq!(dialog.prompt(), "Message for 2 staged files");
+        assert_eq!(app.focus, FocusTarget::Dialog);
+
+        for character in "add both".chars() {
+            execute_command(&mut app, Command::DialogInputChar(character));
+        }
+        execute_command(&mut app, Command::DialogActivate);
+        assert!(app.dialog.is_none(), "the dialog closed before the job ran");
+        settle(&mut app, &rx);
+
+        assert!(app.git.status.is_clean(), "{:?}", app.git.entries());
+        assert_eq!(repo.run(&["log", "-1", "--pretty=%s"]).trim(), "add both");
+        assert_eq!(app.focus, FocusTarget::GitPanel, "focus came back");
+    }
+
+    #[test]
+    fn committing_with_nothing_staged_never_opens_the_dialog() {
+        let repo = changed_repo();
+        let (mut app, _rx) = app_over(&repo);
+
+        execute_command(&mut app, Command::GitCommitPrompt);
+        assert!(app.dialog.is_none());
+        assert_eq!(
+            app.notifications.current().map(|n| n.message.as_str()),
+            Some("Nothing staged to commit")
+        );
+    }
+
+    #[test]
+    fn an_empty_commit_message_is_refused_before_git_sees_it() {
+        let repo = changed_repo();
+        let (mut app, rx) = app_over(&repo);
+        execute_command(&mut app, Command::GitStageAll);
+        settle(&mut app, &rx);
+
+        execute_command(&mut app, Command::GitCommit("   ".to_string()));
+        assert_eq!(app.git.busy(), None);
+        assert_eq!(
+            app.notifications.current().map(|n| n.message.as_str()),
+            Some("A commit needs a message")
+        );
+    }
+
+    /// The other half of the acceptance: a failure that `GIT_TERMINAL_PROMPT=0`
+    /// turned into a sentence reaches the status bar with the job's name on it.
+    #[test]
+    fn a_push_with_no_remote_reports_gits_reason_on_the_status_bar() {
+        let repo = crate::git::testing::TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+        let (mut app, rx) = app_over(&repo);
+
+        execute_command(&mut app, Command::GitPush);
+        assert_eq!(app.git.busy(), Some("Pushing…"));
+        settle(&mut app, &rx);
+
+        let notification = app.notifications.current().expect("a message");
+        assert_eq!(
+            notification.kind,
+            crate::app::notifications::NotificationKind::Error
+        );
+        assert!(
+            notification.message.starts_with("Push failed: "),
+            "{}",
+            notification.message
+        );
+    }
+
+    /// A push against a real remote — a bare repository on disk, which is a
+    /// remote as far as git is concerned and needs no network.
+    #[test]
+    fn a_push_to_a_remote_clears_the_ahead_count_in_the_panel() {
+        let repo = crate::git::testing::TestRepo::new();
+        let remote = tempfile::tempdir().unwrap();
+        repo.run(&[
+            "-c",
+            "init.defaultBranch=main",
+            "init",
+            "-q",
+            "--bare",
+            remote.path().to_str().unwrap(),
+        ]);
+        repo.write("a.txt", "a\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+        repo.run(&["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        repo.run(&["push", "-q", "-u", "origin", "main"]);
+        repo.write("a.txt", "b\n");
+        repo.commit("second");
+
+        let (mut app, rx) = app_over(&repo);
+        assert_eq!(app.git.status.ahead, 1);
+
+        execute_command(&mut app, Command::GitPush);
+        settle(&mut app, &rx);
+        assert_eq!(app.git.status.ahead, 0, "the panel followed the push");
+
+        execute_command(&mut app, Command::GitPull);
+        settle(&mut app, &rx);
+        let message = app.notifications.current().unwrap().message.clone();
+        assert!(message.contains("up to date"), "{message}");
+    }
+
+    /// Enter in the panel opens the file the row is about, and it opens the
+    /// one in the repository even when the workspace is a subdirectory of it.
+    #[test]
+    fn enter_in_the_panel_opens_the_selected_file() {
+        let repo = changed_repo();
+        let (mut app, _rx) = app_over(&repo);
+        let selected = app.git.selected_entry().unwrap().path.clone();
+
+        execute_command(&mut app, Command::GitOpenSelected);
+        assert_eq!(app.focus, FocusTarget::Editor);
+        let title = app.active().expect("a tab").document.title().to_string();
+        assert_eq!(title, selected.file_name().unwrap().to_str().unwrap());
+    }
+
+    /// Outside a repository nothing is submitted and the panel's own sentence
+    /// is what the user is told.
+    #[test]
+    fn a_git_action_outside_a_repository_is_refused_with_the_panels_own_words() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::fixture_in(dir.path());
+        app.git.attach_worker(tx);
+        execute_command(&mut app, Command::GitRefresh);
+
+        execute_command(&mut app, Command::GitStageAll);
+        assert_eq!(app.git.busy(), None);
+        assert_eq!(
+            app.notifications.current().map(|n| n.message.as_str()),
+            Some("Not a Git repository")
+        );
+    }
+
+    /// A `GitState` with no worker refuses rather than spawning a thread. Every
+    /// headless fixture is in this state, so it must be a message and not a
+    /// panic.
+    #[test]
+    fn a_panel_with_no_worker_refuses_the_job_instead_of_running_it() {
+        let repo = changed_repo();
+        let mut app = App::fixture_in(repo.path());
+        execute_command(&mut app, Command::GitRefresh);
+        execute_command(&mut app, Command::GitStageAll);
+
+        assert_eq!(app.git.busy(), None);
+        assert_eq!(
+            app.notifications.current().map(|n| n.message.as_str()),
+            Some("Git operations need the worker thread")
         );
     }
 
