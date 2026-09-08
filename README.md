@@ -1,29 +1,23 @@
-# FerroEdit
+<p align="center">
+  <img src="assets/hero.png" alt="FerroEdit — a desktop-like text editor that runs in a terminal" width="900">
+</p>
 
-> A modern desktop-like text editor that happens to run in a terminal.
+<h1 align="center">FerroEdit</h1>
+
+<p align="center">
+  <em>A modern desktop-like text editor that happens to run in a terminal.</em>
+</p>
+
+<p align="center">
+  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-5fafff?style=flat-square">
+  <img alt="Rust 1.75+" src="https://img.shields.io/badge/rust-1.75%2B-ffaf5f?style=flat-square">
+  <img alt="Status: pre-alpha" src="https://img.shields.io/badge/status-pre--alpha-d787d7?style=flat-square">
+  <img alt="Platforms" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux-87d787?style=flat-square">
+</p>
 
 FerroEdit is a non-modal, mouse-friendly terminal editor for people who do not want to
 learn Vim. Menus, tabs, a file explorer, syntax highlighting and Git — in one static
 binary, over SSH, with no runtime dependencies.
-
-```text
-┌──────────────────────────────────────────────────────────────┐
-│ File  Edit  Selection  Search  View  Git  Help               │
-├────────────────┬─────────────────────────────────────────────┤
-│ Explorer       │ main.rs │ editor.rs │ README.md             │
-│                ├─────────────────────────────────────────────┤
-│ ▼ src          │  1  fn main() {                             │
-│   main.rs      │  2      println!("hello");                  │
-│   editor.rs    │  3  }                                       │
-│   git.rs       │                                             │
-├────────────────┤                                             │
-│ Git            │                                             │
-│  M src/main.rs │                                             │
-│  ? notes.txt   │                                             │
-├────────────────┴─────────────────────────────────────────────┤
-│ main.rs  Ln 2, Col 14  UTF-8  LF  Rust        branch: main   │
-└──────────────────────────────────────────────────────────────┘
-```
 
 ## Status
 
