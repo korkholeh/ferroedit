@@ -226,8 +226,10 @@ impl Filter {
         if path == self.git_dir {
             return Some(FsChange::repository());
         }
-        // What git ignores, the panel and the tree do not show, so a change to
-        // it changes nothing on screen.
+        // A change under an ignored path is not worth a frame. The tree does
+        // list those files now (ADR-061), so this trades a live listing of
+        // build output for not waking the editor twice a second through a
+        // `cargo build`; an explicit refresh picks them up.
         if self
             .ignore
             .matched_path_or_any_parents(path, path.is_dir())

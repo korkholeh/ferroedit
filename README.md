@@ -102,7 +102,8 @@ ferroedit +42 main.rs  # open a file at line 42
 
 - Non-modal editing with the shortcuts you already know
 - Mouse: click, drag-select, scroll, menus, tabs, explorer
-- Tabs, a `.gitignore`-aware file explorer, and file operations
+- Tabs, a file explorer that shows everything on disk (dotfiles and git-ignored
+  files included, hideable from the View menu), and file operations
 - Syntax highlighting
 - Search and replace, and Go to Line
 - Word wrap, or horizontal scrolling when it is off

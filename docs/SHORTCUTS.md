@@ -252,7 +252,7 @@ Every item is a command, and the *Shortcut* column is the same lookup the menu i
 | Search | Replace All | `Alt+A` | Find bar |
 | View | Toggle Sidebar | `Ctrl+B` | anywhere |
 | View | Refresh Explorer | `F5` | Explorer |
-| View | Show Hidden Files | — | — |
+| View | Hidden and Ignored Files | — | — |
 | View | Word Wrap | `Alt+Z` | anywhere |
 | View | Syntax Mode… | — | — |
 | View | Line Endings… | — | — |

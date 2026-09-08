@@ -94,7 +94,8 @@ pub enum Command {
     ExplorerCollapse,
     /// Re-reads every open directory from disk.
     ExplorerRefresh,
-    /// Shows or hides the files `ignore` filters out (SPEC §19).
+    /// Shows or hides the files `ignore` filters out. They are shown by
+    /// default, so this hides them first (SPEC §19).
     ToggleHiddenFiles,
 
     /// Looks for the repository again and re-reads `git status` (SPEC §30).
@@ -768,7 +769,7 @@ pub static MENUS: &[MenuDef] = &[
         items: &[
             item("Toggle Sidebar", Command::ToggleSidebarMode),
             item("Refresh Explorer", Command::ExplorerRefresh),
-            item("Show Hidden Files", Command::ToggleHiddenFiles),
+            item("Hidden and Ignored Files", Command::ToggleHiddenFiles),
             item("Word Wrap", Command::ToggleWordWrap),
             SEP,
             // The three readouts on the status bar that are now questions

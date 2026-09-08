@@ -2,8 +2,11 @@
 //!
 //! A directory is read when it is first expanded and not before (SPEC §18), so
 //! opening a repository with a hundred thousand files costs one `read_dir` of
-//! the root. What the walk yields is filtered by `ignore`, which is what hides
-//! git-ignored and hidden files (SPEC §19).
+//! the root. The walk shows everything on disk by default — git-ignored files
+//! and dotfiles included — because a file the user has is a file the user wants
+//! to open; only `.git` itself is always kept out. **View → Hide Ignored
+//! Files** turns the `ignore` filtering back on for anyone who wants the
+//! narrower listing (SPEC §19).
 //!
 //! The tree keeps a flattened `Vec<TreeRow>` of what is visible, rebuilt on
 //! every structural change. Rendering, keyboard selection and mouse
@@ -66,7 +69,7 @@ impl FileTree {
             root: root.to_path_buf(),
             nodes: Vec::new(),
             rows: Vec::new(),
-            show_hidden: false,
+            show_hidden: true,
         };
         tree.nodes = read_dir(root, tree.show_hidden);
         tree.rebuild_rows();
@@ -95,6 +98,7 @@ impl FileTree {
     }
 
     /// Toggles hidden and git-ignored files, and reloads what is already open.
+    /// They are shown by default; this is what hides them.
     pub fn set_show_hidden(&mut self, show: bool) {
         if self.show_hidden == show {
             return;
@@ -311,25 +315,48 @@ mod tests {
         dir
     }
 
+    /// A tree with the ignore filtering switched on, for the tests that are
+    /// about something other than which files are listed and read better with
+    /// a two-row root.
+    fn narrow(root: &Path) -> FileTree {
+        let mut tree = FileTree::new(root);
+        tree.set_show_hidden(false);
+        tree
+    }
+
     fn names(tree: &FileTree) -> Vec<String> {
         tree.rows().iter().map(|row| row.name.clone()).collect()
     }
 
     #[test]
-    fn the_root_lists_directories_first_and_hides_what_git_ignores() {
+    fn the_root_lists_directories_first_and_shows_everything_by_default() {
         let dir = project();
+        fs::create_dir(dir.path().join(".git")).unwrap();
         let tree = FileTree::new(dir.path());
         assert_eq!(
             names(&tree),
+            vec!["src", "target", ".gitignore", ".hidden", "Cargo.toml"],
+            "git-ignored target/ and the dotfiles are all rows, directories first, \
+             and .git is not a row"
+        );
+    }
+
+    #[test]
+    fn hiding_ignored_files_takes_them_back_out() {
+        let dir = project();
+        let mut tree = FileTree::new(dir.path());
+        tree.set_show_hidden(false);
+        assert_eq!(
+            names(&tree),
             vec!["src", "Cargo.toml"],
-            "target/ is ignored, .gitignore and .hidden are hidden, src comes first"
+            "target/ is ignored and the dotfiles are hidden"
         );
     }
 
     #[test]
     fn a_directory_is_read_only_when_it_is_expanded() {
         let dir = project();
-        let mut tree = FileTree::new(dir.path());
+        let mut tree = narrow(dir.path());
         assert_eq!(tree.len(), 2, "nothing below the root has been read");
 
         tree.expand(&dir.path().join("src"));
@@ -347,7 +374,7 @@ mod tests {
     #[test]
     fn collapsing_hides_the_children_without_forgetting_them() {
         let dir = project();
-        let mut tree = FileTree::new(dir.path());
+        let mut tree = narrow(dir.path());
         let src = dir.path().join("src");
         tree.expand(&src);
         tree.expand(&dir.path().join("src/ui"));
@@ -365,7 +392,7 @@ mod tests {
     #[test]
     fn toggling_goes_both_ways() {
         let dir = project();
-        let mut tree = FileTree::new(dir.path());
+        let mut tree = narrow(dir.path());
         let src = dir.path().join("src");
         tree.toggle(&src);
         assert!(tree.rows()[0].expanded);
@@ -377,7 +404,7 @@ mod tests {
     #[test]
     fn a_file_cannot_be_expanded() {
         let dir = project();
-        let mut tree = FileTree::new(dir.path());
+        let mut tree = narrow(dir.path());
         tree.expand(&dir.path().join("Cargo.toml"));
         assert_eq!(tree.len(), 2);
         assert!(!tree.rows()[1].expanded);
@@ -386,7 +413,7 @@ mod tests {
     #[test]
     fn refreshing_picks_up_a_new_file_and_keeps_the_tree_open() {
         let dir = project();
-        let mut tree = FileTree::new(dir.path());
+        let mut tree = narrow(dir.path());
         tree.expand(&dir.path().join("src"));
         fs::write(dir.path().join("src/added.rs"), "").unwrap();
 
@@ -401,7 +428,7 @@ mod tests {
     #[test]
     fn revealing_a_path_expands_everything_above_it() {
         let dir = project();
-        let mut tree = FileTree::new(dir.path());
+        let mut tree = narrow(dir.path());
         let theme = dir.path().join("src/ui/theme.rs");
 
         let index = tree.reveal(&theme).expect("a row");
@@ -412,7 +439,7 @@ mod tests {
     #[test]
     fn revealing_something_outside_the_workspace_finds_nothing() {
         let dir = project();
-        let mut tree = FileTree::new(dir.path());
+        let mut tree = narrow(dir.path());
         assert_eq!(tree.reveal(Path::new("/etc/hosts")), None);
         assert_eq!(
             tree.reveal(&dir.path().join("target/binary")),
@@ -425,7 +452,7 @@ mod tests {
     fn showing_hidden_files_brings_back_the_ignored_ones_but_never_dot_git() {
         let dir = project();
         fs::create_dir(dir.path().join(".git")).unwrap();
-        let mut tree = FileTree::new(dir.path());
+        let mut tree = narrow(dir.path());
         tree.set_show_hidden(true);
 
         let visible = names(&tree);

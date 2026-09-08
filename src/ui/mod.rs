@@ -836,7 +836,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let app = App::fixture_in(dir.path());
         let screen = draw(&app, 80, 24).join("\n");
-        assert!(screen.contains("(empty or ignored)"), "{screen}");
+        assert!(screen.contains("(empty)"), "{screen}");
     }
 
     #[test]

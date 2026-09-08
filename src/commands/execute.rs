@@ -4756,17 +4756,21 @@ five",
         std::fs::write(dir.path().join(".gitignore"), "/build\n").unwrap();
         std::fs::create_dir(dir.path().join("build")).unwrap();
         let mut app = App::fixture_in(dir.path());
-        assert_eq!(rows(&app), vec!["src", "README.md"]);
+        assert_eq!(
+            rows(&app),
+            vec!["build", "src", ".gitignore", "README.md"],
+            "the ignored directory and the dotfile are listed to begin with"
+        );
 
         execute_command(&mut app, Command::ToggleHiddenFiles);
         assert_eq!(
             rows(&app),
-            vec!["build", "src", ".gitignore", "README.md"],
-            "the ignored directory and the dotfile are both back"
+            vec!["src", "README.md"],
+            "and the toggle hides them"
         );
 
         execute_command(&mut app, Command::ToggleHiddenFiles);
-        assert_eq!(rows(&app), vec!["src", "README.md"]);
+        assert_eq!(rows(&app), vec!["build", "src", ".gitignore", "README.md"]);
     }
     // --- search ------------------------------------------------------------
 

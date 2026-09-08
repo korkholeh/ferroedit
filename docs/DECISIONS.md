@@ -418,6 +418,9 @@ three cannot happen out of order.
 
 ## ADR-021: Hidden and git-ignored files are one switch, and `.git` is never on it
 
+> Superseded in part by [ADR-061](#adr-061-the-explorer-shows-everything-on-disk-by-default):
+> the switch and its coarseness are unchanged, but it now starts on.
+
 **Decision.** The explorer hides both dotfiles and git-ignored files by default, and
 View → Show Hidden Files toggles both together. `.git` is filtered by name and is not
 shown either way. The walk uses `ignore` with `require_git(false)`, so a `.gitignore`
@@ -2032,3 +2035,28 @@ else's rate limit. `wget` cannot report a redirect target usefully, so that path
 back to the API. The install URL points at `main`, so the script is live: a change to it
 reaches every future install without a release, which is the reason it does nothing a
 release cannot undo.
+
+---
+
+## ADR-061: The explorer shows everything on disk by default
+
+**Decision.** The switch from [ADR-021](#adr-021-hidden-and-git-ignored-files-are-one-switch-and-git-is-never-on-it)
+starts on: the tree lists git-ignored files and dotfiles from the first frame, and
+View → Hidden and Ignored Files is what takes them back out. `.git` is still filtered by
+name and is not a row either way.
+
+**Why.** SPEC §19 asks for ignored files to be hidden, and hiding them is right for a
+tool that browses a repository — but ferroedit is an editor, and the files it was
+hiding are exactly the ones an editor is opened for: `.gitignore` itself, `.env`,
+`.github/`, a generated file someone wants to read. A default that makes the editor
+unable to see its own configuration teaches the user to reach for the toggle every
+session, which is the same as not having the default. Hiding is still one keystroke
+away for anyone browsing a repository rather than editing one.
+
+**Consequence.** A root with a large ignored directory — `target/`, `node_modules/` —
+now has it as a row. Reading it costs nothing until it is expanded, because the tree is
+lazy (§18), but the listing is noisier than it was. The watcher still drops events for
+ignored paths (ADR-040), so a file written into `target/` while it is expanded appears
+on the next explicit refresh rather than on its own; that keeps a `cargo build` from
+waking the editor twice a second, which is worth more than a live listing of build
+output.
