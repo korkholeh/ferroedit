@@ -736,6 +736,101 @@ mod tests {
         );
     }
 
+    /// A quick eyeball of the whole box, so the row order, the trailing `/`
+    /// and the filter label are all asserted in one place (ADR-051).
+    #[test]
+    fn the_open_browser_draws_a_path_a_filter_and_its_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("README.md"), "# hi\n").unwrap();
+
+        let mut app = app();
+        app.dialog = Some(crate::app::dialog::DialogState::browse(
+            dir.path(),
+            FocusTarget::Editor,
+        ));
+        app.focus = FocusTarget::Dialog;
+
+        let joined = draw(&app, 80, 24).join("\n");
+        assert!(joined.contains(" Open "), "the title");
+        assert!(joined.contains("Filter: "), "what the field is for");
+        assert!(
+            joined.contains("src/"),
+            "a directory wears a trailing slash"
+        );
+        assert!(joined.contains("README.md"), "and a file does not");
+        assert!(joined.contains(".."), "the way out is on screen");
+        assert!(
+            joined.contains("[ Open ]")
+                && joined.contains("[ Open Folder ]")
+                && joined.contains("[ Cancel ]"),
+            "{joined}"
+        );
+
+        // The rows are drawn under the location line and the filter, in the
+        // area the mouse hit-tests against.
+        let rects = layout::compute(Rect::new(0, 0, 80, 24), &app);
+        let popup = rects.dialog.expect("a dialog rect");
+        let outline = rects.dialog_list_frame.expect("a frame around the rows");
+        let list = rects.dialog_list.expect("a list area");
+        assert_eq!(
+            outline.y,
+            popup.y + 3,
+            "border, location, filter, then rows"
+        );
+        assert_eq!(list.y, outline.y + 1, "the rows sit inside their own frame");
+        assert!(
+            outline.bottom() <= popup.bottom() - 2,
+            "the buttons keep their row"
+        );
+    }
+
+    /// A folder with more in it than fits: the box grows to the terminal, and
+    /// the scrollbar is what says there is more below (ADR-051).
+    #[test]
+    fn a_long_listing_gets_a_scrollbar_and_the_rows_the_terminal_allows() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..40 {
+            std::fs::write(dir.path().join(format!("file{i:02}.txt")), "").unwrap();
+        }
+
+        let mut app = app();
+        app.dialog = Some(crate::app::dialog::DialogState::browse(
+            dir.path(),
+            FocusTarget::Editor,
+        ));
+        app.focus = FocusTarget::Dialog;
+
+        let area = Rect::new(0, 0, 80, 40);
+        let rects = layout::compute(area, &app);
+        let list = rects.dialog_list.expect("a list area");
+        assert_eq!(
+            list.height as usize,
+            crate::app::dialog::MAX_BROWSER_ROWS,
+            "a tall terminal gives the browser its full window"
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        let theme = Theme::default();
+        terminal
+            .draw(|frame| render(frame, &app, &layout::compute(frame.area(), &app), &theme))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        let outline = rects.dialog_list_frame.expect("a frame");
+        let bar: String = (list.y..list.bottom())
+            .map(|y| buffer[(outline.right() - 1, y)].symbol().to_string())
+            .collect();
+        assert!(
+            bar.contains('█'),
+            "a thumb marks how far down the listing is: {bar:?}"
+        );
+        assert!(
+            bar.contains('│'),
+            "and a track marks how much is left: {bar:?}"
+        );
+    }
+
     #[test]
     fn an_input_dialog_draws_its_prompt_its_field_and_the_caret() {
         let mut app = app();

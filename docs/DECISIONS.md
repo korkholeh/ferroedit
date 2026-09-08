@@ -1524,3 +1524,95 @@ up; `--wait --timeout 30m` bounds the second. A notarisation that is rejected pr
 submission log before failing, because the status alone is one opaque word. The
 `spctl` check at the end is informative only — an unstapled binary is assessed online,
 and a release must not fail on Apple's CDN being briefly slow.
+
+---
+
+## ADR-051: Open is a browser, and opening a folder moves the workspace
+
+**Decision.** `Ctrl+O` opens a directory listing instead of a bare text field. The box
+shows where it is, a `Filter:` field, and the rows of that directory in a framed pane with
+a scrollbar — `..` first, then directories, then files, each sorted case-insensitively.
+`Open` walks into the selected directory or opens the selected file; `Open Folder` makes
+the selected directory the workspace, falling back to the directory being listed. The
+field is still the path field it used to be: an answer that resolves to a real path wins
+over the selection, and one that matches nothing in the listing is taken as the path of a
+file that does not exist yet.
+
+It opens at the **workspace root**, not at the explorer's selection. The sidebar's
+position is a place in a tree the dialog is not showing, so starting there opens the box
+somewhere the user did not choose and cannot see the way out of; the root is the one
+directory they picked on purpose.
+
+`..` is the way out of a listing, not a thing in it, so `Open Folder` does not count it.
+Walking into a folder leaves the selection on `..` — which is precisely when Open Folder
+is likely to be pressed — and counting it opened the *parent* of the folder just chosen.
+
+Opening a *file* leaves the sidebar showing the folder it is in. Inside the current
+workspace that only means revealing it in the tree; outside it, the workspace moves to
+the file's directory — the same rule `ferroedit path/to/file` has followed since Phase 1
+(SPEC §10).
+
+**Why.** ADR-029 chose a text field on the grounds that the explorer was how a project
+was browsed and the prompt only had to reach what the explorer could not. That was true
+of paths *inside* the workspace and false of everything else: the field could only be
+used by someone who already knew the answer, and there was no way at all to open a
+different project without restarting the editor. A file manager is the one dialog where
+the list is not a worse version of a pane behind it — there is no pane behind it.
+
+**The filter is the field, not a second one.** A browser needs both a listing and
+somewhere to type, and giving it two places to type would need a rule for which one has
+the caret. Instead the one field narrows the rows, and the same text is read as a path
+when it names something real or matches nothing. That keeps `dialog_wants_text` — the
+predicate that picks the keyboard table — a straight question about whether the body has
+a field, and it means a pasted path still works exactly as it did.
+
+Typing moves the selection to the first row that is not `..`. `..` survives every filter,
+so a selection resting on it would never move, and `Enter` after typing a name would walk
+*up* a directory instead of opening what was typed.
+
+**The rows are a pane, not three lines of a prompt.** The browser gets its own border,
+its own scrollbar and twice the picker's row budget (`MAX_BROWSER_ROWS`, twenty), clamped
+to the terminal. A branch list is read once and answered; a directory is *scanned*, and
+ten unframed rows with no scrollbar say neither "this scrolls" nor "this is the list".
+The scrollbar is drawn only when there is something to scroll, because a full-height thumb
+is a control that lies about having something to do, and it replaces the right border
+between the corners rather than the whole edge — a frame missing its corners reads as
+broken.
+
+Because the box is clamped to the terminal, the window it scrolls within is a property of
+the last drawn frame and not a constant: `App::dialog_rows` carries it out of the layout
+the way `explorer_rows` already does, and `step_list` takes it. A constant here would
+scroll against a window that does not exist on a short terminal.
+
+The wheel over the list moves the *selection*, which is what scrolls it. That is what the
+keyboard already does, and a picker whose selection can scroll out of sight would need a
+second rule for what Enter then means.
+
+**A second click opens.** ADR-020's rule for dialogs is that a click on a list row selects
+without choosing, because the confirm button is right there and choosing a branch by
+accident is a checkout. Browsing inverts the arithmetic: a directory is several steps
+deep, and a click-then-button for each of them is not a convenience. So a click on the row
+that is *already* selected opens it. It is a double-click without the timing — the first
+click still only selects, so nothing opens by surprise, and it works on terminals whose
+click reporting is too coarse for a real double-click.
+
+**Moving the workspace means moving the watcher.** The root was fixed for the life of the
+process, so `watcher::spawn` could move its `notify` watcher into the thread that reads
+it. A root that changes needs the watch to *end*, so the watcher now stays on the caller's
+side in a `Watch` handle: dropping it closes the channel the thread is blocked on, and the
+thread returns. `App` holds the handle and a clone of the run loop's sender, which is the
+one place state and a thread are coupled — the alternative was for `execute_command` to
+return work for `main` to do, and one field is cheaper than a second mutation path.
+
+Open tabs are deliberately untouched when the workspace moves. A tab is a buffer and a
+path, not a member of a directory, and closing files because the sidebar moved would be
+the editor throwing away work nobody asked it to.
+
+**Consequence.** `FileOp::Open` is gone: the operation it named is no longer answered with
+a typed name. The `Up` and `Down` keys are now in the input-dialog table as well as the
+plain one, since the browser is a field *and* a list; a field with no list under it
+ignores them, which is what those keys did there before. `Browser` reads a directory
+eagerly on every step, unlike `FileTree`'s lazy expansion — one `read_dir` per keystroke
+is not a cost worth a cache, and a listing that is a syscall old is a listing that is
+right.
+

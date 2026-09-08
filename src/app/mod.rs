@@ -1,6 +1,7 @@
 //! Application state. Owns tabs, workspace, focus and notifications.
 //! Never renders and never talks to crossterm directly.
 
+pub mod browser;
 pub mod dialog;
 pub mod diff;
 pub mod focus;
@@ -13,7 +14,10 @@ pub mod tabs;
 pub mod workspace;
 
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::Sender;
 
+use crate::event::AppEvent;
+use crate::filesystem::watcher::Watch;
 use dialog::DialogState;
 use diff::DiffState;
 use focus::FocusTarget;
@@ -177,6 +181,19 @@ pub struct App {
     /// lines are laid out against it, and so is the scroll.
     pub help_rows: u16,
     pub help_cols: u16,
+    /// Rows the open dialog's list could show in the last drawn frame, for the
+    /// same reason as `explorer_rows`: the browser's box is clamped to the
+    /// terminal, and scrolling has to know how big the window really is.
+    pub dialog_rows: u16,
+    /// The run loop's event channel, kept so the one producer `App` restarts
+    /// itself can be given one: the filesystem watcher, when the workspace
+    /// root changes (ADR-051). `None` in every headless test, which is also
+    /// what makes those tests spawn no threads.
+    pub events: Option<Sender<AppEvent>>,
+    /// The watch on the workspace root, while there is one. Held rather than
+    /// forgotten because dropping it is how the previous root stops being
+    /// watched.
+    pub watch: Option<Watch>,
     pub should_quit: bool,
 }
 
@@ -208,6 +225,9 @@ impl App {
             diff_rows: 0,
             help_rows: 0,
             help_cols: 0,
+            dialog_rows: 0,
+            events: None,
+            watch: None,
             should_quit: false,
             workspace,
         }
@@ -289,6 +309,38 @@ impl App {
         );
         self.search
             .set_matches(index, revision, matches, truncated, caret);
+    }
+
+    /// Makes `root` the workspace: the explorer, the git panel and the
+    /// filesystem watcher all move to it (ADR-051).
+    ///
+    /// Open tabs are deliberately untouched. A tab is a buffer and a path, not
+    /// a member of a directory, and closing files because the sidebar moved
+    /// would be the editor throwing away work the user never asked it to.
+    ///
+    /// The watch is replaced rather than added to: the old one is dropped
+    /// first, so a session that walks through five directories still has one
+    /// watcher thread at the end of it.
+    pub fn open_workspace(&mut self, root: &Path) {
+        let workspace = Workspace::at(root);
+        log::info!("workspace is now {}", workspace.root().display());
+        self.sidebar.tree = FileTree::new(workspace.root());
+        self.sidebar.selected = 0;
+        self.sidebar.scroll = 0;
+        self.git.discover(workspace.root());
+        self.watch = None;
+        if let Some(events) = self.events.clone() {
+            match crate::filesystem::watcher::spawn(workspace.root(), events) {
+                Ok(watch) => self.watch = Some(watch),
+                Err(err) => {
+                    log::warn!("no filesystem watcher: {err}");
+                    self.notifications.warning(format!(
+                        "Not watching for outside changes: {err} — F5 refreshes"
+                    ));
+                }
+            }
+        }
+        self.workspace = workspace;
     }
 
     /// Opens a file in a tab and focuses it, optionally on a given line.

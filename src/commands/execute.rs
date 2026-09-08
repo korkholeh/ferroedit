@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use crate::app::dialog::DialogState;
+use crate::app::dialog::{DialogState, MAX_LIST_ROWS};
 use crate::app::diff::{DiffState, HORIZONTAL_STEP};
 use crate::app::focus::FocusTarget;
 use crate::app::git::NotStarted;
@@ -130,6 +130,11 @@ pub fn execute_command(app: &mut App, command: Command) {
         Command::RenamePrompt => prompt_rename(app),
         Command::DeletePrompt => prompt_delete(app),
         Command::OpenPrompt => prompt_open(app),
+        // Both reach the dispatcher only through `activate_dialog_button`,
+        // which runs them while the browser is still open — they read it.
+        Command::BrowserOpen => browser_open(app),
+        Command::BrowserOpenFolder => browser_open_folder(app),
+        Command::OpenWorkspace(path) => open_workspace(app, &path),
         Command::SaveAsPrompt => prompt_save_as(app),
         // The dialog is what pairs this with the name typed into it; see
         // `activate_dialog_button`. Reaching the dispatcher means a producer
@@ -204,13 +209,15 @@ pub fn execute_command(app: &mut App, command: Command) {
         Command::Delete => edit(app, Document::delete),
 
         Command::DialogListMove(delta) => {
+            let height = list_height(app);
             if let Some(dialog) = app.dialog.as_mut() {
-                dialog.step_list(delta);
+                dialog.step_list(delta, height);
             }
         }
         Command::DialogSelectItem(row) => {
+            let height = list_height(app);
             if let Some(dialog) = app.dialog.as_mut() {
-                dialog.select_visible_row(row);
+                dialog.select_visible_row(row, height);
             }
         }
         Command::SubmitListChoice => log::warn!("a list choice was made with no dialog open"),
@@ -816,6 +823,14 @@ fn activate_dialog_button(app: &mut App, index: usize) {
     let Some(dialog) = app.dialog.as_ref() else {
         return;
     };
+    // The browser's two buttons are the exception to closing first: one of
+    // them walks into a directory, which is the dialog *staying* open, and both
+    // read a listing that is about to be dropped (ADR-051).
+    if let Some(command @ (Command::BrowserOpen | Command::BrowserOpenFolder)) =
+        dialog.command_at(index)
+    {
+        return execute_command(app, command);
+    }
     let typed = || dialog.field().map(|f| f.value.clone()).unwrap_or_default();
     let command = match dialog.command_at(index) {
         Some(Command::SubmitInput(operation)) => Some(Command::ApplyFileOp(operation, typed())),
@@ -834,9 +849,26 @@ fn activate_dialog_button(app: &mut App, index: usize) {
 }
 
 /// Runs an edit on the open dialog's text field, if it has one.
+/// The window the open dialog's list scrolls within: what the last frame drew,
+/// or the body's own maximum before there has been one.
+fn list_height(app: &App) -> usize {
+    app.dialog
+        .as_ref()
+        .map_or(MAX_LIST_ROWS, |dialog| dialog.list_height(app.dialog_rows))
+}
+
 fn edit_field(app: &mut App, operation: impl FnOnce(&mut InputField)) {
-    if let Some(field) = app.dialog.as_mut().and_then(DialogState::field_mut) {
+    let height = list_height(app);
+    let Some(dialog) = app.dialog.as_mut() else {
+        return;
+    };
+    if let Some(field) = dialog.field_mut() {
         operation(field);
+    }
+    // In the browser that field is the filter, so editing it changes which
+    // rows exist and where the selection is among them.
+    if let Some(browser) = dialog.browser_mut() {
+        browser.refilter(height);
     }
 }
 
@@ -1064,14 +1096,99 @@ fn prompt_new(app: &mut App, directory: bool) {
     open_dialog(app, dialog);
 }
 
-/// Asks for a path to open, relative to the directory the explorer is in.
+/// Opens the file browser at the workspace root (SPEC §6, ADR-051).
 ///
-/// The base is the explorer's directory rather than the process's: the user is
-/// looking at a tree, and a bare name means the place they are looking at.
+/// The root and not the directory the explorer's selection happens to be in:
+/// the sidebar's own position is a place in a *tree*, which the browser is not
+/// showing, so starting there means the dialog opens somewhere the user did not
+/// choose and cannot see the way out of. The root is the one directory they
+/// picked on purpose, and `..` is one keystroke from anywhere above it.
 fn prompt_open(app: &mut App) {
-    let base = explorer_parent(app);
+    let base = app.workspace.root().to_path_buf();
     let return_focus = dialog_return_focus(app);
-    open_dialog(app, DialogState::open_path(&base, return_focus));
+    open_dialog(app, DialogState::browse(&base, return_focus));
+}
+
+/// The browser's Open button: walk into a directory, or open a file.
+///
+/// The filter field doubles as the path field the dialog used to be, and a
+/// filter that names something real wins over the selection — a pasted path is
+/// an answer, not a search. A filter that matches *nothing* is an answer too:
+/// it is how a file that does not exist yet is started, which is what the old
+/// dialog did and what the command line still does.
+fn browser_open(app: &mut App) {
+    let Some(browser) = app.dialog.as_mut().and_then(DialogState::browser_mut) else {
+        log::warn!("the browser was used with no browser open");
+        return;
+    };
+    let dir = browser.dir().to_path_buf();
+    let typed = resolve_typed_path(&dir, &browser.filter.value);
+    let target = match typed {
+        Some(path) if path.exists() => path,
+        // Nothing in the listing matched what was typed, so what was typed is
+        // the answer rather than a way of narrowing it down.
+        Some(path) if browser.len() <= 1 => path,
+        _ => match browser.selected_entry() {
+            Some(entry) => entry.path.clone(),
+            None => return,
+        },
+    };
+    if target.is_dir() {
+        browser.open_dir(&target);
+        return;
+    }
+    close_dialog(app);
+    open_browsed_file(app, &target);
+}
+
+/// The browser's Open Folder button: the selected directory, or the one being
+/// listed when a file is selected.
+fn browser_open_folder(app: &mut App) {
+    let Some(browser) = app.dialog.as_ref().and_then(DialogState::browser) else {
+        log::warn!("the browser was used with no browser open");
+        return;
+    };
+    let target = browser.folder_target();
+    close_dialog(app);
+    execute_command(app, Command::OpenWorkspace(target));
+}
+
+/// Opens a file chosen in the browser, and leaves the sidebar showing the
+/// folder it is in (SPEC §6).
+///
+/// A file already inside the workspace only has to be revealed: re-rooting the
+/// tree to its own directory would throw away the project the user is working
+/// in to show them one folder of it. A file outside the workspace has no row to
+/// reveal, so the workspace moves to its directory — which is the same rule
+/// `ferroedit path/to/file` has followed since Phase 1 (SPEC §10).
+fn open_browsed_file(app: &mut App, path: &Path) {
+    let path = crate::app::absolute(path);
+    if !path.starts_with(app.workspace.root()) {
+        if let Some(parent) = path.parent() {
+            app.open_workspace(parent);
+        }
+    }
+    open_and_report(app, &path);
+    select_path(app, Some(&path));
+}
+
+/// Makes a directory the workspace (ADR-051).
+///
+/// The sidebar switches to the explorer, because a folder that was just opened
+/// and is not on screen is a command that appears to have done nothing.
+fn open_workspace(app: &mut App, path: &Path) {
+    if !path.is_dir() {
+        app.notifications
+            .warning(format!("{} is not a folder", display_name(path)));
+        return;
+    }
+    app.open_workspace(path);
+    app.sidebar.mode = SidebarMode::Explorer;
+    // Through `focus_pane` rather than by assignment, so the diff viewer and
+    // the help screen close the way they do for every other pane (ADR-037).
+    focus_pane(app, FocusTarget::Explorer);
+    app.notifications
+        .info(format!("Opened {}", app.workspace.name()));
 }
 
 /// Asks where to write the active tab (SPEC §6).
@@ -1134,13 +1251,11 @@ fn prompt_delete(app: &mut App) {
 /// Runs a file operation and puts the tree, the tabs and the status bar back in
 /// step with the disk.
 fn apply_file_op(app: &mut App, operation: FileOp, name: &str) {
-    // Open and Save As are answered with a path rather than a name, and both
-    // report through the paths that already say "Opened …" and "Saved …", so
-    // neither reaches the create/rename tail below.
-    match &operation {
-        FileOp::Open { base } => return open_typed_path(app, base, name),
-        FileOp::SaveAs { index, base } => return save_tab_as(app, *index, base, name),
-        _ => {}
+    // Save As is answered with a path rather than a name, and it reports
+    // through the path that already says "Saved …", so it does not reach the
+    // create/rename tail below.
+    if let FileOp::SaveAs { index, base } = &operation {
+        return save_tab_as(app, *index, base, name);
     }
 
     let outcome = match &operation {
@@ -1148,7 +1263,7 @@ fn apply_file_op(app: &mut App, operation: FileOp, name: &str) {
         FileOp::CreateDirectory { parent } => filesystem::create_directory(parent, name),
         FileOp::Rename { path } => filesystem::rename(path, name),
         // Handled above; the match stays exhaustive rather than defaulting.
-        FileOp::Open { .. } | FileOp::SaveAs { .. } => return,
+        FileOp::SaveAs { .. } => return,
     };
     let path = match outcome {
         Ok(path) => path,
@@ -1175,24 +1290,6 @@ fn apply_file_op(app: &mut App, operation: FileOp, name: &str) {
         operation.past_tense(),
         display_name(&path)
     ));
-}
-
-/// Opens whatever was typed into the Open dialog.
-///
-/// A path with nothing behind it opens as an empty buffer, exactly as a file
-/// named on the command line does: "open a file that is not there yet" is how
-/// a new file outside the tree gets started.
-fn open_typed_path(app: &mut App, base: &Path, typed: &str) {
-    let Some(path) = resolve_typed_path(base, typed) else {
-        app.notifications.warning("No path given");
-        return;
-    };
-    if path.is_dir() {
-        app.notifications
-            .warning(format!("{} is a directory", display_name(&path)));
-        return;
-    }
-    open_and_report(app, &path);
 }
 
 /// Writes a tab under a new path and keeps editing it there (SPEC §6).
@@ -3954,35 +4051,169 @@ mod tests {
         execute_command(app, Command::DialogActivate);
     }
 
+    /// The names the browser is showing, `..` included.
+    fn browser_rows(app: &App) -> Vec<String> {
+        app.dialog
+            .as_ref()
+            .and_then(|dialog| dialog.browser())
+            .expect("a browser is open")
+            .rows()
+            .map(|entry| entry.name.clone())
+            .collect()
+    }
+
+    fn browser_selected(app: &App) -> String {
+        app.dialog
+            .as_ref()
+            .and_then(|dialog| dialog.browser())
+            .and_then(|browser| browser.selected_entry())
+            .expect("a selected row")
+            .name
+            .clone()
+    }
+
+    /// Types into the browser's filter without pressing Enter afterwards.
+    fn filter(app: &mut App, text: &str) {
+        execute_command(app, Command::DialogInputText(text.into()));
+    }
+
     #[test]
-    fn a_typed_path_opens_relative_to_the_explorer() {
+    fn the_browser_opens_on_the_workspace_root_whatever_the_explorer_is_on() {
         let dir = project();
         let mut app = App::fixture_in(dir.path());
+        // The explorer is sitting inside `src`, which is *not* where the
+        // browser opens: the sidebar's place is a spot in a tree the dialog is
+        // not showing.
         select(&mut app, "src");
         execute_command(&mut app, Command::ExplorerExpand);
+        select(&mut app, "main.rs");
 
         execute_command(&mut app, Command::OpenPrompt);
-        assert!(app.dialog_wants_text(), "the prompt asks for a path");
-        assert_eq!(app.dialog.as_ref().unwrap().prompt(), "Open in src");
-        type_into_dialog(&mut app, "main.rs");
+        assert!(app.dialog_wants_text(), "the filter takes typing");
+        assert_eq!(browser_rows(&app), vec!["..", "src", "README.md"]);
+        type_into_dialog(&mut app, "README.md");
 
-        assert_eq!(app.active().unwrap().document.title(), "main.rs");
+        assert_eq!(app.active().unwrap().document.title(), "README.md");
         assert_eq!(app.focus, FocusTarget::Editor);
         assert!(app.dialog.is_none());
     }
 
     #[test]
-    fn an_absolute_path_ignores_the_directory_the_prompt_named() {
+    fn the_browser_walks_into_a_directory_and_back_out_of_it() {
+        let dir = project();
+        let mut app = App::fixture_in(dir.path());
+        execute_command(&mut app, Command::OpenPrompt);
+        assert_eq!(browser_rows(&app), vec!["..", "src", "README.md"]);
+
+        // Down onto `src`, then Enter: the dialog stays open, one level in.
+        execute_command(&mut app, Command::DialogListMove(1));
+        assert_eq!(browser_selected(&app), "src");
+        execute_command(&mut app, Command::DialogActivate);
+        assert!(app.dialog.is_some(), "walking in is not answering");
+        assert_eq!(browser_rows(&app), vec!["..", "main.rs"]);
+
+        // `..` is selected on arrival, so Enter again goes back.
+        assert_eq!(browser_selected(&app), "..");
+        execute_command(&mut app, Command::DialogActivate);
+        assert_eq!(browser_rows(&app), vec!["..", "src", "README.md"]);
+        assert!(app.tabs.is_empty(), "and nothing was opened on the way");
+    }
+
+    #[test]
+    fn the_filter_narrows_the_rows_and_enter_opens_what_is_left() {
+        let dir = project();
+        let mut app = App::fixture_in(dir.path());
+        execute_command(&mut app, Command::OpenPrompt);
+        filter(&mut app, "read");
+        assert_eq!(browser_rows(&app), vec!["..", "README.md"]);
+        assert_eq!(browser_selected(&app), "README.md");
+
+        execute_command(&mut app, Command::DialogActivate);
+        assert_eq!(app.active().unwrap().document.title(), "README.md");
+    }
+
+    #[test]
+    fn open_folder_makes_the_selected_directory_the_workspace() {
+        let dir = project();
+        let mut app = App::fixture_in(dir.path());
+        execute_command(&mut app, Command::OpenPrompt);
+        execute_command(&mut app, Command::DialogListMove(1));
+        assert_eq!(browser_selected(&app), "src");
+
+        // The second button, `Open Folder`.
+        execute_command(&mut app, Command::DialogActivateButton(1));
+        assert!(app.dialog.is_none());
+        assert_eq!(app.workspace.name(), "src");
+        assert_eq!(rows(&app), vec!["main.rs"]);
+        assert_eq!(app.focus, FocusTarget::Explorer);
+        assert_eq!(
+            app.notifications.current().unwrap().message,
+            "Opened src",
+            "a sidebar that moved says so"
+        );
+    }
+
+    #[test]
+    fn open_folder_on_a_file_row_means_the_directory_being_listed() {
+        let dir = project();
+        let mut app = App::fixture_in(dir.path());
+        execute_command(&mut app, Command::OpenPrompt);
+        execute_command(&mut app, Command::DialogListMove(1));
+        execute_command(&mut app, Command::DialogActivate);
+        assert_eq!(browser_rows(&app), vec!["..", "main.rs"]);
+        execute_command(&mut app, Command::DialogListMove(1));
+        assert_eq!(browser_selected(&app), "main.rs");
+
+        execute_command(&mut app, Command::DialogActivateButton(1));
+        assert_eq!(app.workspace.name(), "src");
+        assert!(app.tabs.is_empty(), "a folder was opened, not the file");
+    }
+
+    #[test]
+    fn a_file_from_outside_the_workspace_brings_the_sidebar_with_it() {
         let dir = project();
         let outside = tempfile::tempdir().unwrap();
-        let path = outside.path().join("elsewhere.txt");
-        std::fs::write(&path, "out of tree\n").unwrap();
+        std::fs::write(outside.path().join("elsewhere.txt"), "out of tree\n").unwrap();
 
         let mut app = App::fixture_in(dir.path());
         execute_command(&mut app, Command::OpenPrompt);
-        type_into_dialog(&mut app, path.to_str().unwrap());
+        type_into_dialog(
+            &mut app,
+            outside.path().join("elsewhere.txt").to_str().unwrap(),
+        );
 
         assert_eq!(app.active().unwrap().document.title(), "elsewhere.txt");
+        assert_eq!(
+            app.workspace.root(),
+            std::fs::canonicalize(outside.path()).unwrap(),
+            "the sidebar shows the folder the file is in (SPEC §6)"
+        );
+        assert_eq!(rows(&app), vec!["elsewhere.txt"]);
+    }
+
+    #[test]
+    fn a_file_from_inside_the_workspace_leaves_the_workspace_alone() {
+        let dir = project();
+        let mut app = App::fixture_in(dir.path());
+        let root = app.workspace.root().to_path_buf();
+
+        execute_command(&mut app, Command::OpenPrompt);
+        execute_command(&mut app, Command::DialogListMove(1));
+        execute_command(&mut app, Command::DialogActivate);
+        execute_command(&mut app, Command::DialogListMove(1));
+        execute_command(&mut app, Command::DialogActivate);
+
+        assert_eq!(app.active().unwrap().document.title(), "main.rs");
+        assert_eq!(
+            app.workspace.root(),
+            root,
+            "re-rooting to `src` would throw away the project around it"
+        );
+        assert_eq!(
+            app.sidebar.selected_row().map(|row| row.name.clone()),
+            Some("main.rs".to_string()),
+            "and the file is revealed where it already lived"
+        );
     }
 
     #[test]
@@ -3990,6 +4221,7 @@ mod tests {
         let dir = project();
         let mut app = App::fixture_in(dir.path());
         execute_command(&mut app, Command::OpenPrompt);
+        // Nothing in the listing matches, so the filter is read as the answer.
         type_into_dialog(&mut app, "notes.md");
 
         assert_eq!(app.active().unwrap().document.title(), "notes.md");
@@ -4000,34 +4232,15 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_open_answer_opens_nothing() {
+    fn enter_on_an_empty_filter_acts_on_the_row_that_is_selected() {
         let dir = project();
         let mut app = App::fixture_in(dir.path());
         execute_command(&mut app, Command::OpenPrompt);
+        // `..` is where the selection starts, and it is a directory.
         execute_command(&mut app, Command::DialogActivate);
 
-        assert!(app.tabs.is_empty(), "Enter on an empty field dismisses");
-        assert_eq!(
-            app.notifications.current().unwrap().message,
-            "No path given"
-        );
-    }
-
-    #[test]
-    fn opening_a_directory_says_so_rather_than_opening_a_tab() {
-        let dir = project();
-        let mut app = App::fixture_in(dir.path());
-        // A file is selected, so the prompt is rooted at the workspace and
-        // `src` below is the directory next to it.
-        select(&mut app, "README.md");
-        execute_command(&mut app, Command::OpenPrompt);
-        type_into_dialog(&mut app, "src");
-
-        assert!(app.tabs.is_empty());
-        assert_eq!(
-            app.notifications.current().unwrap().message,
-            "src is a directory"
-        );
+        assert!(app.tabs.is_empty(), "nothing was opened");
+        assert!(app.dialog.is_some(), "the browser went up instead");
     }
 
     #[test]

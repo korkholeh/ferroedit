@@ -52,7 +52,7 @@ src/
   terminal.rs             # RAII TerminalGuard + panic hook
   docs.rs                 # renders docs/SHORTCUTS.md from the tables (ADR-028)
   app/       mod.rs focus.rs tabs.rs dialog.rs diff.rs input_field.rs
-             notifications.rs search.rs workspace.rs
+             browser.rs notifications.rs search.rs workspace.rs
   event/     mod.rs keyboard.rs mouse.rs
   commands/  mod.rs execute.rs
   ui/        mod.rs layout.rs menu.rs tabs.rs editor.rs explorer.rs field.rs
@@ -140,10 +140,12 @@ input mode.
 
 The body is the enum: `Message` for a confirmation, `Input` for a name (ADR-019), `List`
 for a choice — the branch picker, and the one case where no pane behind the dialog
-already lists the same things (ADR-035). A dialog with a field has its own keymap table,
-because `Left` is a caret there and a button selection everywhere else, and `resolve`
-picks the table from the open dialog. `Up` and `Down` are the list's axis the way `Left`
-and `Right` are the button row's; a body that is not a list ignores them.
+already lists the same things (ADR-035) — and `Browser` for Open, a directory listing
+with a filter over it (ADR-051). A dialog with a field has its own keymap table, because
+`Left` is a caret there and a button selection everywhere else, and `resolve` picks the
+table from the open dialog. `Up` and `Down` are the list's axis the way `Left` and
+`Right` are the button row's, and they are in *both* tables: the browser is a field and a
+list at once, while a body that is not a list ignores them.
 
 A button whose command needs something that does not exist yet carries a marker instead,
 and `activate_dialog_button` substitutes on the way out:
@@ -155,8 +157,16 @@ and `activate_dialog_button` substitutes on the way out:
 | `SubmitBranch` | `GitCreateBranch(text)` | the same, for a name |
 | `SubmitListChoice` | the highlighted row's own command | the choice is made after the button is built |
 
+The browser's `BrowserOpen` and `BrowserOpenFolder` are the exception to the rule below
+that a button runs with its dialog already closed: one of them walks into a directory,
+which is the dialog *staying* open, and both read a listing that closing would drop.
+
 The box's height comes from the body — `DialogState::body_height` — so a picker is as
-tall as its list while a message and an input stay at the five rows they always were.
+tall as its list while a message and an input stay at the five rows they always were. The
+browser asks for the most (twenty rows, a frame and a scrollbar), and the terminal clamps
+it, which is why the window it *scrolls* within is read back out of the drawn frame as
+`App::dialog_rows` rather than being a constant — the same arrangement `explorer_rows`
+has.
 
 Modality is enforced at the two input boundaries, not inside `execute_command`:
 `event::keyboard::resolve` consults only the `Dialog` bindings while a dialog has
@@ -199,6 +209,13 @@ oldest running job's `Pushing…` for as long as it runs, which a four-second no
 cannot. The outcome comes back as a `Command`, so the worker mutates `App` through the
 same single door as the keyboard — which is why `JobOutcome` carries an error *string*
 and not a `GitError`: a `Command` has to be `Clone` and `Eq`.
+
+The filesystem watcher is the third thread (ADR-040), and the only one whose lifetime is
+not the process's: `watcher::spawn` returns a `Watch` that owns the `notify` watcher, and
+dropping it closes the channel the thread is blocked on. `App` holds that handle and a
+clone of the loop's sender, so a workspace root that moves — Open Folder (ADR-051) — ends
+the old watch and starts a new one without `execute_command` having to hand work back to
+`main`.
 
 Every git subprocess runs with `GIT_TERMINAL_PROMPT=0`, `GIT_OPTIONAL_LOCKS=0`,
 `GIT_EDITOR=true` and `-c core.pager=cat` plus a timeout — ten seconds for a local

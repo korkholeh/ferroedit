@@ -39,7 +39,7 @@ pub fn hit_test(app: &App, rects: &LayoutRects, event: MouseEvent) -> Option<Com
     // A dialog is modal: it takes a click on one of its buttons and swallows
     // everything else, the wheel included (SPEC §40).
     if rects.dialog.is_some() {
-        return dialog_click(rects, event.kind, at);
+        return dialog_click(app, rects, event.kind, at);
     }
 
     match event.kind {
@@ -52,7 +52,28 @@ pub fn hit_test(app: &App, rects: &LayoutRects, event: MouseEvent) -> Option<Com
     }
 }
 
-fn dialog_click(rects: &LayoutRects, kind: MouseEventKind, at: Position) -> Option<Command> {
+fn dialog_click(
+    app: &App,
+    rects: &LayoutRects,
+    kind: MouseEventKind,
+    at: Position,
+) -> Option<Command> {
+    // The wheel over a list body moves the selection, which is what scrolls it
+    // (ADR-051). Moving the highlight rather than the window alone is what the
+    // keyboard already does, and a picker whose selection scrolls out of sight
+    // would need a second rule for what Enter then means.
+    let over_list = |rect: Option<Rect>| rect.is_some_and(|list| list.contains(at));
+    if matches!(kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+        if !over_list(rects.dialog_list) && !over_list(rects.dialog_list_frame) {
+            return None;
+        }
+        let delta = if kind == MouseEventKind::ScrollUp {
+            -WHEEL_STEP
+        } else {
+            WHEEL_STEP
+        };
+        return Some(Command::DialogListMove(delta));
+    }
     if kind != MouseEventKind::Down(MouseButton::Left) {
         return None;
     }
@@ -67,8 +88,26 @@ fn dialog_click(rects: &LayoutRects, kind: MouseEventKind, at: Position) -> Opti
     // explorer's rows (ADR-020), a picker's confirm button is right there and
     // choosing a branch by accident is a checkout.
     let list = rects.dialog_list?;
-    list.contains(at)
-        .then(|| Command::DialogSelectItem((at.y - list.y) as usize))
+    if !list.contains(at) {
+        return None;
+    }
+    let row = (at.y - list.y) as usize;
+    // The browser is the one list where a second click on the row already
+    // selected opens it — walking into a directory is what browsing *is*, and
+    // a file manager where every step costs a click and a button press is not
+    // the convenience this dialog exists to be. It is the same "click twice"
+    // as a double-click without the timing: the first click still only selects,
+    // so nothing opens by surprise (ADR-051).
+    let already = app
+        .dialog
+        .as_ref()
+        .and_then(|dialog| dialog.browser())
+        .is_some_and(|browser| browser.selected() == browser.scroll() + row);
+    Some(if already {
+        Command::BrowserOpen
+    } else {
+        Command::DialogSelectItem(row)
+    })
 }
 
 /// Middle click closes the tab under the pointer (SPEC §11).
@@ -414,6 +453,90 @@ mod tests {
                 event.kind
             );
         }
+    }
+
+    /// The browser is the one dialog list you can be looking for something in,
+    /// so the wheel has to work over it (ADR-051).
+    #[test]
+    fn the_wheel_scrolls_the_browser_and_still_nothing_else_behind_it() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..40 {
+            std::fs::write(dir.path().join(format!("f{i:02}.txt")), "").unwrap();
+        }
+        let mut app = app();
+        app.dialog = Some(crate::app::dialog::DialogState::browse(
+            dir.path(),
+            FocusTarget::Editor,
+        ));
+        app.focus = FocusTarget::Dialog;
+        let r = rects(&app);
+        let list = r.dialog_list.expect("a list area");
+
+        assert_eq!(
+            hit_test(
+                &app,
+                &r,
+                wheel(MouseEventKind::ScrollDown, list.x + 2, list.y + 1)
+            ),
+            Some(Command::DialogListMove(WHEEL_STEP))
+        );
+        assert_eq!(
+            hit_test(
+                &app,
+                &r,
+                wheel(MouseEventKind::ScrollUp, list.x + 2, list.y + 1)
+            ),
+            Some(Command::DialogListMove(-WHEEL_STEP))
+        );
+        // The frame counts as the list: a wheel on the scrollbar is a wheel on
+        // the thing it scrolls.
+        let outline = r.dialog_list_frame.expect("a frame");
+        assert_eq!(
+            hit_test(
+                &app,
+                &r,
+                wheel(
+                    MouseEventKind::ScrollDown,
+                    outline.right() - 1,
+                    outline.y + 2
+                )
+            ),
+            Some(Command::DialogListMove(WHEEL_STEP))
+        );
+        assert_eq!(
+            hit_test(
+                &app,
+                &r,
+                wheel(MouseEventKind::ScrollDown, r.editor.x + 1, r.editor.y + 1)
+            ),
+            None,
+            "and the editor is still behind a modal window"
+        );
+    }
+
+    #[test]
+    fn a_second_click_on_the_selected_browser_row_opens_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        let mut app = app();
+        app.dialog = Some(crate::app::dialog::DialogState::browse(
+            dir.path(),
+            FocusTarget::Editor,
+        ));
+        app.focus = FocusTarget::Dialog;
+        let r = rects(&app);
+        let list = r.dialog_list.expect("a list area");
+
+        // The selection starts on row 0, so row 1 only selects.
+        assert_eq!(
+            hit_test(&app, &r, click(list.x + 2, list.y + 1)),
+            Some(Command::DialogSelectItem(1))
+        );
+        assert_eq!(
+            hit_test(&app, &r, click(list.x + 2, list.y)),
+            Some(Command::BrowserOpen),
+            "the row already selected is the one a click opens"
+        );
     }
 
     #[test]

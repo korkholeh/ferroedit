@@ -90,12 +90,27 @@ impl FsChange {
     }
 }
 
+/// A running watch. Dropping it stops one.
+///
+/// The `notify` watcher stays on this side of the thread boundary rather than
+/// inside the loop that reads it, which is what makes stopping possible at all:
+/// dropping it closes the channel the thread is blocked on, and the thread
+/// returns on the next wake-up. That matters since the workspace root can
+/// change while the editor runs (ADR-051) — a second watch started without
+/// ending the first would report the old tree's changes forever.
+#[derive(Debug)]
+pub struct Watch {
+    /// Never read; it is held for its `Drop`.
+    _watcher: notify::RecommendedWatcher,
+}
+
 /// Starts watching `root`, reporting into `tx`.
 ///
 /// An error here is not fatal and must not be: inotify watches are a per-user
 /// resource on Linux and a large tree can exhaust them. The editor runs without
 /// a watcher exactly as it did before this existed, and `F5` is still there.
-pub fn spawn(root: &Path, tx: Sender<AppEvent>) -> notify::Result<()> {
+#[must_use = "dropping the returned Watch stops the watch"]
+pub fn spawn(root: &Path, tx: Sender<AppEvent>) -> notify::Result<Watch> {
     let (fs_tx, fs_rx) = std::sync::mpsc::channel();
     let mut watcher = notify::recommended_watcher(move |event| {
         // A send failure means the loop below has gone; there is nothing to do
@@ -107,14 +122,9 @@ pub fn spawn(root: &Path, tx: Sender<AppEvent>) -> notify::Result<()> {
     let filter = Filter::new(root);
     thread::Builder::new()
         .name("watcher".into())
-        .spawn(move || {
-            // Moved in so it lives as long as the loop that reads it: dropping
-            // a `notify` watcher stops the watch.
-            let _watcher = watcher;
-            watch_loop(&fs_rx, &tx, &filter);
-        })
+        .spawn(move || watch_loop(&fs_rx, &tx, &filter))
         .expect("failed to spawn the watcher thread");
-    Ok(())
+    Ok(Watch { _watcher: watcher })
 }
 
 fn watch_loop(rx: &Receiver<NotifyResult<Event>>, tx: &Sender<AppEvent>, filter: &Filter) {
@@ -399,7 +409,8 @@ mod tests {
     fn a_write_on_disk_reaches_the_main_loop() {
         let dir = tempfile::tempdir().unwrap();
         let (tx, rx) = mpsc::channel();
-        spawn(dir.path(), tx).expect("a watcher over a temp directory");
+        // Bound, not dropped: dropping the handle is what ends a watch.
+        let _watch = spawn(dir.path(), tx).expect("a watcher over a temp directory");
 
         std::fs::write(dir.path().join("a.txt"), "hello\n").unwrap();
         let event = rx
@@ -409,5 +420,22 @@ mod tests {
             AppEvent::FilesChanged(change) => assert!(change.worktree && change.repository),
             other => panic!("expected a filesystem change, got {other:?}"),
         }
+    }
+
+    /// Dropping the handle is what lets the workspace root move without
+    /// leaving a thread behind, still reporting on the directory nobody is
+    /// looking at any more (ADR-051).
+    #[test]
+    fn dropping_the_handle_stops_the_watch() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let watch = spawn(dir.path(), tx).expect("a watcher over a temp directory");
+        drop(watch);
+
+        std::fs::write(dir.path().join("a.txt"), "hello\n").unwrap();
+        assert!(
+            rx.recv_timeout(Duration::from_secs(2)).is_err(),
+            "nothing is watching that directory any more"
+        );
     }
 }

@@ -1,8 +1,8 @@
 # Current Phase
 
 Phase 14 — Polish (in progress: help screen, status bar, watcher, undo budget,
-external reload, job cancellation, the combined-diff parser, the error-message pass
-the per-file quit walk and green CI done)
+external reload, job cancellation, the combined-diff parser, the error-message pass,
+the per-file quit walk, the Open browser and green CI done)
 
 ## Completed
 
@@ -712,13 +712,38 @@ the per-file quit walk and green CI done)
     first run `release.yml` ever had. Both Linux binaries were asserted static twice —
     once in CI on the commit, once here on the file that actually ships. No workflow
     artifact was produced by any of it, which is the point of ADR-049.
+  - **Open is a file browser** (ADR-051), replacing the text field ADR-029 chose. The
+    dialog opens at the workspace root and shows a `Filter:` field and the directory's
+    rows — `..`, then directories, then files — in a framed pane with a scrollbar. Open
+    walks into a directory or opens a file; Open Folder makes a directory the workspace,
+    which is the first time the root has been able to move at all. A click on the row
+    already selected opens it, and the wheel moves through them, so browsing costs one
+    click a step.
+  - The rows are a pane and not three lines of a prompt: twenty of them where the branch
+    picker gets ten, clamped to the terminal, with the scrollbar drawn only when there is
+    something to scroll. The window they scroll within comes out of the last drawn frame
+    (`App::dialog_rows`) rather than from a constant, the way `explorer_rows` already
+    did — a constant scrolls against a window a short terminal does not have.
+  - The filter is the old path field, not a second one: text that names a real path wins
+    over the selection, and text that matches nothing is read as the path of a file that
+    does not exist yet, so `Ctrl+O` + a pasted path still works exactly as before.
+    Typing aims the selection at the first row that is not `..`, without which Enter
+    after typing a name would have walked *up* a directory.
+  - Opening a file leaves the sidebar on the folder it is in: revealed in the tree when
+    it is already inside the workspace, and the workspace moves when it is not — the same
+    rule `ferroedit path/to/file` has followed since Phase 1.
+  - A moving root meant the watcher had to be stoppable. `watcher::spawn` now returns a
+    `Watch` that owns the `notify` watcher; dropping it closes the channel the thread is
+    blocked on. `App` holds that handle and a clone of the loop's sender, so switching
+    folders ends one watch and starts one — not two threads reporting on two trees.
+  - 712 tests (was 690).
 
 ## In progress
 
 - Phase 14. The help screen, the responsive status bar, the watcher, the undo budget,
   reloading a buffer whose file changed, cancelling a running job, the combined-diff
-  parser, the error-message pass and the per-file quit walk have landed; the README
-  screenshot has not.
+  parser, the error-message pass, the per-file quit walk and the Open browser have
+  landed; the README screenshot has not.
 
 ## Known issues
 

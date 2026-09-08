@@ -20,9 +20,6 @@ pub const MIN_HEIGHT: u16 = 8;
 /// Narrowest usable editor column count; the sidebar yields space first.
 const MIN_EDITOR_WIDTH: u16 = 20;
 
-/// The `* ` a list row keeps for git's current-branch marker.
-const LIST_MARKER_WIDTH: usize = 2;
-
 /// What a dialog costs besides its body: two border rows and the button row.
 ///
 /// It was a fixed `DIALOG_HEIGHT` until the branch picker, whose body is as
@@ -37,6 +34,10 @@ const DIALOG_MIN_WIDTH: u16 = 24;
 /// An input dialog is wider: a file name is typed into it, and a box that fits
 /// only "Create in src" would scroll after a dozen characters.
 const DIALOG_INPUT_MIN_WIDTH: u16 = 40;
+
+/// The browser is wider again: it shows a directory path, and a box that elides
+/// all but the last word of one is a box that cannot say where it is (ADR-051).
+const DIALOG_BROWSER_MIN_WIDTH: u16 = 52;
 
 /// Width of the ` Find: ` / ` Repl: ` labels at the left of each bar row.
 const SEARCH_LABEL_WIDTH: u16 = 7;
@@ -116,8 +117,12 @@ pub struct LayoutRects {
     /// One rect per dialog button, in button order.
     pub dialog_buttons: Vec<Rect>,
     /// The list body's own area, when the dialog has one: where the rows are
-    /// drawn, and what a click on a row is measured against.
+    /// drawn, and what a click on a row is measured against. For the browser
+    /// this is the *inside* of `dialog_list_frame`.
     pub dialog_list: Option<Rect>,
+    /// The box drawn around the browser's rows, scrollbar included (ADR-051).
+    /// `None` for the branch picker, whose rows sit directly on the dialog.
+    pub dialog_list_frame: Option<Rect>,
 }
 
 pub fn compute(area: Rect, app: &App) -> LayoutRects {
@@ -173,8 +178,16 @@ pub fn compute(area: Rect, app: &App) -> LayoutRects {
         (Some(rect), Some(state)) => button_rects(rect, &state.buttons),
         _ => Vec::new(),
     };
-    let dialog_list = match (dialog, app.dialog.as_ref()) {
-        (Some(rect), Some(state)) if !state.items().is_empty() => Some(list_rect(rect)),
+    // The browser's rows live inside a frame of their own; the picker's sit
+    // straight on the dialog, as they always have.
+    let framed = app.dialog.as_ref().is_some_and(|d| d.browser().is_some());
+    let dialog_list_frame = match (dialog, app.dialog.as_ref()) {
+        (Some(rect), Some(state)) if state.has_list_body() && framed => Some(list_rect(rect, true)),
+        _ => None,
+    };
+    let dialog_list = match (dialog_list_frame, dialog, app.dialog.as_ref()) {
+        (Some(frame), _, _) => Some(inset(frame)),
+        (None, Some(rect), Some(state)) if state.has_list_body() => Some(list_rect(rect, false)),
         _ => None,
     };
 
@@ -198,13 +211,27 @@ pub fn compute(area: Rect, app: &App) -> LayoutRects {
         dialog,
         dialog_buttons,
         dialog_list,
+        dialog_list_frame,
     }
 }
 
+/// One cell in on every side — the inside of a bordered box.
+fn inset(area: Rect) -> Rect {
+    Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    )
+}
+
 /// The rows between a list dialog's prompt and its buttons.
-fn list_rect(popup: Rect) -> Rect {
+///
+/// The browser has one more row above its list than the picker does — its
+/// filter field — so the rows start one lower.
+fn list_rect(popup: Rect, has_field: bool) -> Rect {
     // Border, prompt; and the button row plus the bottom border below.
-    let top = popup.y.saturating_add(2);
+    let top = popup.y.saturating_add(2 + u16::from(has_field));
     let height = popup.bottom().saturating_sub(2).saturating_sub(top);
     Rect::new(
         popup.x + 1,
@@ -406,20 +433,15 @@ fn dialog_rect(area: Rect, dialog: &DialogState) -> Rect {
         buttons_row_width(&dialog.buttons) as usize,
         // A branch name is the widest thing in a picker, and eliding one would
         // hide the part that distinguishes `feature/a` from `feature/b`.
-        dialog
-            .items()
-            .iter()
-            .map(|item| item.label.width() + LIST_MARKER_WIDTH)
-            .max()
-            .unwrap_or(0),
+        dialog.body_width(),
     ]
     .into_iter()
     .max()
     .unwrap_or(0) as u16;
-    let minimum = if dialog.field().is_some() {
-        DIALOG_INPUT_MIN_WIDTH
-    } else {
-        DIALOG_MIN_WIDTH
+    let minimum = match (dialog.browser().is_some(), dialog.field().is_some()) {
+        (true, _) => DIALOG_BROWSER_MIN_WIDTH,
+        (_, true) => DIALOG_INPUT_MIN_WIDTH,
+        _ => DIALOG_MIN_WIDTH,
     };
     // Two cells of border and two of padding.
     let width = content.saturating_add(4).max(minimum).min(area.width);
@@ -737,6 +759,32 @@ mod tests {
         assert!(popup.bottom() <= area.bottom(), "{popup:?} in {area:?}");
         for button in &rects.dialog_buttons {
             assert!(button.bottom() <= area.bottom(), "{button:?}");
+        }
+    }
+
+    /// The browser is the widest dialog and the tallest, so a 40x12 terminal
+    /// is where it would break first (ADR-051).
+    #[test]
+    fn the_browser_fits_the_smallest_terminal_it_can_be_drawn_in() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("README.md"), "").unwrap();
+
+        let mut app = App::fixture();
+        app.dialog = Some(crate::app::dialog::DialogState::browse(
+            dir.path(),
+            crate::app::focus::FocusTarget::Editor,
+        ));
+        let area = Rect::new(0, 0, 40, 12);
+        let rects = compute(area, &app);
+        let popup = rects.dialog.expect("a box");
+        assert!(popup.width <= area.width && popup.height <= area.height);
+
+        let list = rects.dialog_list.expect("a list area");
+        assert!(list.y >= popup.y + 3, "under the location and the filter");
+        assert!(list.bottom() <= popup.bottom() - 2, "above the button row");
+        for button in &rects.dialog_buttons {
+            assert!(popup.contains(ratatui::layout::Position::new(button.x, button.y)));
         }
     }
 

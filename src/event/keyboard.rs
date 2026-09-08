@@ -439,6 +439,11 @@ pub static INPUT_BINDINGS: &[Binding] = &[
         "Backspace",
     ),
     dialog(KeyCode::Delete, Command::DialogInputDelete, "Delete"),
+    // Up and Down are still the list's axis, as they are in the other table:
+    // the browser is a field *and* a list, and the caret does not want them
+    // (ADR-051). A field with no list under it ignores them.
+    dialog(KeyCode::Up, Command::DialogListMove(-1), "Up"),
+    dialog(KeyCode::Down, Command::DialogListMove(1), "Down"),
     // Tab is what reaches the buttons, since Left and Right are taken.
     dialog(KeyCode::Tab, Command::DialogMove(1), "Tab"),
     dialog(KeyCode::Enter, Command::DialogActivate, "Enter"),

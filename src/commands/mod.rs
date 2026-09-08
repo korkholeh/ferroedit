@@ -21,10 +21,10 @@ use crate::git::JobOutcome;
 /// and the name only exists once the user has typed one, so `SubmitInput`
 /// carries the operation and `ApplyFileOp` carries both.
 ///
-/// Phase 9 added the two that take a whole path rather than a name — Open and
-/// Save As. They are here rather than in a second enum because the dialog that
-/// asks for them is the same dialog: a prompt, a field, and a button that
-/// submits whatever is in it.
+/// Phase 9 added the one that takes a whole path rather than a name — Save As.
+/// It is here rather than in a second enum because the dialog that asks for it
+/// is the same dialog: a prompt, a field, and a button that submits whatever is
+/// in it. (Open was one of these too, until it became a browser — ADR-051.)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileOp {
     CreateFile {
@@ -35,10 +35,6 @@ pub enum FileOp {
     },
     Rename {
         path: PathBuf,
-    },
-    /// Opens the typed path, resolved against `base` when it is relative.
-    Open {
-        base: PathBuf,
     },
     /// Writes the tab at `index` to the typed path, resolved against `base`,
     /// and keeps editing it under the new name.
@@ -51,15 +47,14 @@ pub enum FileOp {
 impl FileOp {
     /// What the status bar says once it has happened.
     ///
-    /// Open and Save As never reach it — both report through the paths that
-    /// already say "Opened …" and "Saved …" — but the match is exhaustive so
-    /// that a new operation cannot be added without an answer here.
+    /// Save As never reaches it — it reports through the path that already
+    /// says "Saved …" — but the match is exhaustive so that a new operation
+    /// cannot be added without an answer here.
     pub fn past_tense(&self) -> &'static str {
         match self {
             Self::CreateFile { .. } => "Created",
             Self::CreateDirectory { .. } => "Created directory",
             Self::Rename { .. } => "Renamed to",
-            Self::Open { .. } => "Opened",
             Self::SaveAs { .. } => "Saved",
         }
     }
@@ -184,9 +179,18 @@ pub enum Command {
     RenamePrompt,
     /// Asks before deleting what is selected. `DeletePath` is what removes it.
     DeletePrompt,
-    /// Asks for a path to open (SPEC §6). The explorer is the way to browse;
-    /// this is the way to type a path that is not in the tree (ADR-029).
+    /// Opens the file browser (SPEC §6, ADR-051): a directory to walk, and a
+    /// filter field that also takes a typed path.
     OpenPrompt,
+    /// The browser's Open button: walk into the selected directory, or open the
+    /// selected file. Only that button carries it.
+    BrowserOpen,
+    /// The browser's Open Folder button: make the selected directory — or, when
+    /// a file is selected, the one being listed — the workspace.
+    BrowserOpenFolder,
+    /// Makes a directory the workspace: the explorer, the git panel and the
+    /// filesystem watcher all move to it (ADR-051). Open tabs are left alone.
+    OpenWorkspace(PathBuf),
     /// Asks for the path to write the active tab to, pre-filled with its own.
     SaveAsPrompt,
     /// Runs a file operation with whatever the open input dialog holds. Only a
@@ -423,7 +427,10 @@ impl Command {
             Self::NewDirectoryPrompt => "New folder — asks for a name".into(),
             Self::RenamePrompt => "Rename what is selected in the explorer".into(),
             Self::DeletePrompt => "Delete what is selected in the explorer (asks first)".into(),
-            Self::OpenPrompt => "Open a file — asks for a path".into(),
+            Self::OpenPrompt => "Open a file or a folder — browses for one".into(),
+            Self::BrowserOpen => "Open what is selected, or go into it".into(),
+            Self::BrowserOpenFolder => "Open the selected folder in the sidebar".into(),
+            Self::OpenWorkspace(_) => "Show a folder in the sidebar".into(),
             Self::SaveAsPrompt => "Save the active file under another path".into(),
             Self::SubmitInput(_) => "Run the dialog's operation on what was typed".into(),
             Self::ApplyFileOp(_, _) => "Run a file operation".into(),

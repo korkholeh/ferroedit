@@ -37,6 +37,15 @@ impl Workspace {
         Ok(Self { root })
     }
 
+    /// The workspace a directory is, once the editor is already running
+    /// (ADR-051). `from_arg`'s file-becomes-its-parent rule does not apply:
+    /// the caller has already decided which directory it means.
+    pub fn at(root: &Path) -> Self {
+        Self {
+            root: std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()),
+        }
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -92,6 +101,17 @@ mod tests {
     fn a_directory_argument_is_the_root_itself() {
         let dir = tempfile::tempdir().unwrap();
         let workspace = Workspace::from_arg(Some(dir.path())).unwrap();
+        assert_eq!(
+            workspace.root(),
+            std::fs::canonicalize(dir.path()).unwrap().as_path()
+        );
+    }
+
+    #[test]
+    fn a_directory_opened_later_is_canonicalised_like_an_argument() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        let workspace = Workspace::at(&dir.path().join("src/.."));
         assert_eq!(
             workspace.root(),
             std::fs::canonicalize(dir.path()).unwrap().as_path()

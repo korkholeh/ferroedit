@@ -84,6 +84,9 @@ fn run(cli: &Cli) -> Result<()> {
     // panel run anything at all.
     let (tx, rx) = mpsc::channel();
     app.git.attach_worker(tx.clone());
+    // Kept so the watcher can be started again on another root: Open Folder
+    // moves the workspace while the editor runs (ADR-051).
+    app.events = Some(tx.clone());
     // The git panel is drawn from a status, and a status is a subprocess: it
     // runs once here, before the first frame, and after that only when
     // something has changed (SPEC §30).
@@ -104,11 +107,16 @@ fn run(cli: &Cli) -> Result<()> {
     // on the status bar rather than printed over a terminal that is about to be
     // taken over. It is best effort: without it the editor behaves exactly as
     // it did before, and `F5` still re-reads everything (ADR-040).
-    if let Err(err) = filesystem::watcher::spawn(&root, tx.clone()) {
-        log::warn!("no filesystem watcher: {err}");
-        app.notifications.warning(format!(
-            "Not watching for outside changes: {err} — F5 refreshes"
-        ));
+    match filesystem::watcher::spawn(&root, tx.clone()) {
+        // Held on `App`, because dropping it is how a watch is ended — and one
+        // has to end whenever the workspace root moves.
+        Ok(watch) => app.watch = Some(watch),
+        Err(err) => {
+            log::warn!("no filesystem watcher: {err}");
+            app.notifications.warning(format!(
+                "Not watching for outside changes: {err} — F5 refreshes"
+            ));
+        }
     }
 
     spawn_input_thread(tx);
@@ -176,6 +184,8 @@ fn sync_editor_view(app: &mut App, rects: &LayoutRects) -> bool {
     // depends on as much as its height is (ADR-038).
     app.help_rows = rects.help.map_or(0, |help| help.height.saturating_sub(2));
     app.help_cols = rects.help.map_or(0, |help| help.width.saturating_sub(2));
+    // Already the inner area of the browser's frame, so nothing is subtracted.
+    app.dialog_rows = rects.dialog_list.map_or(0, |list| list.height);
 
     let view = EditorView {
         width: rects.editor.width,

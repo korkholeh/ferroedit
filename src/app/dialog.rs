@@ -11,6 +11,9 @@
 
 use std::path::Path;
 
+use unicode_width::UnicodeWidthStr;
+
+use crate::app::browser::Browser;
 use crate::app::focus::FocusTarget;
 use crate::app::input_field::InputField;
 use crate::commands::{Command, FileOp};
@@ -19,6 +22,18 @@ use crate::git::models::Branch;
 /// The most rows a list body shows at once. Past it the list scrolls: a picker
 /// taller than a short terminal is a dialog that cannot be closed.
 pub const MAX_LIST_ROWS: usize = 10;
+
+/// The two columns a list row keeps in front of its label: git's
+/// current-branch `*`, and the browser's directory marker.
+pub const LIST_MARKER_WIDTH: usize = 2;
+
+/// The most rows the browser shows at once, terminal permitting.
+///
+/// Twice the picker's, because it is a pane and not a prompt: a branch list is
+/// read once and answered, while a directory is *scanned* — and ten rows of a
+/// hundred-entry folder is a keyhole. The box is still clamped to the terminal,
+/// so a short one gives what it has.
+pub const MAX_BROWSER_ROWS: usize = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DialogButton {
@@ -67,6 +82,11 @@ pub enum DialogBody {
         selected: usize,
         scroll: usize,
     },
+    /// A directory listing and a filter field over it — the Open dialog
+    /// (ADR-051). It is the `List` body plus the two things browsing needs and
+    /// a picker does not: a place that changes under the rows, and text to
+    /// narrow them with.
+    Browser(Browser),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,23 +251,30 @@ impl DialogState {
         )
     }
 
-    /// Asks for a path to open (SPEC §6).
+    /// The Open dialog: a directory listing to walk, and a filter over it
+    /// (SPEC §6, ADR-051).
     ///
-    /// The explorer is how a project is browsed; this is how a path outside it
-    /// — or one nobody wants to click down to — is reached (ADR-029). A
-    /// relative answer is resolved against `base`, which is the directory the
-    /// prompt names.
-    pub fn open_path(base: &Path, return_focus: FocusTarget) -> Self {
-        Self::input(
-            "Open",
-            format!("Open in {}", display_name(base)),
-            "",
-            "Open",
-            FileOp::Open {
-                base: base.to_path_buf(),
-            },
+    /// It replaced a bare text field, which could only be used by someone who
+    /// already knew the path they wanted (ADR-029 chose that field when the
+    /// explorer was the only way to browse; it is no longer the only one).
+    /// The field is still here as the filter, and still resolves a typed path,
+    /// so nothing that worked before stopped working.
+    ///
+    /// Open is the default button: the dialog was opened on purpose, and
+    /// pressing Enter on a directory walks into it rather than committing to
+    /// anything.
+    pub fn browse(base: &Path, return_focus: FocusTarget) -> Self {
+        Self {
+            title: "Open".into(),
+            body: DialogBody::Browser(Browser::new(base)),
+            buttons: vec![
+                DialogButton::new("Open", Some(Command::BrowserOpen)),
+                DialogButton::new("Open Folder", Some(Command::BrowserOpenFolder)),
+                DialogButton::new("Cancel", None),
+            ],
+            selected: 0,
             return_focus,
-        )
+        }
     }
 
     /// Asks where to write a tab, pre-filled with the name it already has.
@@ -478,9 +505,13 @@ impl DialogState {
     /// The text field, when this dialog has one. `None` is what makes a
     /// confirmation dialog route Left and Right to its buttons instead of to a
     /// caret.
+    ///
+    /// The browser's filter is one: it is typed into with the same keys, which
+    /// is what makes `Ctrl+O` a box you can start typing a name into.
     pub fn field(&self) -> Option<&InputField> {
         match &self.body {
             DialogBody::Input { field, .. } => Some(field),
+            DialogBody::Browser(browser) => Some(&browser.filter),
             _ => None,
         }
     }
@@ -488,6 +519,21 @@ impl DialogState {
     pub fn field_mut(&mut self) -> Option<&mut InputField> {
         match &mut self.body {
             DialogBody::Input { field, .. } => Some(field),
+            DialogBody::Browser(browser) => Some(&mut browser.filter),
+            _ => None,
+        }
+    }
+
+    pub fn browser(&self) -> Option<&Browser> {
+        match &self.body {
+            DialogBody::Browser(browser) => Some(browser),
+            _ => None,
+        }
+    }
+
+    pub fn browser_mut(&mut self) -> Option<&mut Browser> {
+        match &mut self.body {
+            DialogBody::Browser(browser) => Some(browser),
             _ => None,
         }
     }
@@ -498,6 +544,64 @@ impl DialogState {
         match &self.body {
             DialogBody::Message(message) => message,
             DialogBody::Input { prompt, .. } | DialogBody::List { prompt, .. } => prompt,
+            // The browser's prompt is where it is, which changes under it.
+            DialogBody::Browser(_) => "",
+        }
+    }
+
+    /// The directory line a browser body shows in place of a prompt, elided
+    /// from the left so the end of a deep path — the part that says where you
+    /// are — is what survives a narrow box.
+    pub fn browser_location(&self, width: usize) -> Option<String> {
+        let browser = self.browser()?;
+        let full = browser.dir().display().to_string();
+        Some(match browser.error() {
+            Some(err) => elide_left(&format!("{full} — {err}"), width),
+            None => elide_left(&full, width),
+        })
+    }
+
+    /// How many rows the list body scrolls within.
+    ///
+    /// `drawn` is what the last frame gave it, which is the honest answer once
+    /// there has been a frame: the box is clamped to the terminal, so a
+    /// constant here would scroll against a window that does not exist. Before
+    /// the first frame — and in every headless test — the body's own maximum
+    /// stands in.
+    pub fn list_height(&self, drawn: u16) -> usize {
+        if drawn > 0 {
+            return drawn as usize;
+        }
+        match &self.body {
+            DialogBody::Browser(_) => MAX_BROWSER_ROWS,
+            _ => MAX_LIST_ROWS,
+        }
+    }
+
+    /// Whether the body draws a scrolling list of rows, which is what decides
+    /// whether the layout reserves an area for one.
+    pub fn has_list_body(&self) -> bool {
+        match &self.body {
+            DialogBody::List { items, .. } => !items.is_empty(),
+            DialogBody::Browser(_) => true,
+            _ => false,
+        }
+    }
+
+    /// The widest row the body wants to draw, so the box can be sized to it.
+    pub fn body_width(&self) -> usize {
+        match &self.body {
+            DialogBody::List { items, .. } => items
+                .iter()
+                .map(|item| item.label.width() + LIST_MARKER_WIDTH)
+                .max()
+                .unwrap_or(0),
+            DialogBody::Browser(browser) => browser
+                .rows()
+                .map(|entry| entry.name.width() + LIST_MARKER_WIDTH + usize::from(entry.is_dir))
+                .max()
+                .unwrap_or(0),
+            _ => 0,
         }
     }
 
@@ -536,7 +640,11 @@ impl DialogState {
     /// Clamped rather than wrapping, unlike the button row: a picker is a list
     /// like the explorer's, and a list that jumps from its last row to its
     /// first under a held key is a list that loses the reader's place.
-    pub fn step_list(&mut self, delta: i16) {
+    pub fn step_list(&mut self, delta: i16, height: usize) {
+        if let DialogBody::Browser(browser) = &mut self.body {
+            browser.step(delta, height);
+            return;
+        }
         let DialogBody::List {
             items,
             selected,
@@ -557,7 +665,7 @@ impl DialogState {
         } else {
             (*selected + delta as usize).min(last)
         };
-        let height = MAX_LIST_ROWS.min(items.len());
+        let height = height.max(1).min(items.len());
         if *selected < *scroll {
             *scroll = *selected;
         } else if *selected >= *scroll + height {
@@ -572,7 +680,11 @@ impl DialogState {
     /// see all of, so the scroll is added here rather than at the hit-test,
     /// which has the rects but not the dialog. A visible row is by definition
     /// already in view, so nothing has to be scrolled afterwards.
-    pub fn select_visible_row(&mut self, row: usize) {
+    pub fn select_visible_row(&mut self, row: usize, height: usize) {
+        if let DialogBody::Browser(browser) = &mut self.body {
+            browser.select_visible_row(row, height);
+            return;
+        }
         let DialogBody::List {
             items,
             selected,
@@ -597,6 +709,9 @@ impl DialogState {
             DialogBody::Message(_) => 2,
             DialogBody::Input { .. } => 2,
             DialogBody::List { items, .. } => 1 + MAX_LIST_ROWS.min(items.len()).max(1),
+            // The location line, the filter, the rows under both, and the two
+            // border rows of the frame the rows are drawn inside.
+            DialogBody::Browser(browser) => 4 + MAX_BROWSER_ROWS.min(browser.len()).max(1),
         }
     }
 
@@ -628,6 +743,29 @@ fn branch_count(count: usize) -> String {
 
 /// A path as the user should read it in a dialog: its own name, since the
 /// dialog is about one entry in a tree they are looking at.
+/// Keeps the last `width` columns of `text`, marking a cut with a leading `…`.
+///
+/// Left rather than right because this elides paths: `…/projects/ferroedit/src`
+/// still says where you are, and `/Users/someone/very/long/…` does not.
+fn elide_left(text: &str, width: usize) -> String {
+    if width == 0 || text.width() <= width {
+        return text.to_string();
+    }
+    let mut kept: Vec<char> = Vec::new();
+    let mut columns = 0;
+    for ch in text.chars().rev() {
+        let w = ch.to_string().width();
+        // One column is the `…` itself.
+        if columns + w > width.saturating_sub(1) {
+            break;
+        }
+        columns += w;
+        kept.push(ch);
+    }
+    kept.push('…');
+    kept.into_iter().rev().collect()
+}
+
 fn display_name(path: &Path) -> String {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -809,13 +947,13 @@ mod tests {
     #[test]
     fn the_list_selection_is_clamped_at_both_ends_rather_than_wrapping() {
         let mut dialog = DialogState::merge_branch(&branches(), FocusTarget::GitPanel);
-        dialog.step_list(-1);
+        dialog.step_list(-1, MAX_LIST_ROWS);
         assert_eq!(
             dialog.list_view().0,
             0,
             "the top does not wrap to the bottom"
         );
-        dialog.step_list(5);
+        dialog.step_list(5, MAX_LIST_ROWS);
         assert_eq!(dialog.list_view().0, 1, "and it stops at the last row");
     }
 
@@ -831,15 +969,15 @@ mod tests {
         let mut dialog = DialogState::switch_branch(&many, FocusTarget::GitPanel);
         assert_eq!(dialog.body_height(), 1 + MAX_LIST_ROWS);
 
-        dialog.step_list(MAX_LIST_ROWS as i16);
+        dialog.step_list(MAX_LIST_ROWS as i16, MAX_LIST_ROWS);
         let (selected, scroll) = dialog.list_view();
         assert_eq!(selected, MAX_LIST_ROWS);
         assert_eq!(scroll, 1, "the selected row is the last one shown");
 
         // A click reports a screen row, which is an index into what is drawn.
-        dialog.select_visible_row(0);
+        dialog.select_visible_row(0, MAX_LIST_ROWS);
         assert_eq!(dialog.list_view(), (1, 1));
-        dialog.select_visible_row(99);
+        dialog.select_visible_row(99, MAX_LIST_ROWS);
         assert_eq!(
             dialog.list_view().0,
             19,
@@ -873,8 +1011,8 @@ mod tests {
         let mut dialog = DialogState::unsaved_on_quit(0, "a.txt", 1, FocusTarget::Editor);
         assert!(dialog.items().is_empty());
         assert!(dialog.selected_item().is_none());
-        dialog.step_list(3);
-        dialog.select_visible_row(2);
+        dialog.step_list(3, MAX_LIST_ROWS);
+        dialog.select_visible_row(2, MAX_LIST_ROWS);
         assert_eq!(dialog.list_view(), (0, 0));
     }
 

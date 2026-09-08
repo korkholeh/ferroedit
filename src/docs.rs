@@ -151,9 +151,10 @@ table; a key with no entry there does nothing.
 ";
 
 const INPUT_DIALOG_NOTE: &str = "\
-A dialog that asks for a name or a path. These replace the plain dialog's keys while \
-the field is open, which is why `Left` moves a caret here and a button selection there \
-(ADR-019).";
+A dialog that asks for a name, and the Open browser, whose field filters its listing \
+(ADR-051). These replace the plain dialog's keys while the field is open, which is why \
+`Left` moves a caret here and a button selection there (ADR-019); `Up` and `Down` are \
+still the list's, since the caret has no use for them.";
 
 const TYPING: &str = "\
 ## Typing
@@ -176,7 +177,9 @@ const MOUSE: &str = "\
 
 Clicking a row of a dialog's list selects it without choosing it — unlike the explorer's \
 rows (ADR-020), the confirm button is right there and choosing a branch by accident is a \
-checkout. Clicking in the editor places the cursor, dragging selects, and a double-click selects \
+checkout. The Open browser is the exception: a click on the row that is *already* \
+selected walks into it, so browsing costs one click a step, and the wheel over its rows \
+moves the selection through them (ADR-051). Clicking in the editor places the cursor, dragging selects, and a double-click selects \
 the word under the pointer. The wheel scrolls the pane under the pointer without moving \
 the cursor. Clicking a tab switches to it; clicking its `×`, or middle-clicking it, \
 closes it. Clicking a row in the explorer opens the file or folds the directory in one \
