@@ -10,9 +10,10 @@ use crate::app::git::NotStarted;
 use crate::app::help::HelpState;
 use crate::app::input_field::InputField;
 use crate::app::search::SearchField;
-use crate::app::tabs::{active_after_close, Stale};
+use crate::app::tabs::{active_after_close, Stale, TabItem};
 use crate::app::{App, EditorView, LastClick, SidebarMode};
-use crate::commands::{Command, FileOp, MENUS};
+use crate::commands::{Command, FileOp, MenuEntry, MENUS};
+use crate::config::ThemeKind;
 use crate::editor::coords::VisualCol;
 use crate::editor::document::{DiskState, Document};
 use crate::filesystem;
@@ -56,7 +57,6 @@ pub fn execute_command(app: &mut App, command: Command) {
         }
 
         Command::MoveSidebarSelection(delta) => move_sidebar_selection(app, delta),
-        Command::SelectSidebarRow(row) => select_sidebar_row(app, row),
         Command::ScrollSidebar(delta) => scroll_sidebar(app, delta),
 
         Command::ExplorerActivate => explorer_activate(app),
@@ -73,6 +73,7 @@ pub fn execute_command(app: &mut App, command: Command) {
         Command::GitRefresh => git_rescan(app),
         Command::ExternalChange(change) => external_change(app, change),
         Command::GitOpenSelected => git_open_selected(app),
+        Command::GitDiffRow(row) => git_diff_row(app, row),
         Command::GitStage => git_stage_selected(app, true),
         Command::GitUnstage => git_stage_selected(app, false),
         Command::GitToggleStage => git_toggle_stage(app),
@@ -107,18 +108,18 @@ pub fn execute_command(app: &mut App, command: Command) {
         }
         Command::DiffScrollHorizontal(delta) => {
             let step = delta as isize * HORIZONTAL_STEP as isize;
-            if let Some(viewer) = app.diff.as_mut() {
+            if let Some(viewer) = app.diff_mut() {
                 viewer.scroll_h(step);
             }
         }
         Command::DiffHome => {
-            if let Some(viewer) = app.diff.as_mut() {
+            if let Some(viewer) = app.diff_mut() {
                 viewer.home();
             }
         }
         Command::DiffEnd => {
             let height = app.diff_rows as usize;
-            if let Some(viewer) = app.diff.as_mut() {
+            if let Some(viewer) = app.diff_mut() {
                 viewer.end(height);
             }
         }
@@ -282,12 +283,18 @@ pub fn execute_command(app: &mut App, command: Command) {
         Command::Cut => copy_selection(app, true),
         Command::Paste => paste(app),
 
+        Command::ScrollTabs(delta) => {
+            app.tab_scroll = shift(app.tab_scroll, delta, app.tabs.len().saturating_sub(1));
+        }
+
         Command::Save => match app.active_tab {
             Some(index) => {
                 save_tab(app, index);
             }
             None => app.notifications.warning("No file to save"),
         },
+
+        Command::SetTheme(kind) => set_theme(app, kind),
 
         Command::ShowAbout => show_about(app),
 
@@ -323,19 +330,24 @@ pub fn execute_command(app: &mut App, command: Command) {
         }
     }
 
-    // The diff viewer is drawn over the editor pane, and the help screen over
-    // the whole body, so neither can outlive its own focus: a command that
-    // moved focus to another pane would otherwise leave the user typing into a
-    // document they cannot see (ADR-037, ADR-038). The menu and a dialog draw
-    // *over* both and are allowed to, so neither closes either.
+    // The help screen is drawn over the whole body, so it cannot outlive its
+    // own focus: a command that moved focus to another pane would otherwise
+    // leave the user typing into a document they cannot see (ADR-038). The
+    // menu and a dialog draw *over* it and are allowed to, so neither closes
+    // it. A diff no longer needs the same rule — it is a tab of its own now,
+    // and a tab does not stop existing because the sidebar took focus.
     let covered = matches!(
         app.focus,
         FocusTarget::Editor | FocusTarget::Explorer | FocusTarget::GitPanel | FocusTarget::Search
     );
     if covered {
-        app.diff = None;
         app.help = None;
     }
+
+    // Which of the two pane focuses is right depends on what the tab strip is
+    // showing, and every command that switches tabs would otherwise have to
+    // say so itself (SPEC §26).
+    app.normalize_focus();
 
     // A file that moved under a modified buffer has a question attached to it,
     // and the moment to ask it is not the moment the watcher reported it: the
@@ -346,16 +358,33 @@ pub fn execute_command(app: &mut App, command: Command) {
     prompt_stale(app);
 }
 
+/// Switches the colour scheme and remembers it (SPEC §43).
+///
+/// The write happens here rather than at shutdown so the choice survives a
+/// crash and a `kill`, and a failure to write is reported rather than
+/// swallowed: a theme that silently forgets itself on the next start is worse
+/// than one that says it could not be saved.
+fn set_theme(app: &mut App, kind: ThemeKind) {
+    if app.settings.theme == kind {
+        return;
+    }
+    app.settings.theme = kind;
+    app.notifications.info(format!("{} theme", kind.label()));
+    if !app.persist_settings {
+        return;
+    }
+    if let Err(err) = app.settings.save() {
+        log::error!("could not save the settings: {err}");
+        app.notifications.warning(format!("Theme not saved: {err}"));
+    }
+}
+
 /// Opens the help screen on the key tables (SPEC §6).
 ///
-/// It covers the body, the diff viewer included, so opening one closes the
-/// other rather than leaving a pane drawn under something it cannot be read
-/// through. Pressing it again from inside is `HelpClose`, so this only ever
-/// opens.
+/// It covers the whole body, diff tab included, and is closed by `Esc` rather
+/// than by whatever takes focus next. Pressing `F1` again from inside is
+/// `HelpClose`, so this only ever opens.
 fn show_help(app: &mut App) {
-    // A help screen opened from the diff viewer returns where the viewer
-    // itself would have, because the viewer is about to be closed —
-    // `dialog_return_focus` already answers that, and the menu's case too.
     // A menu opened over the screen returns focus *to* the screen, which would
     // leave the second one closing onto nothing.
     let return_focus = match dialog_return_focus(app) {
@@ -363,7 +392,6 @@ fn show_help(app: &mut App) {
         other => other,
     };
     app.menu.open = None;
-    app.diff = None;
     app.help = Some(HelpState::new(return_focus));
     app.focus = FocusTarget::Help;
 }
@@ -562,7 +590,7 @@ fn ready_to_replace(app: &mut App) -> bool {
 /// "Save" needs: a tab whose save failed must stay open, or the edit the user
 /// asked to keep is the one they lose.
 fn save_tab(app: &mut App, index: usize) -> bool {
-    let Some(tab) = app.tabs.get_mut(index) else {
+    let Some(tab) = app.editor_at_mut(index) else {
         app.notifications.warning("No file to save");
         return false;
     };
@@ -572,7 +600,7 @@ fn save_tab(app: &mut App, index: usize) -> bool {
         Ok(()) => {
             // Whatever the file was before, it is the buffer now: a save
             // answers the "changed on disk" question by overwriting it.
-            if let Some(tab) = app.tabs.get_mut(index) {
+            if let Some(tab) = app.editor_at_mut(index) {
                 tab.mark_stale(None);
             }
             // What was just written is a change git has an opinion about.
@@ -599,7 +627,7 @@ fn save_tab(app: &mut App, index: usize) -> bool {
 ///
 /// Returns whether the buffer is now what is on disk.
 fn reload_tab(app: &mut App, index: usize, quiet: bool) -> bool {
-    let Some(tab) = app.tabs.get_mut(index) else {
+    let Some(tab) = app.editor_at_mut(index) else {
         app.notifications.warning("No file to reload");
         return false;
     };
@@ -611,7 +639,9 @@ fn reload_tab(app: &mut App, index: usize, quiet: bool) -> bool {
             // The pane was scrolled for a document that may have been longer,
             // and the caret has just been clamped into a different one.
             let view = app.editor_view;
-            app.tabs[index].follow_cursor(view);
+            if let Some(tab) = app.editor_at_mut(index) {
+                tab.follow_cursor(view);
+            }
             if !quiet {
                 app.notifications.info(format!("Reloaded {title}"));
             }
@@ -634,7 +664,7 @@ fn reload_active(app: &mut App) {
         app.notifications.warning("No file to reload");
         return;
     };
-    let Some(tab) = app.tabs.get(index) else {
+    let Some(tab) = app.editor_at(index) else {
         return;
     };
     if !tab.document.is_dirty() {
@@ -653,7 +683,7 @@ fn reload_active(app: &mut App) {
 /// The "Keep Mine" answer: the buffer stands, and the question is not asked
 /// again until the file moves once more.
 fn keep_buffer(app: &mut App, index: usize) {
-    if let Some(tab) = app.tabs.get_mut(index) {
+    if let Some(tab) = app.editor_at_mut(index) {
         tab.mark_stale(None);
     }
 }
@@ -666,31 +696,44 @@ fn keep_buffer(app: &mut App, index: usize) {
 /// filesystem event is allowed to spend it.
 fn check_open_files(app: &mut App) {
     let view = app.editor_view;
-    for index in 0..app.tabs.len() {
-        let tab = &app.tabs[index];
+    // Diff tabs are skipped: there is no buffer in one to lose, and the diff
+    // itself is re-read by `reread_diff` on the same event.
+    let indices: Vec<usize> = app.editors().map(|(index, _)| index).collect();
+    for index in indices {
+        let Some(tab) = app.editor_at(index) else {
+            continue;
+        };
         let state = tab.document.disk_state();
+        let dirty = tab.document.is_dirty();
         if matches!(state, DiskState::Same | DiskState::Untracked) {
-            app.tabs[index].mark_stale(None);
+            if let Some(tab) = app.editor_at_mut(index) {
+                tab.mark_stale(None);
+            }
             continue;
         }
-        if tab.document.is_dirty() || state == DiskState::Gone {
+        if dirty || state == DiskState::Gone {
             let stale = match state {
                 DiskState::Gone => Stale::Gone,
                 _ => Stale::Changed,
             };
-            let news = app.tabs[index].mark_stale(Some(stale));
+            let Some(tab) = app.editor_at_mut(index) else {
+                continue;
+            };
+            let news = tab.mark_stale(Some(stale));
             // A file that vanished under a clean buffer has no question to ask
             // — nothing would be lost by keeping it and there is nothing to
             // reload from — so it is said once and marked, not prompted.
-            if news && !app.tabs[index].document.is_dirty() {
-                let title = app.tabs[index].document.title().to_string();
-                app.tabs[index].asked = true;
+            if news && !dirty {
+                tab.asked = true;
+                let title = tab.document.title().to_string();
                 app.notifications
                     .warning(format!("{title} is gone from disk"));
             }
             continue;
         }
-        let tab = &mut app.tabs[index];
+        let Some(tab) = app.editor_at_mut(index) else {
+            continue;
+        };
         if tab.document.reload().is_err() {
             // Unreadable now — a partial write, or a file replaced by a
             // directory. It is not this tab's last word: the next event over
@@ -714,7 +757,7 @@ fn prompt_stale(app: &mut App) {
         return;
     }
     let Some(index) = app.active_tab else { return };
-    let Some(tab) = app.tabs.get(index) else {
+    let Some(tab) = app.editor_at(index) else {
         return;
     };
     let (Some(stale), false) = (tab.stale, tab.asked) else {
@@ -722,7 +765,9 @@ fn prompt_stale(app: &mut App) {
     };
     let title = tab.document.title().to_string();
     let return_focus = dialog_return_focus(app);
-    app.tabs[index].asked = true;
+    if let Some(tab) = app.editor_at_mut(index) {
+        tab.asked = true;
+    }
     open_dialog(
         app,
         DialogState::file_changed(index, &title, stale == Stale::Gone, return_focus),
@@ -734,12 +779,12 @@ fn prompt_stale(app: &mut App) {
 /// `is_dirty` is history-aware (ADR-014), so a file edited and then undone back
 /// to what is on disk does not hold up the exit.
 fn quit(app: &mut App) {
-    let dirty = app.tabs.iter().filter(|t| t.document.is_dirty()).count();
-    let Some(index) = app.tabs.iter().position(|t| t.document.is_dirty()) else {
+    let dirty = app.tabs.iter().filter(|t| t.is_dirty()).count();
+    let Some(index) = app.tabs.iter().position(|t| t.is_dirty()) else {
         app.should_quit = true;
         return;
     };
-    let title = app.tabs[index].document.title().to_string();
+    let title = app.tabs[index].title();
     let return_focus = dialog_return_focus(app);
     open_dialog(
         app,
@@ -752,11 +797,11 @@ fn close_tab(app: &mut App, index: usize) {
     let Some(tab) = app.tabs.get(index) else {
         return;
     };
-    if !tab.document.is_dirty() {
+    if !tab.is_dirty() {
         remove_tab(app, index);
         return;
     }
-    let title = tab.document.title().to_string();
+    let title = tab.title();
     let return_focus = dialog_return_focus(app);
     open_dialog(
         app,
@@ -774,8 +819,7 @@ fn remove_tab(app: &mut App, index: usize) {
     }
     let closed = app.tabs.remove(index);
     app.active_tab = active_after_close(app.active_tab, index, app.tabs.len());
-    app.notifications
-        .info(format!("Closed {}", closed.document.title()));
+    app.notifications.info(format!("Closed {}", closed.title()));
     // The tab that came forward was last scrolled for whatever the pane size
     // was then, which need not be what it is now.
     let view = app.editor_view;
@@ -1196,11 +1240,14 @@ fn open_workspace(app: &mut App, path: &Path) {
 /// The prompt starts in the file's own directory under its own name, so
 /// confirming it unchanged is a plain save rather than a surprise.
 fn prompt_save_as(app: &mut App) {
-    let Some(index) = app.active_tab.filter(|i| *i < app.tabs.len()) else {
+    let Some(index) = app.active_tab else {
         app.notifications.warning("No file to save");
         return;
     };
-    let document = &app.tabs[index].document;
+    let Some(document) = app.editor_at(index).map(|tab| &tab.document) else {
+        app.notifications.warning("No file to save");
+        return;
+    };
     let (base, name) = match document.path() {
         Some(path) => (
             path.parent()
@@ -1322,7 +1369,10 @@ fn save_tab_as(app: &mut App, index: usize, base: &Path, typed: &str) {
             return;
         }
     }
-    app.tabs[index].document.set_path(path.clone());
+    let Some(tab) = app.editor_at_mut(index) else {
+        return;
+    };
+    tab.document.set_path(path.clone());
     if save_tab(app, index) {
         // The file may be new, and the explorer is showing the directory it
         // landed in.
@@ -1367,7 +1417,7 @@ fn delete_path(app: &mut App, path: &Path) {
 /// Without this, saving a file that was renamed underneath the editor would
 /// write the old name back and leave two copies on disk.
 fn rename_open_tabs(app: &mut App, old: &Path, new: &Path) {
-    for tab in &mut app.tabs {
+    for tab in app.editors_mut() {
         let Some(path) = tab.document.path() else {
             continue;
         };
@@ -1441,9 +1491,9 @@ fn follow_git(app: &mut App) {
 fn refresh_git(app: &mut App) {
     app.git.refresh();
     follow_git(app);
-    // An open viewer is showing one of the files that status just re-read, so
-    // it follows it rather than keeping a diff that is no longer true.
-    reread_diff(app, true);
+    // Every open diff is of a file that status just re-read, so they follow it
+    // rather than keeping a diff that is no longer true.
+    reread_diffs(app);
 }
 
 /// The Git menu's Refresh, and `F5` in the panel: looks for the repository
@@ -1776,9 +1826,50 @@ fn open_diff(app: &mut App) {
     let Some(diff) = read_diff(app, &path, side) else {
         return;
     };
-    let return_focus = dialog_return_focus(app);
-    app.diff = Some(DiffState::new(&path, side, diff, return_focus));
+    show_diff(app, DiffState::new(&path, side, diff));
+}
+
+/// Puts a diff in front of the user, in a tab of its own (SPEC §36).
+///
+/// A file already open as a diff reuses its tab rather than opening a second
+/// one, for the same reason a file already open in the editor does: two tabs
+/// of the same thing are two places to keep in step, and the user asked to see
+/// the diff, not to collect them. The side is part of what a tab *shows* and
+/// not of which tab it is, so re-opening the staged side of a file whose
+/// worktree diff is open turns that tab over rather than adding a third.
+fn show_diff(app: &mut App, diff: DiffState) {
+    let existing = app
+        .tabs
+        .iter()
+        .position(|item| item.diff().is_some_and(|open| open.path == diff.path));
+    let index = match existing {
+        Some(index) => {
+            app.tabs[index] = TabItem::Diff(diff);
+            index
+        }
+        None => {
+            app.tabs.push(TabItem::Diff(diff));
+            app.tabs.len() - 1
+        }
+    };
+    app.active_tab = Some(index);
     app.focus = FocusTarget::Diff;
+}
+
+/// Selects a row of the git panel and opens that file's diff — one click.
+///
+/// The panel takes focus first, which is both what a click on a pane does and
+/// what makes `open_diff` read the row rather than the file being edited.
+fn git_diff_row(app: &mut App, row: usize) {
+    app.sidebar.mode = SidebarMode::Git;
+    app.focus = FocusTarget::GitPanel;
+    select_sidebar_row(app, row);
+    open_diff(app);
+    // Focus stays in the panel, unlike the `d` key's: the point of clicking
+    // down a list of changed files is to read them one after another, and a
+    // click that moved focus into the diff would cost a click back for every
+    // file — and take `Space` away from the row the pointer is on.
+    app.focus = FocusTarget::GitPanel;
 }
 
 /// The file a diff would be of, or `None` after saying why there is not one.
@@ -1846,33 +1937,50 @@ fn read_diff(app: &mut App, path: &Path, side: DiffSide) -> Option<crate::git::D
 /// the other one holds nothing, which is the common case for a file that is
 /// only half staged.
 fn toggle_diff_side(app: &mut App) {
-    let Some(viewer) = app.diff.as_ref() else {
+    let Some(viewer) = app.diff() else {
         return;
     };
-    let (path, side, return_focus) = (
-        viewer.path.clone(),
-        viewer.side.other(),
-        viewer.return_focus,
-    );
+    let (path, side) = (viewer.path.clone(), viewer.side.other());
     let Some(diff) = read_diff(app, &path, side) else {
         return;
     };
-    app.diff = Some(DiffState::new(&path, side, diff, return_focus));
+    show_diff(app, DiffState::new(&path, side, diff));
 }
 
-/// Re-runs the diff on screen.
+/// Re-runs the diff in the tab in front, and says so when it has emptied.
 ///
-/// `quiet` is the automatic refresh after something changed the repository:
-/// the viewer follows the file it is showing, and a diff that has nothing left
-/// in it closes rather than lying about a change that has been staged or
-/// undone. `F5` is the loud form, which says so.
+/// `F5` in a diff tab. The quiet form that runs after every git operation is
+/// `reread_diffs`, which does the same for every diff tab at once.
 fn reread_diff(app: &mut App, quiet: bool) {
-    let Some(viewer) = app.diff.as_ref() else {
+    let Some(index) = app.active_tab else { return };
+    reread_diff_at(app, index, quiet);
+}
+
+/// Follows the repository in every open diff tab (SPEC §36).
+///
+/// Diffs are tabs now, so several can be open at once and the one in front is
+/// not the only one that has gone stale: staging a file changes the answer for
+/// its tab whether or not that tab is the one being read. A tab whose diff has
+/// emptied — everything in it staged, or undone — closes rather than going on
+/// showing a change that is no longer there.
+///
+/// Backwards, because closing a tab shifts every index after it.
+fn reread_diffs(app: &mut App) {
+    for index in (0..app.tabs.len()).rev() {
+        if app.tabs[index].diff().is_some() {
+            reread_diff_at(app, index, true);
+        }
+    }
+}
+
+/// Re-reads the diff in one tab. An empty answer closes that tab.
+fn reread_diff_at(app: &mut App, index: usize, quiet: bool) {
+    let Some(viewer) = app.tabs.get(index).and_then(TabItem::diff) else {
         return;
     };
     let (path, side) = (viewer.path.clone(), viewer.side);
     let Some(repo) = app.git.service().cloned() else {
-        close_diff(app);
+        remove_tab(app, index);
         return;
     };
     match repo.diff(&path, side) {
@@ -1881,18 +1989,18 @@ fn reread_diff(app: &mut App, quiet: bool) {
                 app.notifications
                     .warning(format!("{} {}", side.nothing(), path.display()));
             }
-            close_diff(app);
+            remove_tab(app, index);
         }
         Ok(diff) => {
             let height = app.diff_rows as usize;
-            if let Some(viewer) = app.diff.as_mut() {
+            if let Some(viewer) = app.tabs.get_mut(index).and_then(TabItem::diff_mut) {
                 viewer.diff = diff;
                 viewer.clamp(height);
             }
         }
         Err(err) => {
-            // The viewer keeps what it has: a diff that failed to re-read is
-            // stale, and a pane that vanished would be worse than one that is.
+            // The tab keeps what it has: a diff that failed to re-read is
+            // stale, and a tab that vanished would be worse than one that is.
             log::error!("could not re-read the diff of {}: {err}", path.display());
             if !quiet {
                 app.notifications
@@ -1904,14 +2012,16 @@ fn reread_diff(app: &mut App, quiet: bool) {
 
 fn scroll_diff(app: &mut App, delta: isize) {
     let height = app.diff_rows as usize;
-    if let Some(viewer) = app.diff.as_mut() {
+    if let Some(viewer) = app.diff_mut() {
         viewer.scroll_by(delta, height);
     }
 }
 
+/// `Esc` in a diff tab closes the tab, which is what `Ctrl+W` would do too.
 fn close_diff(app: &mut App) {
-    if let Some(viewer) = app.diff.take() {
-        app.focus = viewer.return_focus;
+    let Some(index) = app.active_tab else { return };
+    if app.tabs[index].diff().is_some() {
+        remove_tab(app, index);
     }
 }
 
@@ -1949,15 +2059,39 @@ fn step_menu(app: &mut App, delta: i16) {
     app.menu.item = 0;
 }
 
+/// Moves the selection by `delta` rows, stepping over the rules.
+///
+/// A separator is a row of the popup — it takes a line and it is counted by
+/// the geometry — but it is not somewhere the selection may rest, so the step
+/// keeps going in the direction it was asked for until it lands on an entry.
+/// The bound on the walk is the popup's own length: a menu of nothing but
+/// rules cannot exist, and if one did this would still terminate.
 fn step_menu_item(app: &mut App, delta: i16) {
     let Some(open) = app.menu.open else { return };
-    let len = MENUS[open].items.len() as i16;
-    app.menu.item = (app.menu.item as i16 + delta).rem_euclid(len) as usize;
+    let items = MENUS[open].items;
+    let len = items.len() as i16;
+    if len == 0 {
+        return;
+    }
+    let step = if delta < 0 { -1 } else { 1 };
+    let mut next = app.menu.item as i16;
+    for _ in 0..len {
+        next = (next + step).rem_euclid(len);
+        if !items[next as usize].is_separator() {
+            break;
+        }
+    }
+    app.menu.item = next as usize;
 }
 
 fn activate_menu_item(app: &mut App) {
     let Some(open) = app.menu.open else { return };
-    let Some(item) = MENUS[open].items.get(app.menu.item) else {
+    // A click on a rule resolves to nothing, which is the whole point of one.
+    let Some(item) = MENUS[open]
+        .items
+        .get(app.menu.item)
+        .and_then(MenuEntry::item)
+    else {
         return;
     };
     let command = item.command.clone();
@@ -2676,7 +2810,7 @@ mod tests {
     #[test]
     fn quit_sets_the_flag_when_nothing_would_be_lost() {
         let mut app = app();
-        app.tabs.retain(|tab| !tab.document.is_dirty());
+        app.tabs.retain(|tab| !tab.is_dirty());
         assert!(!app.should_quit);
         execute_command(&mut app, Command::Quit);
         assert!(app.should_quit);
@@ -2851,12 +2985,12 @@ mod tests {
     #[test]
     fn the_file_quit_menu_item_quits() {
         let mut app = app();
-        app.tabs.retain(|tab| !tab.document.is_dirty());
+        app.tabs.retain(|tab| !tab.is_dirty());
         execute_command(&mut app, Command::MenuOpen(0));
         let quit_index = MENUS[0]
             .items
             .iter()
-            .position(|i| i.command == Command::Quit)
+            .position(|i| i.item().map(|i| &i.command) == Some(&Command::Quit))
             .unwrap();
         execute_command(&mut app, Command::MenuActivateItem(quit_index));
         assert!(app.should_quit);
@@ -2907,7 +3041,7 @@ mod tests {
         let undo_index = MENUS[edit_menu]
             .items
             .iter()
-            .position(|i| i.command == Command::Undo)
+            .position(|i| i.item().map(|i| &i.command) == Some(&Command::Undo))
             .expect("an Undo item");
         execute_command(&mut app, Command::MenuOpen(edit_menu));
         execute_command(&mut app, Command::MenuActivateItem(undo_index));
@@ -3172,7 +3306,7 @@ mod tests {
         let cut = MENUS[edit]
             .items
             .iter()
-            .position(|i| i.command == Command::Cut)
+            .position(|i| i.item().map(|i| &i.command) == Some(&Command::Cut))
             .unwrap();
         execute_command(&mut app, Command::MenuOpen(edit));
         execute_command(&mut app, Command::MenuActivateItem(cut));
@@ -3273,7 +3407,7 @@ mod tests {
 
         assert!(app.dialog.is_none());
         assert_eq!(app.tabs.len(), 2);
-        assert!(app.tabs.iter().all(|t| t.document.title() != "editor.rs"));
+        assert!(app.tabs.iter().all(|t| t.title() != "editor.rs"));
     }
 
     #[test]
@@ -3302,7 +3436,7 @@ mod tests {
         execute_command(&mut app, Command::DialogActivate);
 
         assert_eq!(app.tabs.len(), 3, "the tab is still open");
-        assert!(app.tabs[1].document.is_dirty());
+        assert!(app.tab_mut(1).document.is_dirty());
         let notification = app.notifications.current().unwrap();
         assert_eq!(
             notification.kind,
@@ -3318,7 +3452,7 @@ mod tests {
         // The fixture's second tab is dirty from an edit and its own undo.
         execute_command(&mut app, Command::Undo);
         execute_command(&mut app, Command::Undo);
-        assert!(!app.tabs[1].document.is_dirty(), "ADR-014");
+        assert!(!app.tab_mut(1).document.is_dirty(), "ADR-014");
         execute_command(&mut app, Command::CloseTab);
         assert!(app.dialog.is_none());
         assert_eq!(app.tabs.len(), 2);
@@ -3330,7 +3464,7 @@ mod tests {
         let close = MENUS[0]
             .items
             .iter()
-            .position(|i| i.command == Command::CloseTab)
+            .position(|i| i.item().map(|i| &i.command) == Some(&Command::CloseTab))
             .expect("a Close Tab item");
         execute_command(&mut app, Command::MenuOpen(0));
         execute_command(&mut app, Command::MenuActivateItem(close));
@@ -3345,7 +3479,7 @@ mod tests {
         let close = MENUS[0]
             .items
             .iter()
-            .position(|i| i.command == Command::CloseTab)
+            .position(|i| i.item().map(|i| &i.command) == Some(&Command::CloseTab))
             .unwrap();
         execute_command(&mut app, Command::MenuOpen(0));
         execute_command(&mut app, Command::MenuActivateItem(close));
@@ -3362,8 +3496,11 @@ mod tests {
             width: 40,
             height: 3,
         };
-        app.tabs[1] = crate::app::Tab::scratch("long.txt", &"line\n".repeat(40));
-        app.tabs[1].document.goto_line(30);
+        app.tabs[1] = crate::app::TabItem::editing(crate::app::Tab::scratch(
+            "long.txt",
+            &"line\n".repeat(40),
+        ));
+        app.tab_mut(1).document.goto_line(30);
         execute_command(&mut app, Command::CloseTabAt(0));
         assert_eq!(app.active_tab, Some(0));
         assert!(
@@ -3501,7 +3638,7 @@ mod tests {
             .iter()
             .position(|row| row == name)
             .unwrap_or_else(|| panic!("{name} is not in the tree: {:?}", rows(app)));
-        execute_command(app, Command::SelectSidebarRow(index));
+        select_sidebar_row(app, index);
     }
 
     #[test]
@@ -3693,7 +3830,7 @@ mod tests {
         assert!(dir.path().join("README.st").exists());
         assert!(!dir.path().join("README.md").exists());
         assert_eq!(
-            app.tabs[0].document.path().unwrap(),
+            app.tab_mut(0).document.path().unwrap(),
             root_of(&dir).join("README.st"),
             "the open tab points at the file, not at the name it used to have"
         );
@@ -3717,7 +3854,7 @@ mod tests {
         execute_command(&mut app, Command::DialogActivate);
 
         assert_eq!(
-            app.tabs[0].document.path().unwrap(),
+            app.tab_mut(0).document.path().unwrap(),
             root_of(&dir).join("lib/main.rs")
         );
     }
@@ -3823,7 +3960,10 @@ mod tests {
     /// fixture's three tabs would only make the assertions about tab indices.
     fn searchable(text: &str) -> App {
         let mut app = App::fixture();
-        app.tabs = vec![crate::app::Tab::scratch("notes.txt", text)];
+        app.tabs = vec![crate::app::TabItem::editing(crate::app::Tab::scratch(
+            "notes.txt",
+            text,
+        ))];
         app.active_tab = Some(0);
         app
     }
@@ -4415,7 +4555,7 @@ mod tests {
             "# rewritten elsewhere"
         );
         assert!(app.dialog.is_none(), "nothing to ask about");
-        assert!(app.tabs[0].stale.is_none());
+        assert!(app.tab_mut(0).stale.is_none());
     }
 
     /// The other half of the same rule: a buffer with unsaved work in it is
@@ -4431,7 +4571,7 @@ mod tests {
         std::fs::write(&path, "# rewritten elsewhere\n").unwrap();
         worktree_changed(&mut app);
 
-        assert_eq!(app.tabs[0].stale, Some(Stale::Changed));
+        assert_eq!(app.tab_mut(0).stale, Some(Stale::Changed));
         assert!(
             app.active().unwrap().document.line(0).starts_with("mine"),
             "the buffer is untouched"
@@ -4467,7 +4607,7 @@ mod tests {
         worktree_changed(&mut app);
         assert!(app.dialog.is_none(), "the question is not re-opened");
         assert_eq!(
-            app.tabs[0].stale,
+            app.tab_mut(0).stale,
             Some(Stale::Changed),
             "but it is still marked"
         );
@@ -4485,7 +4625,7 @@ mod tests {
 
         execute_command(&mut app, Command::DialogActivate);
         assert!(app.dialog.is_none());
-        assert!(app.tabs[0].stale.is_none(), "answered");
+        assert!(app.tab_mut(0).stale.is_none(), "answered");
         assert!(app.active().unwrap().document.line(0).starts_with("mine"));
     }
 
@@ -4502,7 +4642,7 @@ mod tests {
         execute_command(&mut app, Command::DialogMove(1));
         execute_command(&mut app, Command::DialogActivate);
         assert!(app.dialog.is_none());
-        assert!(app.tabs[0].stale.is_none());
+        assert!(app.tab_mut(0).stale.is_none());
         assert_eq!(app.active().unwrap().document.line(0), "# theirs");
 
         execute_command(&mut app, Command::Undo);
@@ -4526,7 +4666,7 @@ mod tests {
         worktree_changed(&mut app);
 
         assert!(app.dialog.is_none());
-        assert_eq!(app.tabs[0].stale, Some(Stale::Gone));
+        assert_eq!(app.tab_mut(0).stale, Some(Stale::Gone));
         assert_eq!(
             app.notifications.current().unwrap().message,
             "README.md is gone from disk"
@@ -4570,7 +4710,7 @@ mod tests {
         execute_command(&mut app, Command::DialogCancel);
 
         execute_command(&mut app, Command::Save);
-        assert!(app.tabs[0].stale.is_none());
+        assert!(app.tab_mut(0).stale.is_none());
         assert!(
             std::fs::read_to_string(&path).unwrap().starts_with("mine"),
             "and the file is what the buffer was"
@@ -4593,7 +4733,7 @@ mod tests {
         std::fs::write(&readme, "# theirs\n").unwrap();
         worktree_changed(&mut app);
         assert!(app.dialog.is_none(), "the tab on screen did not move");
-        assert_eq!(app.tabs[0].stale, Some(Stale::Changed));
+        assert_eq!(app.tab_mut(0).stale, Some(Stale::Changed));
 
         execute_command(&mut app, Command::PrevTab);
         let dialog = app.dialog.as_ref().expect("asked once it is in front");
@@ -4791,7 +4931,7 @@ mod tests {
         let item = MENUS[menu]
             .items
             .iter()
-            .position(|i| i.label == "Shortcuts")
+            .position(|i| i.item().is_some_and(|i| i.label == "Shortcuts"))
             .unwrap();
         execute_command(&mut app, Command::MenuOpen(menu));
         execute_command(&mut app, Command::MenuActivateItem(item));
@@ -4861,7 +5001,10 @@ mod tests {
         // no entry is a hole. The Git four and the help screen report
         // themselves; nothing else may.
         for (menu_index, menu) in MENUS.iter().enumerate() {
-            for (item_index, item) in menu.items.iter().enumerate() {
+            for (item_index, entry) in menu.items.iter().enumerate() {
+                // A rule is not an entry: activating one is a no-op that
+                // deliberately leaves the menu open (see the test below).
+                let Some(item) = entry.item() else { continue };
                 let dir = project();
                 let mut app = App::fixture_in(dir.path());
                 app.open_path(&dir.path().join("src/main.rs"), None)
@@ -4876,6 +5019,96 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A click on a rule does nothing at all — the menu stays open, so the
+    /// user can go on to the entry they were aiming for.
+    #[test]
+    fn activating_a_rule_leaves_the_menu_open() {
+        let (menu_index, rule_index) = MENUS
+            .iter()
+            .enumerate()
+            .find_map(|(m, menu)| {
+                menu.items
+                    .iter()
+                    .position(MenuEntry::is_separator)
+                    .map(|i| (m, i))
+            })
+            .expect("some menu has a rule in it");
+
+        let mut app = App::fixture();
+        execute_command(&mut app, Command::MenuOpen(menu_index));
+        execute_command(&mut app, Command::MenuActivateItem(rule_index));
+        assert_eq!(app.menu.open, Some(menu_index));
+    }
+
+    /// The selection steps over the rules rather than landing on one.
+    #[test]
+    fn stepping_through_a_menu_skips_its_rules() {
+        let menu_index = MENUS
+            .iter()
+            .position(|menu| menu.items.iter().any(MenuEntry::is_separator))
+            .expect("some menu has a rule in it");
+        let items = MENUS[menu_index].items;
+
+        let mut app = App::fixture();
+        execute_command(&mut app, Command::MenuOpen(menu_index));
+        // All the way round, in both directions: every stop is an entry.
+        for delta in [1, -1] {
+            for _ in 0..items.len() + 1 {
+                execute_command(&mut app, Command::MenuNextItem);
+                if delta < 0 {
+                    execute_command(&mut app, Command::MenuPrevItem);
+                    execute_command(&mut app, Command::MenuPrevItem);
+                }
+                assert!(
+                    !items[app.menu.item].is_separator(),
+                    "the selection landed on a rule at row {}",
+                    app.menu.item
+                );
+            }
+        }
+    }
+
+    // --- themes (SPEC §43) -------------------------------------------------
+
+    /// Switching themes writes the choice down, and re-selecting the one
+    /// already on screen does nothing at all — so walking the View menu does
+    /// not rewrite the config file on every pass.
+    #[test]
+    fn setting_a_theme_records_it_and_says_so() {
+        let mut app = App::fixture();
+        assert_eq!(app.settings.theme, ThemeKind::Dark);
+        assert!(!app.persist_settings, "a test never writes the real config");
+
+        execute_command(&mut app, Command::SetTheme(ThemeKind::Borland));
+        assert_eq!(app.settings.theme, ThemeKind::Borland);
+        let said = app.notifications.current().unwrap().message.clone();
+        assert!(said.contains("Borland"), "{said}");
+
+        execute_command(&mut app, Command::SetTheme(ThemeKind::Borland));
+        assert_eq!(
+            app.notifications.current().unwrap().message,
+            said,
+            "the theme already on screen is not news, so nothing was said again"
+        );
+    }
+
+    // --- the tab strip (SPEC §11) ------------------------------------------
+
+    /// The wheel over the strip moves the window over the tabs and nothing
+    /// else: which tab is in front is not the strip's business (ADR-054).
+    #[test]
+    fn scrolling_the_strip_leaves_the_active_tab_alone() {
+        let mut app = App::fixture_with_tabs(12);
+        execute_command(&mut app, Command::ScrollTabs(3));
+        assert_eq!(app.tab_scroll, 3);
+        assert_eq!(app.active_tab, Some(0));
+
+        execute_command(&mut app, Command::ScrollTabs(-99));
+        assert_eq!(app.tab_scroll, 0, "there is nothing before the first tab");
+        execute_command(&mut app, Command::ScrollTabs(99));
+        assert_eq!(app.tab_scroll, 11, "nor anything after the last");
     }
 
     // --- diff viewer (SPEC §36) -------------------------------------------
@@ -4893,8 +5126,7 @@ mod tests {
     }
 
     fn diff_text(app: &App) -> String {
-        app.diff
-            .as_ref()
+        app.diff()
             .expect("a viewer is open")
             .diff
             .lines
@@ -4911,7 +5143,7 @@ mod tests {
 
         execute_command(&mut app, Command::GitDiff);
 
-        let viewer = app.diff.as_ref().expect("a viewer is open");
+        let viewer = app.diff().expect("a viewer is open");
         assert_eq!(viewer.path, Path::new("a.txt"));
         assert_eq!(viewer.side, DiffSide::Worktree);
         assert_eq!(app.focus, FocusTarget::Diff);
@@ -4931,7 +5163,7 @@ mod tests {
         select_row(&mut app, "a.txt");
 
         execute_command(&mut app, Command::GitDiff);
-        assert_eq!(app.diff.as_ref().unwrap().side, DiffSide::Staged);
+        assert_eq!(app.diff().unwrap().side, DiffSide::Staged);
         assert!(diff_text(&app).contains("+b"));
     }
 
@@ -4949,11 +5181,11 @@ mod tests {
         select_row(&mut app, "a.txt");
 
         execute_command(&mut app, Command::GitDiff);
-        assert_eq!(app.diff.as_ref().unwrap().side, DiffSide::Worktree);
+        assert_eq!(app.diff().unwrap().side, DiffSide::Worktree);
         assert!(diff_text(&app).contains("+c"));
 
         execute_command(&mut app, Command::GitDiffToggleSide);
-        assert_eq!(app.diff.as_ref().unwrap().side, DiffSide::Staged);
+        assert_eq!(app.diff().unwrap().side, DiffSide::Staged);
         assert!(diff_text(&app).contains("+b"));
     }
 
@@ -4966,7 +5198,7 @@ mod tests {
         select_row(&mut app, "new.txt");
 
         execute_command(&mut app, Command::GitDiff);
-        assert!(app.diff.is_none());
+        assert!(app.diff().is_none());
         let said = app.notifications.current().unwrap().message.clone();
         assert!(said.contains("untracked"), "{said}");
     }
@@ -4980,7 +5212,7 @@ mod tests {
         let (mut app, _rx) = app_over(&repo);
         // Nothing is listed at all, so there is nothing selected either.
         execute_command(&mut app, Command::GitDiff);
-        assert!(app.diff.is_none());
+        assert!(app.diff().is_none());
         assert!(app
             .notifications
             .current()
@@ -5001,31 +5233,82 @@ mod tests {
         select_row(&mut app, "new.txt");
 
         execute_command(&mut app, Command::GitDiff);
-        assert_eq!(app.diff.as_ref().unwrap().path, Path::new("a.txt"));
+        assert_eq!(app.diff().unwrap().path, Path::new("a.txt"));
     }
 
+    /// A diff is a tab, so focus moving elsewhere leaves it open — and coming
+    /// back to it is switching to its tab, not opening it again.
     #[test]
-    fn the_viewer_closes_when_another_pane_takes_focus() {
+    fn the_diff_tab_outlives_the_focus_that_opened_it() {
         let repo = changed_repo();
         let (mut app, _rx) = app_over(&repo);
         select_row(&mut app, "a.txt");
         execute_command(&mut app, Command::GitDiff);
-        assert!(app.diff.is_some());
+        let tab = app.active_tab.expect("the diff opened a tab");
 
         execute_command(&mut app, Command::CycleFocus);
-        assert!(app.diff.is_none(), "the viewer covers the editor (ADR-037)");
+        assert!(app.tabs[tab].diff().is_some(), "the tab is still open");
         assert_ne!(app.focus, FocusTarget::Diff);
+
+        execute_command(&mut app, Command::FocusPane(FocusTarget::Editor));
+        assert_eq!(
+            app.focus,
+            FocusTarget::Diff,
+            "focusing the pane a diff tab is in focuses the diff"
+        );
     }
 
+    /// Opening the same file's diff twice reuses its tab, the way opening the
+    /// same file twice reuses its own.
     #[test]
-    fn closing_the_viewer_gives_the_panel_its_focus_back() {
+    fn a_second_diff_of_the_same_file_reuses_its_tab() {
         let repo = changed_repo();
         let (mut app, _rx) = app_over(&repo);
         select_row(&mut app, "a.txt");
         execute_command(&mut app, Command::GitDiff);
+        let tabs = app.tabs.len();
+
+        execute_command(&mut app, Command::GitDiff);
+        assert_eq!(app.tabs.len(), tabs);
+        // And so does turning it over to the other side.
+        execute_command(&mut app, Command::GitDiffToggleSide);
+        assert_eq!(app.tabs.len(), tabs);
+    }
+
+    #[test]
+    fn closing_the_diff_closes_its_tab() {
+        let repo = changed_repo();
+        let (mut app, _rx) = app_over(&repo);
+        select_row(&mut app, "a.txt");
+        execute_command(&mut app, Command::GitDiff);
+        let tabs = app.tabs.len();
 
         execute_command(&mut app, Command::DiffClose);
-        assert!(app.diff.is_none());
+        assert!(app.diff().is_none());
+        assert_eq!(app.tabs.len(), tabs - 1, "the tab went with it");
+    }
+
+    /// A click on a changed file opens its diff in one go, and leaves the
+    /// panel focused so the next row is one click away.
+    #[test]
+    fn clicking_a_changed_file_opens_its_diff() {
+        let repo = changed_repo();
+        let (mut app, _rx) = app_over(&repo);
+        let row = app
+            .git
+            .entries()
+            .iter()
+            .position(|entry| entry.path == Path::new("a.txt"))
+            .expect("a.txt is listed");
+
+        execute_command(&mut app, Command::GitDiffRow(row));
+        assert_eq!(
+            app.tabs[app.active_tab.unwrap()]
+                .diff()
+                .expect("a diff tab is in front")
+                .path,
+            Path::new("a.txt")
+        );
         assert_eq!(app.focus, FocusTarget::GitPanel);
     }
 
@@ -5037,13 +5320,13 @@ mod tests {
         let (mut app, rx) = app_over(&repo);
         select_row(&mut app, "a.txt");
         execute_command(&mut app, Command::GitDiff);
-        assert!(app.diff.is_some());
+        assert!(app.diff().is_some());
 
         // Focus is on the viewer, so the panel's own keys are not what stages
         // it here; the command is the same one they produce.
         execute_command(&mut app, Command::GitStage);
         settle(&mut app, &rx);
-        assert!(app.diff.is_none(), "the unstaged diff is empty now");
+        assert!(app.diff().is_none(), "the unstaged diff is empty now");
     }
 
     #[test]
@@ -5073,16 +5356,16 @@ mod tests {
         execute_command(&mut app, Command::GitDiff);
 
         execute_command(&mut app, Command::DiffScroll(3));
-        assert_eq!(app.diff.as_ref().unwrap().scroll, 3);
+        assert_eq!(app.diff().unwrap().scroll, 3);
         execute_command(&mut app, Command::DiffScrollPage(1));
-        assert_eq!(app.diff.as_ref().unwrap().scroll, 13);
+        assert_eq!(app.diff().unwrap().scroll, 13);
         execute_command(&mut app, Command::DiffHome);
-        assert_eq!(app.diff.as_ref().unwrap().scroll, 0);
+        assert_eq!(app.diff().unwrap().scroll, 0);
         execute_command(&mut app, Command::DiffEnd);
-        let viewer = app.diff.as_ref().unwrap();
+        let viewer = app.diff().unwrap();
         assert_eq!(viewer.scroll, viewer.diff.len() - 10);
         execute_command(&mut app, Command::DiffScrollHorizontal(1));
-        assert_eq!(app.diff.as_ref().unwrap().h_scroll, HORIZONTAL_STEP);
+        assert_eq!(app.diff().unwrap().h_scroll, HORIZONTAL_STEP);
     }
 
     #[test]
@@ -5092,7 +5375,7 @@ mod tests {
         execute_command(&mut app, Command::GitRefresh);
 
         execute_command(&mut app, Command::GitDiff);
-        assert!(app.diff.is_none());
+        assert!(app.diff().is_none());
         assert_eq!(
             app.notifications.current().map(|n| n.message.as_str()),
             Some("Not a Git repository")

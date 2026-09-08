@@ -16,6 +16,7 @@ pub mod workspace;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
+use crate::config::Settings;
 use crate::event::AppEvent;
 use crate::filesystem::watcher::Watch;
 use dialog::DialogState;
@@ -25,7 +26,7 @@ use git::GitState;
 use help::HelpState;
 use notifications::Notifications;
 use search::SearchState;
-pub use tabs::Tab;
+pub use tabs::{Tab, TabItem};
 use workspace::Workspace;
 
 use crate::editor::clipboard::Clipboard;
@@ -141,8 +142,30 @@ pub struct LastClick {
 
 pub struct App {
     pub workspace: Workspace,
-    pub tabs: Vec<Tab>,
+    /// What the editor remembers between runs (SPEC §43). Loaded by `main`
+    /// rather than by `new`, so nothing that builds an `App` in a test reads
+    /// or writes the user's real config file.
+    pub settings: Settings,
+    /// Whether a settings change is written back to disk. Only the binary
+    /// turns it on: a test that switches themes must not rewrite the config of
+    /// whoever is running it.
+    pub persist_settings: bool,
+    /// Everything the tab strip holds, in strip order: files being edited and
+    /// diffs being read (SPEC §11, §36).
+    pub tabs: Vec<TabItem>,
     pub active_tab: Option<usize>,
+    /// The tab the bar is scrolled to: the first one it tries to draw.
+    ///
+    /// A request rather than a fact — the layout still pulls the strip along
+    /// far enough to keep the active tab whole, and back when the tabs after
+    /// this one no longer fill the bar. Scrolling the wheel over the strip is
+    /// what moves it, so a bar with twenty tabs on it can be read without
+    /// switching to each of them in turn (SPEC §11).
+    pub tab_scroll: usize,
+    /// Width of the tab strip in the last drawn frame. Frame geometry, like
+    /// `editor_view`: what the strip can show is what decides how far it has
+    /// to be scrolled for the active tab to be whole.
+    pub tab_bar_width: u16,
     pub sidebar: SidebarState,
     pub menu: MenuState,
     pub focus: FocusTarget,
@@ -154,12 +177,9 @@ pub struct App {
     /// The one modal window, when there is one. Nothing else receives input
     /// while it is open (SPEC §8, §40).
     pub dialog: Option<DialogState>,
-    /// The read-only diff viewer, when one is open (SPEC §36). It is drawn
-    /// over the editor pane, so `execute_command` closes it as soon as another
-    /// pane takes focus (ADR-037).
-    pub diff: Option<DiffState>,
-    /// The help screen, when one is open (SPEC §6). Drawn over the whole body,
-    /// so like the diff viewer it cannot outlive its own focus (ADR-038).
+    /// The help screen, when one is open (SPEC §6). Drawn over the whole body
+    /// — the tab strip and the sidebar included — so it cannot outlive its own
+    /// focus (ADR-038).
     pub help: Option<HelpState>,
     pub last_click: Option<LastClick>,
     /// Size of the editor pane in the last drawn frame.
@@ -201,8 +221,12 @@ impl App {
     pub fn new(workspace: Workspace) -> Self {
         let tree = FileTree::new(workspace.root());
         Self {
+            settings: Settings::default(),
+            persist_settings: false,
             tabs: Vec::new(),
             active_tab: None,
+            tab_scroll: 0,
+            tab_bar_width: 0,
             sidebar: SidebarState {
                 mode: SidebarMode::Explorer,
                 tree,
@@ -216,7 +240,6 @@ impl App {
             clipboard: Clipboard::default(),
             search: SearchState::default(),
             dialog: None,
-            diff: None,
             help: None,
             last_click: None,
             editor_view: EditorView::default(),
@@ -242,15 +265,73 @@ impl App {
         self.dialog.as_ref().is_some_and(|d| d.field().is_some())
     }
 
+    /// The file being edited, when the tab in front is one. A diff tab answers
+    /// `None`, which is what makes every editing command a no-op over it.
     pub fn active(&self) -> Option<&Tab> {
-        self.active_tab.and_then(|i| self.tabs.get(i))
+        self.active_tab
+            .and_then(|i| self.tabs.get(i))
+            .and_then(TabItem::editor)
     }
 
     pub fn active_mut(&mut self) -> Option<&mut Tab> {
         match self.active_tab {
-            Some(index) => self.tabs.get_mut(index),
+            Some(index) => self.tabs.get_mut(index).and_then(TabItem::editor_mut),
             None => None,
         }
+    }
+
+    /// The editor tab at `index`, when that tab is one.
+    pub fn editor_at(&self, index: usize) -> Option<&Tab> {
+        self.tabs.get(index).and_then(TabItem::editor)
+    }
+
+    pub fn editor_at_mut(&mut self, index: usize) -> Option<&mut Tab> {
+        self.tabs.get_mut(index).and_then(TabItem::editor_mut)
+    }
+
+    /// Every file being edited, with the tab index each one sits at.
+    pub fn editors(&self) -> impl Iterator<Item = (usize, &Tab)> {
+        self.tabs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, item)| item.editor().map(|tab| (i, tab)))
+    }
+
+    pub fn editors_mut(&mut self) -> impl Iterator<Item = &mut Tab> {
+        self.tabs.iter_mut().filter_map(TabItem::editor_mut)
+    }
+
+    /// The diff in front of the user, when the tab in front is one (SPEC §36).
+    pub fn diff(&self) -> Option<&DiffState> {
+        self.active_tab
+            .and_then(|i| self.tabs.get(i))
+            .and_then(TabItem::diff)
+    }
+
+    pub fn diff_mut(&mut self) -> Option<&mut DiffState> {
+        match self.active_tab {
+            Some(index) => self.tabs.get_mut(index).and_then(TabItem::diff_mut),
+            None => None,
+        }
+    }
+
+    /// Keeps focus and the tab in front in step (SPEC §26).
+    ///
+    /// The two read-only panes are one focus target each, and which of them the
+    /// tab strip is showing is not something every command that switches tabs
+    /// should have to remember. So it is settled in one place, after each
+    /// command: a diff tab in front means `Diff` has focus wherever `Editor`
+    /// would have, and the other way round.
+    pub fn normalize_focus(&mut self) {
+        let showing_diff = self
+            .active_tab
+            .and_then(|i| self.tabs.get(i))
+            .is_some_and(|item| item.diff().is_some());
+        self.focus = match (self.focus, showing_diff) {
+            (FocusTarget::Editor, true) => FocusTarget::Diff,
+            (FocusTarget::Diff, false) => FocusTarget::Editor,
+            (other, _) => other,
+        };
     }
 
     /// Re-colours the active tab's viewport, and says so once if the document
@@ -289,7 +370,11 @@ impl App {
             self.search.current = None;
             return;
         };
-        let tab = &self.tabs[index];
+        let Some(tab) = self.editor_at(index) else {
+            self.search.matches.clear();
+            self.search.current = None;
+            return;
+        };
         let revision = tab.document.revision();
         if self.search.is_current(index, revision) {
             return;
@@ -360,20 +445,21 @@ impl App {
             Some(index) => index,
             None => {
                 self.tabs
-                    .push(Tab::new(Document::open_or_create(&absolute)?));
+                    .push(TabItem::editing(Tab::new(Document::open_or_create(
+                        &absolute,
+                    )?)));
                 self.tabs.len() - 1
             }
         };
         self.active_tab = Some(index);
         self.focus = FocusTarget::Editor;
-        // The viewer covers the editor, and a file opened from it is a file
-        // the user wants to look at (ADR-037).
-        self.diff = None;
-        if let Some(line) = line {
-            self.tabs[index].document.goto_line(line);
-        }
         let view = self.editor_view;
-        self.tabs[index].follow_cursor(view);
+        if let Some(tab) = self.editor_at_mut(index) {
+            if let Some(line) = line {
+                tab.document.goto_line(line);
+            }
+            tab.follow_cursor(view);
+        }
         Ok(())
     }
 }
@@ -383,19 +469,32 @@ impl App {
 /// a file with unsaved changes, and a second language.
 #[cfg(test)]
 impl App {
+    /// The editor tab at `index`, for the tests that know there is one there.
+    ///
+    /// Production code goes through `editor_at`, which answers `None` for a
+    /// diff tab; a test that indexed a tab it did not open has a bug, and the
+    /// panic here is the report.
+    pub fn tab_mut(&mut self, index: usize) -> &mut Tab {
+        self.editor_at_mut(index)
+            .unwrap_or_else(|| panic!("tab {index} is not a file being edited"))
+    }
+
     pub fn fixture() -> Self {
         let workspace = Workspace::from_arg(Some(Path::new("/tmp/ferroedit-test")))
             .expect("the fixture workspace path is valid");
         let mut app = Self::new(workspace);
         app.tabs = vec![
-            Tab::scratch("main.rs", "fn main() {\n    println!(\"hello\");\n}"),
-            Tab::scratch("editor.rs", "// editor.rs"),
-            Tab::scratch("README.md", "# FerroEdit"),
+            TabItem::editing(Tab::scratch(
+                "main.rs",
+                "fn main() {\n    println!(\"hello\");\n}",
+            )),
+            TabItem::editing(Tab::scratch("editor.rs", "// editor.rs")),
+            TabItem::editing(Tab::scratch("README.md", "# FerroEdit")),
         ];
         // An edit that cancels itself out still leaves the tab dirty, which is
         // what the tab bar's unsaved marker is drawn from.
-        app.tabs[1].document.insert_char(' ');
-        app.tabs[1].document.backspace();
+        app.editor_at_mut(1).unwrap().document.insert_char(' ');
+        app.editor_at_mut(1).unwrap().document.backspace();
         // Nothing in a test may write an escape sequence to the runner's stdout.
         app.clipboard = crate::editor::clipboard::Clipboard::detached();
         // A status that was never read, in a fixture that never runs git: the
@@ -435,7 +534,7 @@ impl App {
     pub fn fixture_with_tabs(count: usize) -> Self {
         let mut app = Self::fixture();
         app.tabs = (0..count)
-            .map(|i| Tab::scratch(&format!("file{i:02}.rs"), "// x"))
+            .map(|i| TabItem::editing(Tab::scratch(&format!("file{i:02}.rs"), "// x")))
             .collect();
         app.active_tab = (count > 0).then_some(0);
         app

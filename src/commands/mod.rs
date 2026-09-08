@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 use crate::app::focus::FocusTarget;
 use crate::app::search::SearchField;
+use crate::config::ThemeKind;
 use crate::editor::cursor::Motion;
 use crate::filesystem::watcher::FsChange;
 use crate::git::JobOutcome;
@@ -79,7 +80,6 @@ pub enum Command {
 
     ToggleSidebarMode,
     MoveSidebarSelection(i16),
-    SelectSidebarRow(usize),
     ScrollSidebar(i16),
 
     /// Opens the selected file, or expands and collapses the selected
@@ -102,6 +102,9 @@ pub enum Command {
     GitRefresh,
     /// Opens the file the git panel's selection is on.
     GitOpenSelected,
+    /// Selects a row of the git panel and opens its diff — what a click on a
+    /// changed file does (SPEC §31, §36).
+    GitDiffRow(usize),
     /// Stages or unstages the selected file (SPEC §31). Both run on the worker,
     /// like every other command that writes to the repository (ADR-033).
     GitStage,
@@ -202,6 +205,11 @@ pub enum Command {
     DeletePath(PathBuf),
 
     SelectTab(usize),
+    /// Scrolls the tab strip sideways, in tabs. The wheel over the bar and its
+    /// two overflow arrows are what produce it; the strip still follows the
+    /// active tab on its own, so this only ever moves the *window* over the
+    /// tabs and never which of them is in front.
+    ScrollTabs(i16),
     NextTab,
     PrevTab,
     /// Closes the active tab, asking first when it has unsaved changes.
@@ -325,6 +333,11 @@ pub enum Command {
 
     Save,
 
+    /// Switches the colour scheme and writes the choice to the settings file
+    /// (SPEC §43). Re-selecting the theme already on screen is a no-op, so the
+    /// file is not rewritten on every visit to the View menu.
+    SetTheme(ThemeKind),
+
     /// The Help menu's About entry: a message dialog with the version in it.
     ShowAbout,
 
@@ -375,7 +388,6 @@ impl Command {
                 "Move the sidebar selection down",
                 "Move the sidebar selection up",
             ),
-            Self::SelectSidebarRow(_) => "Select a sidebar row".into(),
             Self::ScrollSidebar(delta) => {
                 step(*delta, "Scroll the sidebar down", "Scroll the sidebar up")
             }
@@ -389,6 +401,7 @@ impl Command {
 
             Self::GitRefresh => "Re-read the repository status".into(),
             Self::GitOpenSelected => "Open the selected changed file".into(),
+            Self::GitDiffRow(_) => "Show the diff of a changed file".into(),
             Self::GitStage => "Stage the selected file".into(),
             Self::GitUnstage => "Unstage the selected file".into(),
             Self::GitToggleStage => {
@@ -416,7 +429,7 @@ impl Command {
             Self::GitDiff => "Show the diff of the selected file".into(),
             Self::GitDiffToggleSide => "Show the other side: staged or unstaged".into(),
             Self::DiffRefresh => "Re-read the diff".into(),
-            Self::DiffClose => "Close the diff viewer".into(),
+            Self::DiffClose => "Close the diff tab".into(),
             Self::DiffScroll(delta) => step(*delta, "Scroll down a line", "Scroll up a line"),
             Self::DiffScrollPage(delta) => step(*delta, "Scroll down a page", "Scroll up a page"),
             Self::DiffScrollHorizontal(delta) => step(*delta, "Scroll right", "Scroll left"),
@@ -437,6 +450,9 @@ impl Command {
             Self::DeletePath(_) => "Delete a path from disk".into(),
 
             Self::SelectTab(_) => "Switch to a tab".into(),
+            Self::ScrollTabs(delta) => {
+                step(*delta, "Scroll the tabs right", "Scroll the tabs left")
+            }
             Self::NextTab => "Next tab".into(),
             Self::PrevTab => "Previous tab".into(),
             Self::CloseTab => "Close the active tab, asking first when it is modified".into(),
@@ -516,6 +532,7 @@ impl Command {
             Self::Paste => "Paste".into(),
 
             Self::Save => "Save the active file".into(),
+            Self::SetTheme(kind) => format!("Use the {} theme", kind.label()),
             Self::ShowAbout => "About FerroEdit".into(),
 
             Self::ShowHelp => "Show the keyboard shortcuts".into(),
@@ -575,9 +592,42 @@ pub struct MenuItem {
     pub command: Command,
 }
 
+/// One row of a drop-down: an entry that runs something, or the rule drawn
+/// between two groups of them.
+///
+/// The separator is a row rather than a property of the item under it because
+/// that is what it is on screen — the popup's height counts it, the selection
+/// steps over it, and a click on it does nothing.
+pub enum MenuEntry {
+    Item(MenuItem),
+    Separator,
+}
+
+impl MenuEntry {
+    /// The entry, when it is one. A separator answers `None`, which is what
+    /// every caller that resolves a row to a command wants.
+    pub fn item(&self) -> Option<&MenuItem> {
+        match self {
+            Self::Item(item) => Some(item),
+            Self::Separator => None,
+        }
+    }
+
+    pub fn is_separator(&self) -> bool {
+        matches!(self, Self::Separator)
+    }
+}
+
 pub struct MenuDef {
     pub title: &'static str,
-    pub items: &'static [MenuItem],
+    pub items: &'static [MenuEntry],
+}
+
+impl MenuDef {
+    /// The rows that resolve to a command, in row order.
+    pub fn entries(&self) -> impl Iterator<Item = &MenuItem> {
+        self.items.iter().filter_map(MenuEntry::item)
+    }
 }
 
 /// Menu bar contents (SPEC §6, §24).
@@ -596,12 +646,19 @@ pub static MENUS: &[MenuDef] = &[
         items: &[
             item("New File", Command::NewFilePrompt),
             item("New Folder", Command::NewDirectoryPrompt),
-            item("Rename…", Command::RenamePrompt),
-            item("Delete", Command::DeletePrompt),
+            SEP,
             item("Open…", Command::OpenPrompt),
             item("Save", Command::Save),
             item("Save As…", Command::SaveAsPrompt),
             item("Reload", Command::Reload),
+            SEP,
+            item("Rename…", Command::RenamePrompt),
+            SEP,
+            // On its own between two rules: Delete is the one entry in this
+            // menu that destroys something, and it used to sit one row above
+            // Open, where a mis-aimed click found it.
+            item("Delete", Command::DeletePrompt),
+            SEP,
             item("Close Tab", Command::CloseTab),
             item("Quit", Command::Quit),
         ],
@@ -611,6 +668,7 @@ pub static MENUS: &[MenuDef] = &[
         items: &[
             item("Undo", Command::Undo),
             item("Redo", Command::Redo),
+            SEP,
             item("Cut", Command::Cut),
             item("Copy", Command::Copy),
             item("Paste", Command::Paste),
@@ -625,9 +683,12 @@ pub static MENUS: &[MenuDef] = &[
         items: &[
             item("Find…", Command::SearchOpen),
             item("Replace…", Command::ReplaceOpen),
+            SEP,
             item("Find Next", Command::FindNext),
             item("Find Previous", Command::FindPrev),
+            SEP,
             item("Match Case", Command::SearchToggleCase),
+            SEP,
             item("Replace Match", Command::ReplaceCurrent),
             item("Replace All", Command::ReplaceAll),
         ],
@@ -638,26 +699,43 @@ pub static MENUS: &[MenuDef] = &[
             item("Toggle Sidebar", Command::ToggleSidebarMode),
             item("Refresh Explorer", Command::ExplorerRefresh),
             item("Show Hidden Files", Command::ToggleHiddenFiles),
+            SEP,
             item("Focus Explorer", Command::FocusPane(FocusTarget::Explorer)),
             item("Focus Git", Command::FocusPane(FocusTarget::GitPanel)),
             item("Focus Editor", Command::FocusPane(FocusTarget::Editor)),
+            SEP,
+            item("Theme: Dark", Command::SetTheme(ThemeKind::Dark)),
+            item("Theme: Light", Command::SetTheme(ThemeKind::Light)),
+            item(
+                "Theme: Dark Simple",
+                Command::SetTheme(ThemeKind::DarkSimple),
+            ),
+            item(
+                "Theme: Light Simple",
+                Command::SetTheme(ThemeKind::LightSimple),
+            ),
+            item("Theme: Borland", Command::SetTheme(ThemeKind::Borland)),
         ],
     },
     MenuDef {
         title: "Git",
         items: &[
             item("Refresh", Command::GitRefresh),
+            SEP,
             item("Stage", Command::GitStage),
             item("Unstage", Command::GitUnstage),
             item("Stage All", Command::GitStageAll),
             item("Unstage All", Command::GitUnstageAll),
+            SEP,
             item("Commit…", Command::GitCommitPrompt),
             item("Pull", Command::GitPull),
             item("Push", Command::GitPush),
             item("Cancel", Command::GitCancel),
+            SEP,
             item("Branch…", Command::GitBranchPrompt),
             item("New Branch…", Command::GitNewBranchPrompt),
             item("Merge…", Command::GitMergePrompt),
+            SEP,
             item("Diff", Command::GitDiff),
         ],
     },
@@ -670,6 +748,58 @@ pub static MENUS: &[MenuDef] = &[
     },
 ];
 
-const fn item(label: &'static str, command: Command) -> MenuItem {
-    MenuItem { label, command }
+const fn item(label: &'static str, command: Command) -> MenuEntry {
+    MenuEntry::Item(MenuItem { label, command })
+}
+
+/// The rule between two groups of entries.
+const SEP: MenuEntry = MenuEntry::Separator;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A theme nobody can reach is a theme that does not exist: every one of
+    /// them has to be in the View menu.
+    #[test]
+    fn every_theme_has_a_menu_entry() {
+        let view = MENUS
+            .iter()
+            .find(|menu| menu.title == "View")
+            .expect("a View menu");
+        for kind in ThemeKind::ALL {
+            assert!(
+                view.entries()
+                    .any(|item| item.command == Command::SetTheme(kind)),
+                "no entry for the {} theme",
+                kind.label()
+            );
+        }
+    }
+
+    /// A drop-down that opened on a rule would have nothing selected, and the
+    /// first `Down` would step off it rather than onto the second entry.
+    #[test]
+    fn no_menu_starts_or_ends_with_a_rule() {
+        for menu in MENUS {
+            let first = menu.items.first().expect("a menu with entries in it");
+            let last = menu.items.last().expect("a menu with entries in it");
+            assert!(!first.is_separator(), "{} starts with a rule", menu.title);
+            assert!(!last.is_separator(), "{} ends with a rule", menu.title);
+        }
+    }
+
+    /// Two rules in a row would draw as a two-line gap that means nothing.
+    #[test]
+    fn no_menu_has_two_rules_in_a_row() {
+        for menu in MENUS {
+            for pair in menu.items.windows(2) {
+                assert!(
+                    !(pair[0].is_separator() && pair[1].is_separator()),
+                    "{} has two rules in a row",
+                    menu.title
+                );
+            }
+        }
+    }
 }

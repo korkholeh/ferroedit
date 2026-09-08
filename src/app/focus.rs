@@ -12,9 +12,10 @@ pub enum FocusTarget {
     GitPanel,
     Menu,
     Dialog,
-    /// The read-only diff viewer (SPEC §36). Like the find bar it is entered
-    /// and left explicitly and never cycled into — and unlike it, it covers
-    /// the editor pane, so it closes as soon as another pane takes focus.
+    /// A diff tab (SPEC §36, ADR-053). It stands where `Editor` does — the
+    /// same pane, showing a diff instead of a document — so the cycle key
+    /// treats the two as one stop, and `App::normalize_focus` picks whichever
+    /// of them matches the tab in front.
     Diff,
     /// The help screen (SPEC §6). A pager over the keymap, drawn over the whole
     /// body, and closed by the same rule as the diff viewer (ADR-038).
@@ -31,7 +32,16 @@ impl FocusTarget {
     const CYCLE: [FocusTarget; 3] = [Self::Editor, Self::Explorer, Self::GitPanel];
 
     pub fn next(self) -> Self {
-        match Self::CYCLE.iter().position(|f| *f == self) {
+        // A diff tab takes the editor's place in the cycle, because it *is*
+        // what the editor pane is showing (SPEC §36). Without this the cycle
+        // key could not leave a diff: `App::normalize_focus` would put focus
+        // straight back on it.
+        let from = if self == Self::Diff {
+            Self::Editor
+        } else {
+            self
+        };
+        match Self::CYCLE.iter().position(|f| *f == from) {
             Some(i) => Self::CYCLE[(i + 1) % Self::CYCLE.len()],
             // Leaving the menu by cycling lands back on the editor.
             None => Self::Editor,
@@ -78,7 +88,13 @@ mod tests {
         assert_eq!(FocusTarget::Menu.next(), FocusTarget::Editor);
         assert_eq!(FocusTarget::Dialog.next(), FocusTarget::Editor);
         assert_eq!(FocusTarget::Search.next(), FocusTarget::Editor);
-        assert_eq!(FocusTarget::Diff.next(), FocusTarget::Editor);
         assert_eq!(FocusTarget::Help.next(), FocusTarget::Editor);
+    }
+
+    /// A diff is in the editor's pane, so the cycle steps out of it to where
+    /// it would step out of the editor.
+    #[test]
+    fn cycling_out_of_a_diff_goes_where_the_editor_would() {
+        assert_eq!(FocusTarget::Diff.next(), FocusTarget::Explorer);
     }
 }

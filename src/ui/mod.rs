@@ -105,7 +105,7 @@ mod tests {
 
         assert!(rows[0].contains("File"), "menu bar missing: {:?}", rows[0]);
         assert!(rows[0].contains("Help"));
-        assert!(screen.contains("ferroedit-test"), "explorer header missing");
+        assert!(screen.contains("Files"), "explorer header missing");
         assert!(screen.contains("main.rs"), "tab bar / explorer missing");
         assert!(screen.contains("Git — main"), "git panel missing");
         assert!(screen.contains("fn main() {"), "editor content missing");
@@ -137,7 +137,7 @@ mod tests {
     fn the_editor_gets_a_scrollbar_once_the_file_is_taller_than_the_pane() {
         let mut app = app();
         let long: String = (0..200).map(|i| format!("line {i}\n")).collect();
-        app.tabs[0] = crate::app::tabs::Tab::scratch("long.rs", &long);
+        app.tabs[0] = crate::app::TabItem::editing(crate::app::Tab::scratch("long.rs", &long));
         app.active_tab = Some(0);
 
         let rects = layout::compute(Rect::new(0, 0, 80, 24), &app);
@@ -148,7 +148,7 @@ mod tests {
         assert!(top.starts_with('█'), "the thumb starts at the top: {top:?}");
         assert!(top.contains('│'), "and the track runs under it: {top:?}");
 
-        app.tabs[0].viewport.top_line = 199;
+        app.tab_mut(0).viewport.top_line = 199;
         let bottom = column(&app, 80, 24, bar.x, rows);
         assert!(
             bottom.ends_with('█'),
@@ -425,7 +425,7 @@ mod tests {
         // The fixture's first tab is `main.rs`, and nothing has been drawn yet,
         // so this is also the run loop's own first sync.
         app.sync_highlight();
-        assert_eq!(app.tabs[0].highlights.language(), "Rust");
+        assert_eq!(app.tab_mut(0).highlights.language(), "Rust");
 
         let rects = layout::compute(Rect::new(0, 0, 80, 24), &app);
         let gutter = (rects.editor.x + 4) as usize;
@@ -449,8 +449,8 @@ mod tests {
         let mut app = app();
         app.sync_highlight();
         // Select `fn main` — a keyword and a function name in one selection.
-        app.tabs[0].document.place_cursor(0, VisualCol(0));
-        app.tabs[0].document.extend_to(0, VisualCol(7));
+        app.tab_mut(0).document.place_cursor(0, VisualCol(0));
+        app.tab_mut(0).document.extend_to(0, VisualCol(7));
 
         let rects = layout::compute(Rect::new(0, 0, 80, 24), &app);
         let gutter = (rects.editor.x + 4) as usize;
@@ -471,8 +471,8 @@ mod tests {
     fn a_selection_is_painted_behind_the_text_it_covers() {
         let mut app = app();
         // Select `main` on the first line: four cells, after `fn `.
-        app.tabs[0].document.place_cursor(0, VisualCol(3));
-        app.tabs[0].document.extend_to(0, VisualCol(7));
+        app.tab_mut(0).document.place_cursor(0, VisualCol(3));
+        app.tab_mut(0).document.extend_to(0, VisualCol(7));
         let rects = layout::compute(Rect::new(0, 0, 80, 24), &app);
         let row = rects.editor.y;
         let gutter = rects.editor.x + 4;
@@ -497,7 +497,7 @@ mod tests {
     fn the_status_bar_counts_the_selection_only_while_there_is_one() {
         let mut app = app();
         assert!(!draw(&app, 80, 24).join("\n").contains("Sel "));
-        app.tabs[0].document.select_all();
+        app.tab_mut(0).document.select_all();
         let screen = draw(&app, 80, 24).join("\n");
         assert!(screen.contains("Sel 36"), "no selection count: {screen}");
     }
@@ -597,7 +597,10 @@ mod tests {
     #[test]
     fn a_long_line_scrolls_horizontally_under_the_cursor() {
         let mut app = app();
-        app.tabs[0] = crate::app::Tab::scratch("wide.txt", &"abcdefghij".repeat(30));
+        app.tabs[0] = crate::app::TabItem::editing(crate::app::Tab::scratch(
+            "wide.txt",
+            &"abcdefghij".repeat(30),
+        ));
         app.editor_view = crate::app::EditorView {
             width: 60,
             height: 22,
@@ -969,10 +972,10 @@ mod tests {
     /// The fixture with the find bar open over a query that hits.
     fn searching(query: &str, replacing: bool) -> App {
         let mut app = app();
-        app.tabs = vec![crate::app::Tab::scratch(
+        app.tabs = vec![crate::app::TabItem::editing(crate::app::Tab::scratch(
             "notes.txt",
             "fn main() {\n    println!(\"hello\");\n}",
-        )];
+        ))];
         app.active_tab = Some(0);
         crate::commands::execute::execute_command(
             &mut app,
@@ -1098,12 +1101,12 @@ mod tests {
              -removed line\n\
              +added line\n",
         );
-        app.diff = Some(DiffState::new(
+        app.tabs.push(crate::app::TabItem::Diff(DiffState::new(
             std::path::Path::new("src/main.rs"),
             DiffSide::Worktree,
             diff,
-            FocusTarget::GitPanel,
-        ));
+        )));
+        app.active_tab = Some(app.tabs.len() - 1);
         app.focus = FocusTarget::Diff;
         app
     }
@@ -1159,7 +1162,7 @@ mod tests {
     #[test]
     fn the_viewer_scrolled_sideways_shows_the_tail_of_its_lines() {
         let mut app = app_with_diff();
-        app.diff.as_mut().unwrap().h_scroll = 4;
+        app.diff_mut().unwrap().h_scroll = 4;
         let screen = draw(&app, 80, 24).join("\n");
         assert!(screen.contains("oved line"), "{screen}");
         assert!(!screen.contains("-removed line"), "{screen}");

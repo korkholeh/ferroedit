@@ -11,7 +11,7 @@ use ratatui::layout::{Position, Rect};
 
 use crate::app::focus::FocusTarget;
 use crate::app::search::SearchField;
-use crate::app::{App, SidebarMode};
+use crate::app::App;
 use crate::commands::Command;
 use crate::editor::viewport::gutter_width;
 use crate::ui::layout::LayoutRects;
@@ -154,6 +154,14 @@ fn left_click(app: &App, rects: &LayoutRects, at: Position) -> Option<Command> {
     if rects.help.is_some_and(|help| help.contains(at)) {
         return Some(Command::FocusPane(FocusTarget::Help));
     }
+    // The overflow arrows sit at the two ends of the strip, outside every tab
+    // rect, and each scrolls the strip one tab towards the tabs it points at.
+    if rects.tab_overflow_left.is_some_and(|r| r.contains(at)) {
+        return Some(Command::ScrollTabs(-1));
+    }
+    if rects.tab_overflow_right.is_some_and(|r| r.contains(at)) {
+        return Some(Command::ScrollTabs(1));
+    }
     // The close button is inside the tab, so it has to be tested first or a
     // click on the × would only select the tab it is trying to close.
     if let Some(index) = rects.tab_closes.iter().position(|r| r.contains(at)) {
@@ -183,13 +191,7 @@ fn left_click(app: &App, rects: &LayoutRects, at: Position) -> Option<Command> {
         return Some(explorer_click(app, rects.explorer, at));
     }
     if rects.git_panel.contains(at) {
-        return Some(sidebar_click(
-            app,
-            rects.git_panel,
-            at,
-            FocusTarget::GitPanel,
-            SidebarMode::Git,
-        ));
+        return Some(git_click(app, rects.git_panel, at));
     }
     None
 }
@@ -289,27 +291,21 @@ fn explorer_click(app: &App, panel: Rect, at: Position) -> Command {
     Command::ExplorerActivateRow(row + app.sidebar.scroll)
 }
 
-/// Clicking an unfocused sidebar panel focuses it; clicking the focused one
-/// selects the row under the cursor.
-fn sidebar_click(
-    app: &App,
-    panel: Rect,
-    at: Position,
-    target: FocusTarget,
-    mode: SidebarMode,
-) -> Command {
-    if app.focus != target || app.sidebar.mode != mode {
-        return Command::FocusPane(target);
+/// A click on a changed file shows its diff (SPEC §36).
+///
+/// One click, like the explorer's: the panel is a list of changes, and what a
+/// change is *for* is being read. It does not spend the first click on taking
+/// focus either — `open_diff` moves focus to the diff tab it opens, so a click
+/// that only focused the panel would be a click the user has to repeat.
+///
+/// A panel with no rows in it — no repository, or a clean tree — has nothing
+/// to open, so a click there does the one thing a click on a pane always does.
+fn git_click(app: &App, panel: Rect, at: Position) -> Command {
+    if app.git.entries().is_empty() {
+        return Command::FocusPane(FocusTarget::GitPanel);
     }
     let row = at.y.saturating_sub(panel.y + PANEL_HEADER_ROWS) as usize;
-    Command::SelectSidebarRow(row + sidebar_scroll(app, mode))
-}
-
-fn sidebar_scroll(app: &App, mode: SidebarMode) -> usize {
-    match mode {
-        SidebarMode::Explorer => app.sidebar.scroll,
-        SidebarMode::Git => app.git.scroll,
-    }
+    Command::GitDiffRow(row + app.git.scroll)
 }
 
 fn scroll(rects: &LayoutRects, at: Position, delta: i16) -> Option<Command> {
@@ -319,12 +315,15 @@ fn scroll(rects: &LayoutRects, at: Position, delta: i16) -> Option<Command> {
     if rects.diff.is_some_and(|diff| diff.contains(at)) {
         return Some(Command::DiffScroll(delta));
     }
+    // The wheel over the tab strip scrolls the strip, not the document under
+    // it: a bar with more tabs on it than fit is the one place where the thing
+    // the pointer is over has a sideways axis of its own.
+    if rects.tab_bar.contains(at) {
+        return Some(Command::ScrollTabs(delta));
+    }
     // The scrollbar column counts as the editor: a wheel on the bar is a wheel
     // on the thing it scrolls, the same way the browser's frame works.
-    if rects.editor.contains(at)
-        || rects.editor_scrollbar.contains(at)
-        || rects.tab_bar.contains(at)
-    {
+    if rects.editor.contains(at) || rects.editor_scrollbar.contains(at) {
         return Some(Command::ScrollEditor(delta));
     }
     if rects.explorer.contains(at) || rects.git_panel.contains(at) {
@@ -611,14 +610,43 @@ mod tests {
         );
     }
 
+    /// A click on a changed file opens that file's diff, whatever had focus:
+    /// the panel is a list of changes and reading one is what it is for
+    /// (SPEC §36).
     #[test]
-    fn clicking_an_unfocused_git_panel_focuses_it_before_selecting() {
+    fn clicking_a_changed_file_asks_for_its_diff() {
         let app = app();
         let r = rects(&app);
         assert_eq!(app.focus, FocusTarget::Editor);
         assert_eq!(
             hit_test(&app, &r, click(r.git_panel.x + 2, r.git_panel.y + 2)),
+            Some(Command::GitDiffRow(1))
+        );
+    }
+
+    /// A panel with no rows in it — no repository, or a clean tree — has
+    /// nothing to open, so the click does what a click on a pane always does.
+    #[test]
+    fn clicking_an_empty_git_panel_only_focuses_it() {
+        let mut app = app();
+        app.git = crate::app::git::GitState::default();
+        let r = rects(&app);
+        assert_eq!(
+            hit_test(&app, &r, click(r.git_panel.x + 2, r.git_panel.y + 2)),
             Some(Command::FocusPane(FocusTarget::GitPanel))
+        );
+    }
+
+    /// A scrolled panel opens the row the offset points at, not the second
+    /// one drawn.
+    #[test]
+    fn a_scrolled_git_panel_opens_the_row_the_offset_points_at() {
+        let mut app = app();
+        app.git.scroll = 3;
+        let r = rects(&app);
+        assert_eq!(
+            hit_test(&app, &r, click(r.git_panel.x + 2, r.git_panel.y + 2)),
+            Some(Command::GitDiffRow(4))
         );
     }
 
@@ -892,12 +920,12 @@ mod tests {
         use crate::git::diff::{Diff, DiffSide};
 
         let mut app = app();
-        app.diff = Some(DiffState::new(
+        app.tabs.push(crate::app::TabItem::Diff(DiffState::new(
             std::path::Path::new("src/main.rs"),
             DiffSide::Worktree,
             Diff::parse("@@ -1 +1 @@\n-a\n+b\n"),
-            FocusTarget::GitPanel,
-        ));
+        )));
+        app.active_tab = Some(app.tabs.len() - 1);
         app.focus = FocusTarget::Diff;
         app
     }

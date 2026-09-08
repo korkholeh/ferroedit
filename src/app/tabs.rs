@@ -7,6 +7,7 @@
 
 use std::path::Path;
 
+use crate::app::diff::DiffState;
 use crate::app::EditorView;
 use crate::editor::document::Document;
 use crate::editor::viewport::Viewport;
@@ -23,6 +24,88 @@ pub enum Stale {
     Changed,
     /// It is not there any more.
     Gone,
+}
+
+/// One tab of the strip: a file being edited, or a diff being read.
+///
+/// A diff is a tab rather than a pane drawn over the editor (it was one until
+/// ADR-037): it is a thing the user opens, keeps, comes back to and closes, and
+/// every one of those verbs already had an answer for tabs. What it is *not*
+/// is a document — there is no cursor in it and nothing to save — which is why
+/// it is a variant here rather than a flag on `Tab`. Every command that edits
+/// goes through `App::active`, and that answers `None` for a diff tab, so a
+/// read-only tab is read-only by construction rather than by a guard in each
+/// of forty commands.
+#[derive(Debug)]
+pub enum TabItem {
+    /// Boxed because a `Tab` is several times the size of a `DiffState`, and
+    /// every element of `App::tabs` would otherwise be as big as the largest
+    /// of them — a strip of diffs paying for documents that are not there.
+    Editor(Box<Tab>),
+    Diff(DiffState),
+}
+
+impl TabItem {
+    pub fn editor(&self) -> Option<&Tab> {
+        match self {
+            Self::Editor(tab) => Some(tab),
+            Self::Diff(_) => None,
+        }
+    }
+
+    pub fn editor_mut(&mut self) -> Option<&mut Tab> {
+        match self {
+            Self::Editor(tab) => Some(tab),
+            Self::Diff(_) => None,
+        }
+    }
+
+    /// A tab over an open document.
+    pub fn editing(tab: Tab) -> Self {
+        Self::Editor(Box::new(tab))
+    }
+
+    pub fn diff(&self) -> Option<&DiffState> {
+        match self {
+            Self::Diff(diff) => Some(diff),
+            Self::Editor(_) => None,
+        }
+    }
+
+    pub fn diff_mut(&mut self) -> Option<&mut DiffState> {
+        match self {
+            Self::Diff(diff) => Some(diff),
+            Self::Editor(_) => None,
+        }
+    }
+
+    /// What the tab bar draws. A diff says whose diff it is: two tabs called
+    /// `main.rs` — one being edited and one being read — would be a strip the
+    /// user has to guess at.
+    pub fn title(&self) -> String {
+        match self {
+            Self::Editor(tab) => tab.document.title().to_string(),
+            Self::Diff(diff) => format!("Diff: {}", diff.name()),
+        }
+    }
+
+    /// Whether the tab has unsaved changes. A diff never does: there is
+    /// nothing in it to change.
+    pub fn is_dirty(&self) -> bool {
+        self.editor().is_some_and(|tab| tab.document.is_dirty())
+    }
+
+    /// What happened to the file underneath, for a tab that has one.
+    pub fn stale(&self) -> Option<Stale> {
+        self.editor().and_then(|tab| tab.stale)
+    }
+
+    /// Whether this is the tab that file is *edited* in. A diff of the same
+    /// file is deliberately not a match: opening the file has to reach the
+    /// buffer, not the diff beside it.
+    pub fn is_at(&self, path: &Path) -> bool {
+        self.editor().is_some_and(|tab| tab.is_at(path))
+    }
 }
 
 /// One open editor tab: a document and where the pane is scrolled to.

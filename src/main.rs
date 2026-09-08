@@ -72,6 +72,10 @@ fn run(cli: &Cli) -> Result<()> {
     );
 
     let mut app = App::new(workspace);
+    // The settings file is read here and nowhere else: `App::new` is what every
+    // test builds, and none of them may touch the user's real config.
+    app.settings = config::Settings::load();
+    app.persist_settings = true;
     log::info!(
         "clipboard writes go to the {}",
         app.clipboard.outward_name()
@@ -92,7 +96,6 @@ fn run(cli: &Cli) -> Result<()> {
     // something has changed (SPEC §30).
     let root = app.workspace.root().to_path_buf();
     app.git.discover(&root);
-    let theme = Theme::default();
 
     // The hook goes in before the guard so a panic inside `TerminalGuard::new`
     // is also covered.
@@ -122,6 +125,12 @@ fn run(cli: &Cli) -> Result<()> {
     spawn_input_thread(tx);
 
     let mut rects = LayoutRects::default();
+    // The tab the strip was last scrolled to show. The strip follows the active
+    // tab when it *changes* and not on every frame, so that scrolling it away
+    // from the file being edited sticks (SPEC §11).
+    let mut shown_tab = app.active_tab;
+    let mut theme_kind = app.settings.theme;
+    let mut theme = Theme::new(theme_kind);
     while !app.should_quit {
         app.notifications.prune();
 
@@ -131,6 +140,18 @@ fn run(cli: &Cli) -> Result<()> {
         // the document changed.
         app.sync_highlight();
         app.sync_search();
+
+        if shown_tab != app.active_tab {
+            shown_tab = app.active_tab;
+            app.tab_scroll = ui::layout::tab_scroll_showing(&app);
+        }
+
+        // Rebuilt when the choice changes rather than on every frame: a theme
+        // is two dozen colours, and the View menu is not a hot path.
+        if theme_kind != app.settings.theme {
+            theme_kind = app.settings.theme;
+            theme = Theme::new(theme_kind);
+        }
 
         // The rects are computed inside the draw closure, where the real frame
         // area is known, and handed back out for the next mouse hit-test.
@@ -186,6 +207,7 @@ fn sync_editor_view(app: &mut App, rects: &LayoutRects) -> bool {
     app.help_cols = rects.help.map_or(0, |help| help.width.saturating_sub(2));
     // Already the inner area of the browser's frame, so nothing is subtracted.
     app.dialog_rows = rects.dialog_list.map_or(0, |list| list.height);
+    app.tab_bar_width = rects.tab_bar.width;
 
     let view = EditorView {
         width: rects.editor.width,
@@ -368,9 +390,9 @@ mod tests {
     #[test]
     fn the_first_layout_scrolls_the_cursor_into_view() {
         let mut app = App::fixture();
-        app.tabs[0] = app::Tab::scratch("long.txt", &"line\n".repeat(60));
+        app.tabs[0] = app::TabItem::editing(app::Tab::scratch("long.txt", &"line\n".repeat(60)));
         app.editor_view = app::EditorView::default();
-        app.tabs[0].document.goto_line(42);
+        app.tab_mut(0).document.goto_line(42);
 
         let rects = LayoutRects {
             editor: Rect::new(20, 2, 60, 20),
@@ -378,7 +400,11 @@ mod tests {
         };
 
         assert!(sync_editor_view(&mut app, &rects), "the size changed");
-        assert_eq!(app.tabs[0].viewport.top_line, 22, "line 42 is the last row");
+        assert_eq!(
+            app.tab_mut(0).viewport.top_line,
+            22,
+            "line 42 is the last row"
+        );
         assert!(!sync_editor_view(&mut app, &rects), "and settles");
     }
 }

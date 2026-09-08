@@ -147,7 +147,9 @@ fn empty_message(app: &App) -> Option<&str> {
 ///
 /// `…src/ui/git.rs` says more about which file a row is than
 /// `src/commands/exe…` does, and the sidebar is too narrow to keep both ends.
-fn elide_left(path: &str, width: usize) -> String {
+/// The explorer's title borrows it for the same reason: the tail of a project
+/// path is the part that names it.
+pub(crate) fn elide_left(path: &str, width: usize) -> String {
     if path.width() <= width {
         return path.to_string();
     }

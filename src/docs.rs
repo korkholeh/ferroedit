@@ -56,9 +56,9 @@ const SECTIONS: &[(Option<FocusTarget>, &str, &str)] = &[
     (
         Some(FocusTarget::Diff),
         "Diff viewer",
-        "The read-only unified diff (SPEC §36), drawn over the editor pane. It \
-         closes as soon as another pane takes focus, so its keys are a pager's \
-         and nothing here types.",
+        "The read-only unified diff (SPEC §36). It opens in a tab of its own, \
+         beside the files being edited, and closes like one — so its keys are a \
+         pager's and nothing here types.",
     ),
     (
         Some(FocusTarget::Help),
@@ -182,7 +182,8 @@ selected walks into it, so browsing costs one click a step, and the wheel over i
 moves the selection through them (ADR-051). Clicking in the editor places the cursor, dragging selects, and a double-click selects \
 the word under the pointer. The wheel scrolls the pane under the pointer without moving \
 the cursor. Clicking a tab switches to it; clicking its `×`, or middle-clicking it, \
-closes it. Clicking a row in the explorer opens the file or folds the directory in one \
+closes it. When there are more tabs than fit, the wheel over the tab strip scrolls it \
+sideways and its `‹` and `›` arrows step it one tab at a time. Clicking a row in the explorer opens the file or folds the directory in one \
 click (ADR-020). Clicking a row of the find bar puts the caret in that row's field, and \
 its `[Aa]`, `[Replace]` and `[All]` are clickable — the fallback for terminals that \
 swallow `Alt`.
@@ -272,7 +273,7 @@ fn write_menus(out: &mut String) {
          the explorer.\n\n| Menu | Item | Shortcut | Where |\n|---|---|---|---|\n",
     );
     for menu in MENUS {
-        for item in menu.items {
+        for item in menu.entries() {
             let binding = binding_for(&item.command);
             let shortcut = binding.map_or_else(|| "—".to_string(), |b| format!("`{}`", b.label));
             let scope = match binding {

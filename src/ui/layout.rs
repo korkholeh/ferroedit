@@ -229,7 +229,7 @@ pub fn compute(area: Rect, app: &App) -> LayoutRects {
         editor,
         editor_scrollbar,
         help: app.help.as_ref().map(|_| body),
-        diff: app.diff.as_ref().map(|_| pane),
+        diff: app.diff().map(|_| pane),
         search,
         status_bar,
         dialog,
@@ -368,22 +368,18 @@ struct TabBarLayout {
 /// scrolled to a tab that no longer exists, because it is recomputed from the
 /// tabs themselves on every frame.
 fn tab_bar_layout(app: &App, bar: Rect) -> TabBarLayout {
-    let widths: Vec<u16> = app
-        .tabs
-        .iter()
-        .map(|tab| tab_width(tab.document.title()))
-        .collect();
-    let total: u32 = widths.iter().map(|w| *w as u32).sum();
-    let overflowing = total > bar.width as u32;
+    let widths = tab_widths(app);
+    let strip = strip_width(&widths, bar.width);
+    let overflowing = strip < bar.width;
     // A cell at each end for the "more tabs this way" markers, taken out of the
     // space the tabs are laid out in so a marker never covers a file name.
     let inner = if overflowing {
-        Rect::new(bar.x + 1, bar.y, bar.width.saturating_sub(2), 1)
+        Rect::new(bar.x + 1, bar.y, strip, 1)
     } else {
         bar
     };
 
-    let first = first_visible_tab(&widths, app.active_tab.unwrap_or(0), inner.width);
+    let first = first_visible_tab(&widths, app.tab_scroll, inner.width);
     let mut tabs = Vec::with_capacity(widths.len());
     let mut closes = Vec::with_capacity(widths.len());
     let hidden = Rect::new(inner.x, bar.y, 0, 1);
@@ -418,22 +414,85 @@ fn tab_bar_layout(app: &App, bar: Rect) -> TabBarLayout {
     }
 }
 
-/// The earliest tab that can be shown with the active one still fully visible.
+/// Which tab the strip starts at: what it was scrolled to, clamped.
 ///
-/// Preferring to show the tabs *before* the active one is what makes the bar
-/// settle: stepping right through the tabs scrolls one tab at a time instead of
-/// jumping the active tab to the left edge on every switch.
-fn first_visible_tab(widths: &[u16], active: usize, width: u16) -> usize {
+/// Nothing here follows the active tab. The strip is a window the user moves
+/// and the editor moves *for* them when the active tab changes — and the two
+/// cannot both be decided every frame, or scrolling away from the file being
+/// edited would spring back on the next redraw. `tab_scroll_showing` is the
+/// other half, and the run loop calls it when the active tab moves.
+fn first_visible_tab(widths: &[u16], requested: usize, width: u16) -> usize {
     if widths.is_empty() {
         return 0;
     }
-    let mut first = active.min(widths.len() - 1);
-    let mut used = widths[first] as u32;
-    while first > 0 && used + widths[first - 1] as u32 <= width as u32 {
-        first -= 1;
-        used += widths[first] as u32;
+    requested
+        .min(widths.len() - 1)
+        .min(max_first(widths, width))
+}
+
+/// Where the strip has to be scrolled to for the active tab to be whole.
+///
+/// The answer is the current scroll whenever the active tab is already on
+/// screen, so switching between two visible tabs does not move the strip at
+/// all. Called by the run loop when the active tab changes, and only then.
+pub fn tab_scroll_showing(app: &App) -> usize {
+    let widths = tab_widths(app);
+    if widths.is_empty() {
+        return 0;
+    }
+    let width = strip_width(&widths, app.tab_bar_width);
+    let last = widths.len() - 1;
+    let active = app.active_tab.unwrap_or(0).min(last);
+    let mut first = first_visible_tab(&widths, app.tab_scroll, width);
+
+    // In front of the window: the strip goes back to it.
+    if active < first {
+        return active;
+    }
+    // Behind it: the left edge walks in until it fits. The walk stops at the
+    // active tab itself, so a tab wider than the whole bar is shown from its
+    // own left edge rather than not at all.
+    let mut used: u32 = widths[first..=active].iter().map(|w| *w as u32).sum();
+    while first < active && used > width as u32 {
+        used -= widths[first] as u32;
+        first += 1;
     }
     first
+}
+
+fn tab_widths(app: &App) -> Vec<u16> {
+    app.tabs.iter().map(|tab| tab_width(&tab.title())).collect()
+}
+
+/// Cells the tabs are laid out in: the whole bar, or two less when the strip
+/// overflows and the two overflow arrows need a cell each.
+fn strip_width(widths: &[u16], bar_width: u16) -> u16 {
+    let total: u32 = widths.iter().map(|w| *w as u32).sum();
+    if total > bar_width as u32 {
+        bar_width.saturating_sub(2)
+    } else {
+        bar_width
+    }
+}
+
+/// The furthest the strip may be scrolled: the earliest tab from which the
+/// rest of them still fit inside the bar.
+///
+/// Scrolling one tab further would leave a gap at the right edge, which is
+/// motion that shows nothing new.
+fn max_first(widths: &[u16], width: u16) -> usize {
+    let last = widths.len().saturating_sub(1);
+    let mut tail = 0u32;
+    for (index, w) in widths.iter().enumerate().rev() {
+        tail += *w as u32;
+        if tail > width as u32 {
+            // The tabs from `index` on overflow the bar, so the last start
+            // that does not is the one after it — unless there is no such
+            // start at all, which is a single tab wider than the whole bar.
+            return (index + 1).min(last);
+        }
+    }
+    0
 }
 
 /// Cells between a tab's right edge and its close button: `× ` .
@@ -522,9 +581,10 @@ fn button_rects(popup: Rect, buttons: &[DialogButton]) -> Vec<Rect> {
 /// Drop-down under a menu title, pushed left when it would overflow the frame.
 fn popup_rect(area: Rect, title: Rect, index: usize) -> Rect {
     let menu = &MENUS[index];
+    // Separators have no label, so they never widen a popup: the box is as
+    // wide as its widest entry, rule or no rule.
     let width = menu
-        .items
-        .iter()
+        .entries()
         .map(|i| i.label.width() + shortcut_for(&i.command).unwrap_or("").width() + 4)
         .max()
         .unwrap_or(10) as u16
@@ -615,6 +675,57 @@ mod tests {
     }
 
     #[test]
+    fn the_strip_starts_where_it_was_scrolled_to() {
+        let widths = [10, 10, 10, 10, 10];
+        assert_eq!(first_visible_tab(&widths, 2, 30), 2);
+    }
+
+    /// No scrolling into a half-empty bar.
+    #[test]
+    fn the_strip_stops_when_the_last_tabs_fill_the_bar() {
+        let widths = [10, 10, 10, 10, 10];
+        assert_eq!(max_first(&widths, 30), 2, "three tabs fill 30 cells");
+        assert_eq!(first_visible_tab(&widths, 4, 30), 2);
+        assert_eq!(max_first(&widths, 100), 0, "they all fit already");
+        assert_eq!(first_visible_tab(&widths, 4, 100), 0);
+    }
+
+    /// A tab wider than the bar is drawn from its own left edge rather than
+    /// skipped, and a strip with nothing on it has nowhere to scroll to.
+    #[test]
+    fn the_awkward_shapes_do_not_panic() {
+        assert_eq!(first_visible_tab(&[40], 0, 20), 0);
+        assert_eq!(first_visible_tab(&[], 3, 20), 0);
+        // Both fit, so there is nothing to scroll past.
+        assert_eq!(first_visible_tab(&[10, 10], 99, 20), 0);
+    }
+
+    /// Switching to a tab off the right edge pulls the strip along; switching
+    /// back to one in front of the window pulls it back.
+    #[test]
+    fn the_strip_follows_the_active_tab_when_it_changes() {
+        let mut app = App::fixture_with_tabs(12);
+        // Twelve `file00.rs` tabs are fifteen cells each; a 60-cell bar with
+        // an arrow at each end lays them out in 58, so three fit at a time.
+        app.tab_bar_width = 60;
+        assert_eq!(tab_width("file00.rs"), 15);
+
+        app.active_tab = Some(11);
+        assert_eq!(tab_scroll_showing(&app), 9);
+
+        app.tab_scroll = 9;
+        app.active_tab = Some(10);
+        assert_eq!(
+            tab_scroll_showing(&app),
+            9,
+            "a tab already on screen does not move the strip"
+        );
+
+        app.active_tab = Some(0);
+        assert_eq!(tab_scroll_showing(&app), 0);
+    }
+
+    #[test]
     fn tab_rects_are_ordered_and_stay_inside_the_tab_bar() {
         let rects = compute(Rect::new(0, 0, 120, 30), &app());
         assert_eq!(rects.tabs.len(), 3);
@@ -658,7 +769,10 @@ mod tests {
         assert!(rects.tab_overflow_left.is_none());
         assert!(rects.tab_overflow_right.is_some());
 
+        // What the run loop does when the active tab changes.
+        app.tab_bar_width = rects.tab_bar.width;
         app.active_tab = Some(11);
+        app.tab_scroll = tab_scroll_showing(&app);
         let rects = compute(area, &app);
         assert!(rects.tabs[11].width > 0, "now it is");
         assert_eq!(rects.tabs[0].width, 0);

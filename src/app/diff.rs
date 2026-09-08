@@ -1,13 +1,14 @@
 //! The diff viewer's state: which file, which side, and where it is scrolled.
 //!
 //! Read-only by construction (SPEC §36): there is no document, no cursor and
-//! no history here, only lines and an offset into them. A viewer exists while
-//! it is on screen and is thrown away when it closes, so a stale diff cannot
-//! outlive the file it described.
+//! no history here, only lines and an offset into them. It is the payload of a
+//! tab of its own (`app::tabs::TabItem::Diff`), so a diff is opened, kept,
+//! switched away from and closed exactly like a file — and it is re-read
+//! whenever the repository changes, so a tab left open does not go on showing
+//! a change that has since been staged.
 
 use std::path::{Path, PathBuf};
 
-use crate::app::focus::FocusTarget;
 use crate::git::diff::{Diff, DiffSide};
 
 /// Columns one press of `Left` or `Right` moves the window by.
@@ -26,20 +27,26 @@ pub struct DiffState {
     pub scroll: usize,
     /// First display column drawn.
     pub h_scroll: usize,
-    /// Where focus goes when the viewer closes — the pane it was opened from.
-    pub return_focus: FocusTarget,
 }
 
 impl DiffState {
-    pub fn new(path: &Path, side: DiffSide, diff: Diff, return_focus: FocusTarget) -> Self {
+    pub fn new(path: &Path, side: DiffSide, diff: Diff) -> Self {
         Self {
             path: path.to_path_buf(),
             side,
             diff,
             scroll: 0,
             h_scroll: 0,
-            return_focus,
         }
+    }
+
+    /// The file name alone, for the tab strip. A tab is a dozen cells wide and
+    /// `src/commands/execute.rs` is not.
+    pub fn name(&self) -> String {
+        self.path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.path.display().to_string())
     }
 
     /// ` Diff — src/main.rs [worktree] +12 −3 `.
@@ -123,12 +130,7 @@ mod tests {
     }
 
     fn viewer(lines: usize) -> DiffState {
-        DiffState::new(
-            Path::new("src/main.rs"),
-            DiffSide::Worktree,
-            diff(lines),
-            FocusTarget::GitPanel,
-        )
+        DiffState::new(Path::new("src/main.rs"), DiffSide::Worktree, diff(lines))
     }
 
     #[test]

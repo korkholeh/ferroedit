@@ -1,9 +1,9 @@
 //! UI: the read-only diff viewer (SPEC §36).
 //!
-//! A pane drawn over the editor, one line per line of `git diff`, coloured by
-//! what each line already is: the classification happened once, when the diff
-//! was read (ARCHITECTURE invariant 4), so this file decides colours and
-//! columns and nothing else.
+//! The editor pane, drawn for a tab that holds a diff instead of a document:
+//! one line per line of `git diff`, coloured by what each line already is. The
+//! classification happened once, when the diff was read (ARCHITECTURE
+//! invariant 4), so this file decides colours and columns and nothing else.
 //!
 //! Long lines scroll sideways rather than wrapping. A wrapped diff loses the
 //! one thing a diff has going for it — that the `+` and the `−` line up down
@@ -23,7 +23,7 @@ use crate::git::diff::DiffLineKind;
 use crate::ui::theme::Theme;
 
 pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
-    let Some(viewer) = app.diff.as_ref() else {
+    let Some(viewer) = app.diff() else {
         return;
     };
     let focused = app.focus == FocusTarget::Diff;

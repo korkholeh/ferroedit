@@ -110,11 +110,11 @@ The changed-files list (SPEC §31, §33, §35). Everything that writes to the re
 
 ## Diff viewer
 
-The read-only unified diff (SPEC §36), drawn over the editor pane. It closes as soon as another pane takes focus, so its keys are a pager's and nothing here types.
+The read-only unified diff (SPEC §36). It opens in a tab of its own, beside the files being edited, and closes like one — so its keys are a pager's and nothing here types.
 
 | Keys | Action |
 |---|---|
-| `Esc` | Close the diff viewer |
+| `Esc` | Close the diff tab |
 | `Up` | Scroll up a line |
 | `Down` | Scroll down a line |
 | `PageUp` | Scroll up a page |
@@ -224,12 +224,12 @@ Every item is a command, and the *Shortcut* column is the same lookup the menu i
 |---|---|---|---|
 | File | New File | `Ctrl+N` | anywhere |
 | File | New Folder | — | — |
-| File | Rename… | `F2` | Explorer |
-| File | Delete | `Delete` | Explorer |
 | File | Open… | `Ctrl+O` | anywhere |
 | File | Save | `Ctrl+S` | anywhere |
 | File | Save As… | — | — |
 | File | Reload | `F5` | Editor |
+| File | Rename… | `F2` | Explorer |
+| File | Delete | `Delete` | Explorer |
 | File | Close Tab | `Ctrl+W` | anywhere |
 | File | Quit | `Ctrl+Q` | anywhere |
 | Edit | Undo | `Ctrl+Z` | Editor |
@@ -251,6 +251,11 @@ Every item is a command, and the *Shortcut* column is the same lookup the menu i
 | View | Focus Explorer | — | — |
 | View | Focus Git | — | — |
 | View | Focus Editor | — | — |
+| View | Theme: Dark | — | — |
+| View | Theme: Light | — | — |
+| View | Theme: Dark Simple | — | — |
+| View | Theme: Light Simple | — | — |
+| View | Theme: Borland | — | — |
 | Git | Refresh | `F5` | Git panel |
 | Git | Stage | — | — |
 | Git | Unstage | — | — |
@@ -269,7 +274,7 @@ Every item is a command, and the *Shortcut* column is the same lookup the menu i
 
 ## Mouse
 
-Clicking a row of a dialog's list selects it without choosing it — unlike the explorer's rows (ADR-020), the confirm button is right there and choosing a branch by accident is a checkout. The Open browser is the exception: a click on the row that is *already* selected walks into it, so browsing costs one click a step, and the wheel over its rows moves the selection through them (ADR-051). Clicking in the editor places the cursor, dragging selects, and a double-click selects the word under the pointer. The wheel scrolls the pane under the pointer without moving the cursor. Clicking a tab switches to it; clicking its `×`, or middle-clicking it, closes it. Clicking a row in the explorer opens the file or folds the directory in one click (ADR-020). Clicking a row of the find bar puts the caret in that row's field, and its `[Aa]`, `[Replace]` and `[All]` are clickable — the fallback for terminals that swallow `Alt`.
+Clicking a row of a dialog's list selects it without choosing it — unlike the explorer's rows (ADR-020), the confirm button is right there and choosing a branch by accident is a checkout. The Open browser is the exception: a click on the row that is *already* selected walks into it, so browsing costs one click a step, and the wheel over its rows moves the selection through them (ADR-051). Clicking in the editor places the cursor, dragging selects, and a double-click selects the word under the pointer. The wheel scrolls the pane under the pointer without moving the cursor. Clicking a tab switches to it; clicking its `×`, or middle-clicking it, closes it. When there are more tabs than fit, the wheel over the tab strip scrolls it sideways and its `‹` and `›` arrows step it one tab at a time. Clicking a row in the explorer opens the file or folds the directory in one click (ADR-020). Clicking a row of the find bar puts the caret in that row's field, and its `[Aa]`, `[Replace]` and `[All]` are clickable — the fallback for terminals that swallow `Alt`.
 
 ## Terminal limits
 

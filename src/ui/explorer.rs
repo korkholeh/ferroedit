@@ -12,15 +12,35 @@ use crate::filesystem::tree::EntryKind;
 use crate::ui::scrollbar;
 use crate::ui::theme::Theme;
 
+/// ` Files — ferroedit `, with the folder name cut from the left when the
+/// sidebar is too narrow for both halves.
+///
+/// "Files" rather than the folder name alone: the sidebar has two panes, and
+/// the one below it says "Git" — a title that named only the directory left
+/// the top pane as the one that did not say what it was. It is the half that
+/// survives a narrow sidebar, too, because it is the half that is the same
+/// width in every workspace.
+fn title(app: &App, width: u16) -> String {
+    /// ` Files — ` and the trailing space: everything in the title that is
+    /// not the folder's name.
+    const CHROME: usize = 10;
+    let name = app.workspace.name();
+    // One column of the pane is its right border, and the title is drawn on
+    // the row above the rows, so the room it has is the pane less that border.
+    let room = (width as usize).saturating_sub(1);
+    let for_name = room.saturating_sub(CHROME);
+    if for_name == 0 {
+        return " Files ".to_string();
+    }
+    format!(" Files — {} ", crate::ui::git::elide_left(name, for_name))
+}
+
 pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let focused = app.focus == FocusTarget::Explorer;
     let block = Block::new()
         .borders(Borders::RIGHT)
         .border_style(theme.border_for(focused))
-        .title(Span::styled(
-            format!(" {} ", app.workspace.name()),
-            theme.panel_title,
-        ));
+        .title(Span::styled(title(app, area.width), theme.panel_title));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -100,5 +120,30 @@ pub fn selection_style(theme: &Theme, focused: bool) -> Style {
         theme.selection
     } else {
         theme.selection_unfocused
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn the_title_names_the_pane_and_the_folder() {
+        let app = App::fixture();
+        assert_eq!(title(&app, 40), " Files — ferroedit-test ");
+    }
+
+    /// A sidebar too narrow for both keeps "Files" and cuts the folder name
+    /// from the left, which is the end that says which folder it is.
+    #[test]
+    fn a_narrow_sidebar_keeps_the_word_and_elides_the_folder() {
+        let app = App::fixture();
+        let narrow = title(&app, 16);
+        assert!(narrow.starts_with(" Files — "), "{narrow:?}");
+        assert!(narrow.contains('…'), "{narrow:?}");
+        assert!(narrow.width() <= 15, "{narrow:?}");
+        // Narrower still: the folder name goes rather than the pane's name.
+        assert_eq!(title(&app, 8), " Files ");
     }
 }

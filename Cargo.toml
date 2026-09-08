@@ -31,6 +31,9 @@ syntect = { version = "5.2", default-features = false, features = [
 ] }
 ignore = "0.4"
 serde = { version = "1", features = ["derive"] }
+# The settings file is JSON (`~/.config/ferroedit/config.json`): a path and a
+# format a user can guess, on every platform the editor runs on.
+serde_json = "1"
 toml = "0.8"
 directories = "5"
 anyhow = "1"

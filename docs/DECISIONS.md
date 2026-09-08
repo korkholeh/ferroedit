@@ -889,6 +889,10 @@ one branch operation that loses work.
 
 ## ADR-037: The diff viewer is a pane over the editor, and it dies with its focus
 
+> **Superseded by ADR-053.** A diff is a tab now, so it neither covers the editor nor
+> dies with its focus. The rest of this record still explains why it is read-only and why
+> it is re-read rather than kept.
+
 **Decision.** The unified diff of SPEC §36 is drawn as a bordered pane occupying the
 editor's rect, with its own `FocusTarget::Diff` and a pager's keys. It is neither a
 dialog nor a split: it covers the editor rather than shrinking it, and it is closed
@@ -1653,3 +1657,128 @@ count, which is exact because the editor does not wrap: one line is one row. An 
 scrolled past its last page — it may scroll until only the last line is left — pins the
 thumb at the bottom rather than running off it, since "you are at the end" is what that
 state means.
+
+---
+
+## ADR-053: A diff is a tab, not a pane over the editor
+
+**Decision.** `App::tabs` is a `Vec<TabItem>`, and a `TabItem` is either an `Editor(Tab)`
+or a `Diff(DiffState)`. The diff viewer is no longer an `Option<DiffState>` drawn over the
+editor and closed by the next focus change (ADR-037): it is opened, kept, switched away
+from, returned to and closed exactly like a file.
+
+**Why.** Every verb the user already had for tabs was the verb they wanted for a diff.
+Under ADR-037 a diff could not survive a glance at the sidebar — staging the file it was
+showing meant losing it, which is the one moment the diff is most worth having. It also
+could not be *compared*: reading two changed files meant re-opening one of them.
+
+**How read-only stays read-only.** `App::active` answers `Option<&Tab>` and returns `None`
+for a diff tab, so every editing command — all forty of them, which all go through
+`active`/`active_mut` — is a no-op over a diff without a guard of its own. The
+alternative, a `read_only` flag on `Tab` with a check in each command, is forty places to
+forget it in.
+
+**Focus.** `FocusTarget::Diff` and `FocusTarget::Editor` are the same *pane* in two
+states, so which one is right is a function of the tab in front rather than something each
+of the commands that switch tabs has to set. `App::normalize_focus` settles it once, in
+the epilogue of `execute_command`, next to the check that closes the help screen. The
+cycle key treats `Diff` as the editor's slot, or `normalize_focus` would put focus
+straight back on a diff the user was trying to cycle out of.
+
+**Following the repository.** Every diff tab is re-read after every git operation, not
+just the one in front: staging a file changes the answer for its tab whether or not that
+tab is the one being read. A tab whose diff has emptied closes, which is what ADR-037's
+viewer did and for the same reason — a diff of nothing is not an answer.
+
+**Consequence.** `DiffState` lost `return_focus`: there is nowhere to return to, because
+closing a tab already says which one comes forward. Opening the diff of a file that
+already has a diff tab reuses that tab, the way opening an open file reuses its own; the
+side (`worktree` / `staged`) is part of what a tab shows and not of which tab it is, so
+turning one over does not open a second. The status bar reads a diff tab as a pager —
+position and side, no cursor, no encoding, no grammar — because it has none of those.
+
+A click on a row of the git panel now opens that file's diff in one go, and leaves focus
+in the panel: the point of clicking down a list of changed files is to read them one after
+another, and a click that moved focus into the diff would cost a click back for every
+file, and take `Space` away from the row under the pointer. `Command::SelectSidebarRow`
+went with it — it had no producer left.
+
+---
+
+## ADR-054: The tab strip is a window the user moves, corrected when the active tab changes
+
+**Decision.** `App::tab_scroll` holds the tab the strip starts at. The layout clamps it —
+never past the last tab, never so far right that the remaining tabs stop filling the bar —
+and does nothing else. Following the *active* tab is a separate step, `tab_scroll_showing`,
+which the run loop calls only when the active tab has changed.
+
+**Why not derive it, as before.** The strip used to compute its start from the active tab
+on every frame, which meant it could not be scrolled at all: any offset the user chose was
+recomputed away on the next redraw. The two rules — "show me what I scrolled to" and "show
+me what I am editing" — cannot both be applied every frame, so they are applied at
+different times. Scrolling the wheel over the strip sticks; switching tabs pulls the strip
+along, which is what it always did.
+
+**Consequence.** `App` mirrors `tab_bar_width` out of the last frame's layout, the way it
+already mirrors `editor_view` and `explorer_rows`, because how far the strip must be
+scrolled depends on how much of it is visible. The two overflow arrows became clickable —
+each scrolls one tab towards the tabs it points at — since they now have something to do
+that `Ctrl+Tab` does not already do.
+
+---
+
+## ADR-055: Themes are a palette, and the choice lives in ~/.config/ferroedit/config.json
+
+**Decision.** `Theme` is built from a `Palette` of two dozen colours named by *role*
+(`chrome` is "the ground the menu bar, the status bar and an inactive tab share"), not
+written out style by style. Five palettes ship: dark, light, the same two drawn from the
+sixteen ANSI colours, and Turbo Vision's blue-and-yellow. The choice is written to
+`~/.config/ferroedit/config.json` as soon as it is made.
+
+**Why a palette.** ADR-007 already required that no widget hardcode a colour, which made a
+second theme "a data change" in principle — but in practice it was a copy of forty
+`Style`s, thirty-nine of which would be identical in structure and only differ in which
+colour went where. The rules about *how* a colour is used now live in one function, so a
+new theme cannot get one of them wrong: it supplies colours and nothing else.
+
+**Why the ANSI variants.** A 256-colour index is a fixed colour; the sixteen ANSI ones are
+whatever the terminal's own palette says. A user who has spent an afternoon on a colour
+scheme wants the editor to use it, and a terminal whose 256-colour approximations are poor
+— Terminal.app is the reason ADR-007 exists — is better served by eight colours it renders
+exactly than by two hundred it renders nearly.
+
+**Why that path, and why JSON.** `directories` would put the file under
+`~/Library/Application Support` on macOS, which is not a path a user guesses or types.
+`~/.config/ferroedit/config.json` is the same on macOS and Linux, `$XDG_CONFIG_HOME` moves
+it, and JSON is the format that needs no explanation. (The log stays where `directories`
+puts it: nobody edits a log.)
+
+**Failure is never fatal.** A missing, unreadable or malformed config leaves the defaults
+in place and logs why. An editor that refused to start over its own preferences file would
+be an editor that cannot be used to fix it. `#[serde(default)]` means a file written by an
+older build stays valid.
+
+**Consequence.** `App::settings` is loaded by `main` and not by `App::new`, and
+`persist_settings` is off unless the binary turns it on, so nothing in a test reads or
+writes the config of whoever is running it. The View menu carries one entry per theme, and
+a test asserts every `ThemeKind` has one — a theme nobody can reach is a theme that does
+not exist.
+
+---
+
+## ADR-056: Menus have rules between their groups, and the selection steps over them
+
+**Decision.** A menu's items are `&[MenuEntry]`, where an entry is either an item or a
+`Separator`. A separator is a row: the popup's height counts it, it is drawn as a rule
+across the box, the selection steps over it in both directions, and a click on it does
+nothing — deliberately leaving the menu open, so the user can go on to the entry they were
+aiming for.
+
+**Why a row and not a property.** "This item starts a new group" reads the same on the
+page but not on screen: the popup's geometry, the mouse's hit test and the keyboard's
+selection all count rows, and three of them would have to agree about an invisible one.
+
+**Consequence.** File's Delete sits alone between two rules. It used to be one row above
+Open, where a mis-aimed click found the one entry in the menu that destroys something.
+Two tests hold the shape of every menu: none starts or ends with a rule, and none has two
+in a row.

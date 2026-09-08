@@ -488,6 +488,7 @@ dependencies = [
  "ratatui",
  "ropey",
  "serde",
+ "serde_json",
  "simplelog",
  "syntect",
  "tempfile",

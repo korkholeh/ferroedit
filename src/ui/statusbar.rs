@@ -27,9 +27,16 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             format!(" {}", notification.message),
             theme.status_bar.fg(kind_color(theme, notification.kind)),
         )),
+        // The tab's own title, so a diff tab names the diff rather than
+        // reporting no file open.
         None => Line::from(vec![
             Span::styled(
-                format!(" {}", app.active().map_or("—", |t| t.document.title())),
+                format!(
+                    " {}",
+                    app.active_tab
+                        .and_then(|i| app.tabs.get(i))
+                        .map_or_else(|| "—".to_string(), |tab| tab.title())
+                ),
                 theme.status_bar,
             ),
             Span::styled(
@@ -77,6 +84,27 @@ const MIN_LEFT: u16 = 20;
 /// Separator between the readout's pieces.
 const GAP: &str = "   ";
 
+/// What is left for the readout once the sentence beside it has had its room.
+fn budget(width: u16, left: u16) -> usize {
+    width.saturating_sub(left.max(MIN_LEFT)) as usize
+}
+
+/// Joins the pieces and drops them from the end until they fit.
+///
+/// The diff readout's own trimming: its pieces are already in importance
+/// order — where you are, then what you are looking at — so "drop the last
+/// one" is the whole rule, and a `Piece` with a drop order each would be
+/// ceremony for four strings.
+fn trim_to_budget(pieces: &[String], budget: usize) -> String {
+    for keep in (1..=pieces.len()).rev() {
+        let text = format!(" {} ", pieces[..keep].join(GAP));
+        if text.width() <= budget {
+            return text;
+        }
+    }
+    format!(" {} ", pieces[0])
+}
+
 /// A piece of the readout, and how readily it goes.
 ///
 /// Lower drops later: the cursor position is what the bar is *for* and is never
@@ -94,6 +122,18 @@ fn piece(text: String, drop_order: u8) -> Piece {
 /// The right-hand readout, trimmed to what is left after the sentence beside
 /// it has had what it needs.
 fn readout(app: &App, width: u16, left: u16) -> String {
+    // A diff has no cursor, no encoding and no grammar, so the readout it gets
+    // is the one a pager needs: where in it the window is, and which side of
+    // the change it is showing (SPEC §36).
+    if let Some(viewer) = app.diff() {
+        let pieces = [
+            viewer.position().trim().to_string(),
+            viewer.side.label().to_string(),
+            app.git.branch_label().to_string(),
+            app.focus.label().to_string(),
+        ];
+        return trim_to_budget(&pieces, budget(width, left));
+    }
     let document = app.active().map(|t| &t.document);
     // One-based, and counted in user-perceived characters rather than in chars
     // or cells, because that is the number a human arrives at (SPEC §38).
@@ -132,7 +172,7 @@ fn readout(app: &App, width: u16, left: u16) -> String {
 
     // The leading and trailing spaces keep the readout off a clipped
     // notification and off the right edge.
-    let budget = width.saturating_sub(left.max(MIN_LEFT)) as usize;
+    let budget = budget(width, left);
     let mut worst = 6;
     loop {
         let text = format!(
