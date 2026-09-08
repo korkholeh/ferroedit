@@ -1978,3 +1978,57 @@ constant `UTF-8`, and the picker it opens is filtered and framed like the syntax
 twenty-five rows is past what ten visible ones can be stepped through. `Document::save` can now
 fail for a reason that is not the filesystem, which is why `save_tab`'s error path was already
 the right shape for it.
+
+---
+
+## ADR-060: The one-line install is a script in the repository, not a package
+
+**Decision.** `scripts/install.sh` is the supported way to get a binary:
+
+```
+curl -fsSL https://raw.githubusercontent.com/korkholeh/ferroedit/main/scripts/install.sh | sh
+```
+
+It resolves the latest tag, downloads the `.tar.gz` and the `.sha256` release.yml published
+beside it (ADR-049), refuses to install on a mismatch, and renames the binary into
+`~/.local/bin`. It is POSIX `sh`, wrapped in a `main()` called on the last line, and it
+never uses `sudo`.
+
+**Why.** The alternative was a Homebrew tap and an AUR package, which is four more things
+to keep in lockstep with a release for an editor that does not yet have a stable command
+set. The release assets already exist; a script that reads them adds no release step at
+all, and the same URL works on both platforms and inside a container.
+
+**`main "$@"` on the last line** is the point of the file's shape. A `curl | sh` pipe hands
+the shell bytes as they arrive, so a connection dropped halfway through executes the first
+half of the installer — with a top-level script that means a downloaded tarball and no
+checksum step. With everything in functions, a truncated file defines some of them and then
+ends, having done nothing.
+
+**The checksum is not optional.** A corrupt or substituted download is exactly what the
+published `.sha256` is for, and an installer that skips the check when no hashing tool is
+present has the check only on machines that did not need it. It fails instead, and
+`FERROEDIT_NO_VERIFY=1` is the deliberate way out.
+
+**~/.local/bin, not /usr/local/bin.** `curl | sh` that also asks for a password is the
+combination people are right to refuse, and it is not needed: the XDG user bin directory is
+on `PATH` in every current distribution's default profile, and the script prints the one
+line to add when it is not. `--dir` covers the machine where a system-wide install is
+actually wanted, with the sudo left to the person running it.
+
+**The binary is renamed into place, not copied over.** `cp` onto a running executable fails
+with `ETXTBSY` on Linux, which makes "upgrade while the editor is open" an error; and an
+interrupted `cp` leaves a truncated `ferroedit` on `PATH`. Staging beside the target and
+`mv`-ing is atomic, so the upgrade either happened or did not.
+
+**Rosetta is detected.** Under translation `uname -m` answers `x86_64` on an Apple silicon
+Mac, which would hand it the Intel build to emulate forever;
+`sysctl -n sysctl.proc_translated` is the correction.
+
+**Consequence.** The latest version is read from the redirect on `/releases/latest` rather
+than from `api.github.com`, whose sixty unauthenticated calls an hour per address a CI
+runner or a shared NAT may have spent already — an installer must not fail on someone
+else's rate limit. `wget` cannot report a redirect target usefully, so that path alone falls
+back to the API. The install URL points at `main`, so the script is live: a change to it
+reaches every future install without a release, which is the reason it does nothing a
+release cannot undo.

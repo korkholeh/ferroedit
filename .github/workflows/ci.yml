@@ -30,6 +30,17 @@ jobs:
       - name: Test
         run: cargo test --all-features
 
+  # The installer is the one piece of shipped code no Rust check covers, and
+  # it is also the piece run by `curl | sh` on a stranger's machine (ADR-060).
+  # shellcheck is preinstalled on the GitHub runners.
+  shell:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint the shell scripts
+        run: shellcheck --shell=sh scripts/install.sh && shellcheck scripts/release.sh
+
   targets:
     name: link ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}

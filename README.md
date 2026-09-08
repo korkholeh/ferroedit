@@ -21,6 +21,33 @@ binary, over SSH, with no runtime dependencies.
 
 ## Installation
 
+```bash
+curl -fsSL https://raw.githubusercontent.com/korkholeh/ferroedit/main/scripts/install.sh | sh
+```
+
+That is macOS and Linux, Intel and ARM. The script picks the build for your machine,
+checks it against the `.sha256` published beside it, and puts a single binary in
+`~/.local/bin` — no package manager, no `sudo`, nothing else touched. Read it first if
+you would rather:
+[scripts/install.sh](scripts/install.sh).
+
+Arguments go after `-s --`:
+
+```bash
+curl -fsSL .../install.sh | sh -s -- --version v0.1.1   # a specific release
+curl -fsSL .../install.sh | sh -s -- --dir ~/bin        # somewhere else
+curl -fsSL .../install.sh | sh -s -- --help
+```
+
+`FERROEDIT_VERSION` and `FERROEDIT_INSTALL_DIR` do the same as the first two. A directory
+that needs root is not one the script will `sudo` its way into — create it yourself and
+make it writable, or install to your home and move the binary.
+
+Upgrading is the same line again: the new binary is renamed into place, so it works with
+the editor open. Uninstalling is `rm ~/.local/bin/ferroedit`.
+
+### Manually
+
 Download a build from [the latest release](https://github.com/korkholeh/ferroedit/releases/latest).
 Each one is a single binary with no runtime dependencies; the Linux builds are statically
 linked against musl, so they run on any distribution.
