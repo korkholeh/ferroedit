@@ -11,11 +11,12 @@ use crate::app::help::HelpState;
 use crate::app::input_field::InputField;
 use crate::app::search::SearchField;
 use crate::app::tabs::{active_after_close, Stale, TabItem};
-use crate::app::{App, EditorView, LastClick, SidebarMode};
+use crate::app::{App, LastClick, SidebarMode};
 use crate::commands::{Command, FileOp, MenuEntry, MENUS};
 use crate::config::ThemeKind;
 use crate::editor::coords::VisualCol;
 use crate::editor::document::{DiskState, Document};
+use crate::editor::wrap;
 use crate::filesystem;
 use crate::filesystem::watcher::FsChange;
 use crate::git::diff::DiffSide;
@@ -171,20 +172,24 @@ pub fn execute_command(app: &mut App, command: Command) {
         }
         Command::KeepBuffer(index) => keep_buffer(app, index),
 
-        Command::ScrollEditor(delta) => {
-            if let Some(tab) = app.active_mut() {
-                let last_line = tab.document.line_count().saturating_sub(1);
-                tab.viewport.scroll_lines(delta, last_line);
-            }
-        }
+        Command::ScrollEditor(delta) => scroll_editor(app, delta),
+        Command::ToggleWordWrap => toggle_word_wrap(app),
+        Command::GotoLinePrompt => prompt_goto_line(app),
+        // Paired with the typed number by the dialog, exactly as `SubmitInput`
+        // and `SubmitCommit` are; see `activate_dialog_button`.
+        Command::SubmitGotoLine => log::warn!("a line was submitted with no dialog open"),
+        Command::GotoLine(typed) => goto_line(app, &typed),
+        Command::ScrollEditorHorizontal(delta) => scroll_editor_columns(app, delta),
 
         Command::MoveCursor(motion) => {
-            let page = app.editor_view.height as usize;
-            edit(app, |document| document.move_cursor(motion, page));
+            laid_out(app, |document: &mut Document, layout| {
+                document.move_cursor(motion, layout)
+            });
         }
         Command::ExtendSelection(motion) => {
-            let page = app.editor_view.height as usize;
-            edit(app, |document| document.extend_cursor(motion, page));
+            laid_out(app, |document: &mut Document, layout| {
+                document.extend_cursor(motion, layout)
+            });
         }
         Command::PlaceCursor { line, col } => {
             focus_pane(app, FocusTarget::Editor);
@@ -370,12 +375,22 @@ fn set_theme(app: &mut App, kind: ThemeKind) {
     }
     app.settings.theme = kind;
     app.notifications.info(format!("{} theme", kind.label()));
+    save_settings(app, "Theme");
+}
+
+/// Writes the settings file, if this run is one that writes it at all.
+///
+/// `what` names the setting that has just changed, so a failure says which
+/// choice will not survive the next start rather than reporting a file path
+/// the user did not know existed.
+fn save_settings(app: &mut App, what: &str) {
     if !app.persist_settings {
         return;
     }
     if let Err(err) = app.settings.save() {
         log::error!("could not save the settings: {err}");
-        app.notifications.warning(format!("Theme not saved: {err}"));
+        app.notifications
+            .warning(format!("{what} not saved: {err}"));
     }
 }
 
@@ -446,10 +461,95 @@ fn step_tab(app: &mut App, delta: i16) {
 /// visible after acting on it" is one rule in one place rather than a line
 /// repeated in a dozen match arms.
 fn edit(app: &mut App, operation: impl FnOnce(&mut Document)) {
-    let view: EditorView = app.editor_view;
+    let view = app.text_view();
     let Some(tab) = app.active_mut() else { return };
     operation(&mut tab.document);
     tab.follow_cursor(view);
+}
+
+/// The same for an operation that has to know the shape of the pane: the
+/// motions, whose `Up` is a drawn row and not a line once wrapping is on
+/// (ADR-057).
+fn laid_out(app: &mut App, operation: impl FnOnce(&mut Document, wrap::Layout)) {
+    let view = app.text_view();
+    let Some(tab) = app.active_mut() else { return };
+    let layout = tab.layout(view);
+    operation(&mut tab.document, layout);
+    tab.follow_cursor(view);
+}
+
+/// Moves the editor's window without moving the cursor — the wheel, and the
+/// two keys that shift a long line sideways.
+fn scroll_editor(app: &mut App, delta: i16) {
+    let view = app.text_view();
+    let Some(tab) = app.active_mut() else { return };
+    let layout = tab.layout(view);
+    tab.viewport.scroll_rows(delta, &tab.document, layout);
+}
+
+fn scroll_editor_columns(app: &mut App, delta: i16) {
+    let view = app.text_view();
+    let Some(tab) = app.active_mut() else { return };
+    let layout = tab.layout(view);
+    tab.viewport.scroll_columns(delta, &tab.document, layout);
+}
+
+/// Turns wrapping on or off, and remembers the answer (SPEC §58).
+///
+/// Every tab is corrected, not only the one in front: the setting is the
+/// pane's and not the file's, so a tab switched to later must not still be
+/// scrolled sideways in a pane that no longer scrolls that way.
+fn toggle_word_wrap(app: &mut App) {
+    app.settings.word_wrap = !app.settings.word_wrap;
+    save_settings(app, "Word wrap");
+    let view = app.text_view();
+    for tab in app.editors_mut() {
+        let layout = tab.layout(view);
+        tab.viewport.clamp(&tab.document, layout);
+    }
+    if let Some(tab) = app.active_mut() {
+        tab.follow_cursor(view);
+    }
+    let state = if app.settings.word_wrap { "on" } else { "off" };
+    app.notifications.info(format!("Word wrap {state}"));
+}
+
+/// Jumps to a one-based line number typed into the Go to Line dialog.
+///
+/// A number past the end of the file lands on its last line rather than
+/// refusing: "go to 9999" in a file of 300 lines means the end of it, and that
+/// is where `Ctrl+End` would have gone anyway.
+fn goto_line(app: &mut App, typed: &str) {
+    let typed = typed.trim();
+    if typed.is_empty() {
+        return;
+    }
+    let Ok(line) = typed.parse::<usize>() else {
+        app.notifications
+            .warning(format!("Not a line number: {typed}"));
+        return;
+    };
+    let view = app.text_view();
+    let Some(tab) = app.active_mut() else {
+        app.notifications.warning("No file open");
+        return;
+    };
+    tab.document.goto_line(line);
+    tab.follow_cursor(view);
+}
+
+/// Asks which line to go to, with the one the cursor is on already in the
+/// field: the dialog opens on an answer that changes nothing, and typing over
+/// it is one gesture.
+fn prompt_goto_line(app: &mut App) {
+    let Some(tab) = app.active() else {
+        app.notifications.warning("No file open");
+        return;
+    };
+    let current = tab.document.cursor().line + 1;
+    let count = tab.document.line_count();
+    let return_focus = dialog_return_focus(app);
+    open_dialog(app, DialogState::goto_line(current, count, return_focus));
 }
 
 // --- search ----------------------------------------------------------------
@@ -502,7 +602,7 @@ fn step_match(app: &mut App, delta: isize) {
 
 /// Puts the document's selection on a hit and scrolls to it.
 fn select_match(app: &mut App, hit: crate::editor::search::Match) {
-    let view: EditorView = app.editor_view;
+    let view = app.text_view();
     if let Some(tab) = app.active_mut() {
         tab.document.select_match(hit);
         tab.follow_cursor(view);
@@ -521,7 +621,7 @@ fn replace_current(app: &mut App) {
         return;
     };
     let replacement = app.search.replacement.value.clone();
-    let view: EditorView = app.editor_view;
+    let view = app.text_view();
     if let Some(tab) = app.active_mut() {
         tab.document.replace_matches(&[hit], &replacement);
         tab.follow_cursor(view);
@@ -546,7 +646,7 @@ fn replace_all(app: &mut App) {
     let matches = app.search.matches.clone();
     let truncated = app.search.truncated;
     let replacement = app.search.replacement.value.clone();
-    let view: EditorView = app.editor_view;
+    let view = app.text_view();
     let Some(tab) = app.active_mut() else { return };
     let count = tab.document.replace_matches(&matches, &replacement);
     tab.follow_cursor(view);
@@ -638,7 +738,7 @@ fn reload_tab(app: &mut App, index: usize, quiet: bool) -> bool {
             tab.mark_stale(None);
             // The pane was scrolled for a document that may have been longer,
             // and the caret has just been clamped into a different one.
-            let view = app.editor_view;
+            let view = app.text_view();
             if let Some(tab) = app.editor_at_mut(index) {
                 tab.follow_cursor(view);
             }
@@ -695,7 +795,7 @@ fn keep_buffer(app: &mut App, index: usize) {
 /// left alone — the buffer is the only copy of the user's work, and no
 /// filesystem event is allowed to spend it.
 fn check_open_files(app: &mut App) {
-    let view = app.editor_view;
+    let view = app.text_view();
     // Diff tabs are skipped: there is no buffer in one to lose, and the diff
     // itself is re-read by `reread_diff` on the same event.
     let indices: Vec<usize> = app.editors().map(|(index, _)| index).collect();
@@ -822,7 +922,7 @@ fn remove_tab(app: &mut App, index: usize) {
     app.notifications.info(format!("Closed {}", closed.title()));
     // The tab that came forward was last scrolled for whatever the pane size
     // was then, which need not be what it is now.
-    let view = app.editor_view;
+    let view = app.text_view();
     if let Some(tab) = app.active_mut() {
         tab.follow_cursor(view);
     }
@@ -879,6 +979,7 @@ fn activate_dialog_button(app: &mut App, index: usize) {
     let command = match dialog.command_at(index) {
         Some(Command::SubmitInput(operation)) => Some(Command::ApplyFileOp(operation, typed())),
         Some(Command::SubmitCommit) => Some(Command::GitCommit(typed())),
+        Some(Command::SubmitGotoLine) => Some(Command::GotoLine(typed())),
         Some(Command::SubmitBranch) => Some(Command::GitCreateBranch(typed())),
         // A list dialog's confirm button acts on the highlighted row, which is
         // the same pairing as the two above: the button was built before the
@@ -922,7 +1023,7 @@ fn edit_field(app: &mut App, operation: impl FnOnce(&mut InputField)) {
 /// document's history, and saying so is friendlier than a key that appears to
 /// have missed.
 fn undo_redo(app: &mut App, undo: bool) {
-    let view: EditorView = app.editor_view;
+    let view = app.text_view();
     let Some(tab) = app.active_mut() else { return };
     let moved = if undo {
         tab.document.undo()
@@ -2113,6 +2214,7 @@ fn shift(value: usize, delta: i16, max: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::EditorView;
     use crate::editor::coords::CharIdx;
     use crate::editor::cursor::Motion;
     use crate::event::AppEvent;
@@ -2959,6 +3061,162 @@ mod tests {
         let mut app = app();
         execute_command(&mut app, Command::SelectTab(99));
         assert_eq!(app.active_tab, Some(0));
+    }
+
+    /// A tab over one line far wider than the pane, for the two commands that
+    /// are about a line that does not fit.
+    fn wide_app() -> App {
+        let mut app = app();
+        app.tabs[0] = TabItem::editing(crate::app::Tab::scratch(
+            "wide.txt",
+            &"abcdefghij ".repeat(30),
+        ));
+        app.active_tab = Some(0);
+        app
+    }
+
+    #[test]
+    fn word_wrap_is_switched_on_and_off_and_says_so() {
+        let mut app = app();
+        assert!(!app.settings.word_wrap, "off until it is asked for");
+        execute_command(&mut app, Command::ToggleWordWrap);
+        assert!(app.settings.word_wrap);
+        assert_eq!(
+            app.notifications.current().map(|n| n.message.clone()),
+            Some("Word wrap on".to_string())
+        );
+        execute_command(&mut app, Command::ToggleWordWrap);
+        assert!(!app.settings.word_wrap);
+    }
+
+    /// A pane that wraps has no sideways axis, so the window it was scrolled
+    /// to has to go — otherwise the text would come back drawn from column 40.
+    #[test]
+    fn turning_wrapping_on_brings_every_tab_back_to_the_left_edge() {
+        let mut app = wide_app();
+        execute_command(&mut app, Command::ScrollEditorHorizontal(2));
+        assert_eq!(
+            app.active().unwrap().viewport.left_col,
+            VisualCol(2 * crate::editor::viewport::HORIZONTAL_STEP)
+        );
+        execute_command(&mut app, Command::ToggleWordWrap);
+        assert_eq!(app.active().unwrap().viewport.left_col, VisualCol(0));
+    }
+
+    #[test]
+    fn the_editor_scrolls_sideways_and_stops_at_the_end_of_the_line() {
+        let mut app = wide_app();
+        execute_command(&mut app, Command::ScrollEditorHorizontal(1));
+        assert_eq!(
+            app.active().unwrap().viewport.left_col,
+            VisualCol(crate::editor::viewport::HORIZONTAL_STEP)
+        );
+        execute_command(&mut app, Command::ScrollEditorHorizontal(1000));
+        assert_eq!(
+            app.active().unwrap().viewport.left_col,
+            VisualCol(329),
+            "the last column of the widest line on screen"
+        );
+        execute_command(&mut app, Command::ScrollEditorHorizontal(-1000));
+        assert_eq!(app.active().unwrap().viewport.left_col, VisualCol(0));
+    }
+
+    /// The whole way in, not just the command: a key press resolves to the
+    /// scroll and the scroll reaches the window. `Alt` is the modifier a
+    /// terminal is most likely to eat, so the View menu carries the same two
+    /// commands and is checked here with them.
+    #[test]
+    fn the_sideways_keys_and_menu_entries_both_move_the_window() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = wide_app();
+        let key = KeyEvent::new(KeyCode::Right, KeyModifiers::ALT);
+        let command = crate::event::keyboard::resolve(key, app.focus, app.dialog_wants_text())
+            .expect("Alt+Right is bound in the editor");
+        execute_command(&mut app, command);
+        assert_eq!(
+            app.active().unwrap().viewport.left_col,
+            VisualCol(crate::editor::viewport::HORIZONTAL_STEP)
+        );
+
+        let view = MENUS
+            .iter()
+            .position(|menu| menu.title == "View")
+            .expect("a View menu");
+        let row = MENUS[view]
+            .items
+            .iter()
+            .position(|entry| {
+                entry.item().map(|item| &item.command) == Some(&Command::ScrollEditorHorizontal(-1))
+            })
+            .expect("a Scroll Left entry");
+        execute_command(&mut app, Command::MenuOpen(view));
+        execute_command(&mut app, Command::MenuActivateItem(row));
+        assert_eq!(app.active().unwrap().viewport.left_col, VisualCol(0));
+    }
+
+    #[test]
+    fn scrolling_sideways_does_nothing_while_lines_wrap() {
+        let mut app = wide_app();
+        execute_command(&mut app, Command::ToggleWordWrap);
+        execute_command(&mut app, Command::ScrollEditorHorizontal(3));
+        assert_eq!(app.active().unwrap().viewport.left_col, VisualCol(0));
+    }
+
+    #[test]
+    fn going_to_a_line_puts_the_cursor_on_it() {
+        let mut app = app();
+        app.tabs[0] = TabItem::editing(crate::app::Tab::scratch(
+            "lines.txt",
+            "one
+two
+three
+four
+five",
+        ));
+        execute_command(&mut app, Command::GotoLine("4".into()));
+        assert_eq!(app.active().unwrap().document.cursor().line, 3);
+        // Past the end is the end, which is where Ctrl+End would have gone.
+        execute_command(&mut app, Command::GotoLine("9999".into()));
+        assert_eq!(app.active().unwrap().document.cursor().line, 4);
+    }
+
+    #[test]
+    fn a_line_number_that_is_not_one_is_reported_and_moves_nothing() {
+        let mut app = app();
+        let before = app.active().unwrap().document.cursor();
+        execute_command(&mut app, Command::GotoLine("banana".into()));
+        assert_eq!(app.active().unwrap().document.cursor(), before);
+        assert_eq!(
+            app.notifications.current().map(|n| n.message.clone()),
+            Some("Not a line number: banana".to_string())
+        );
+    }
+
+    /// The dialog is the way in from the menu and from `Ctrl+G`: it opens on
+    /// the line the cursor is on, and its button carries the typed number
+    /// through the same pairing as every other input dialog.
+    #[test]
+    fn the_go_to_line_dialog_jumps_to_what_was_typed() {
+        let mut app = app();
+        app.tabs[0] = TabItem::editing(crate::app::Tab::scratch(
+            "lines.txt",
+            "one
+two
+three
+four
+five",
+        ));
+        execute_command(&mut app, Command::GotoLinePrompt);
+        let dialog = app.dialog.as_ref().expect("a dialog");
+        assert_eq!(dialog.field().unwrap().value, "1", "the cursor's own line");
+        assert!(dialog.prompt().contains('5'), "{}", dialog.prompt());
+        execute_command(&mut app, Command::DialogInputBackspace);
+        execute_command(&mut app, Command::DialogInputChar('3'));
+        execute_command(&mut app, Command::DialogActivate);
+        assert!(app.dialog.is_none());
+        assert_eq!(app.active().unwrap().document.cursor().line, 2);
+        assert_eq!(app.focus, FocusTarget::Editor);
     }
 
     #[test]

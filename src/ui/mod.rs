@@ -78,6 +78,11 @@ mod tests {
         App::fixture()
     }
 
+    /// A pane `height` rows tall that does not wrap.
+    fn pane(height: usize) -> crate::editor::wrap::Layout {
+        crate::editor::wrap::Layout::plain(height, 80)
+    }
+
     /// Renders one frame and returns the buffer as one string per row.
     fn draw(app: &App, width: u16, height: u16) -> Vec<String> {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -608,8 +613,8 @@ mod tests {
         app.active_mut()
             .unwrap()
             .document
-            .move_cursor(Motion::End, 22);
-        let view = app.editor_view;
+            .move_cursor(Motion::End, pane(22));
+        let view = app.text_view();
         app.active_mut().unwrap().follow_cursor(view);
 
         let screen = draw(&app, 80, 24).join("\n");
@@ -624,16 +629,47 @@ mod tests {
     }
 
     #[test]
+    fn a_wrapped_line_is_drawn_on_several_rows_under_one_line_number() {
+        let mut app = app();
+        app.settings.word_wrap = true;
+        app.tabs[0] = crate::app::TabItem::editing(crate::app::Tab::scratch(
+            "prose.txt",
+            "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike",
+        ));
+        app.active_tab = Some(0);
+        let screen = draw(&app, 60, 12).join("\n");
+        assert!(screen.contains(" 1  alpha bravo"), "{screen}");
+        assert!(
+            screen.contains("mike"),
+            "the end of the line is on screen rather than off the right edge: {screen}"
+        );
+        assert!(
+            !screen.contains(" 2  "),
+            "a continuation row is the same line and is not numbered again: {screen}"
+        );
+    }
+
+    /// The status bar says so, because a pane full of wrapped prose otherwise
+    /// looks like a file of short lines.
+    #[test]
+    fn the_status_bar_says_when_lines_wrap() {
+        let mut app = app();
+        assert!(!draw(&app, 100, 24)[23].contains("Wrap"));
+        app.settings.word_wrap = true;
+        assert!(draw(&app, 100, 24)[23].contains("Wrap"));
+    }
+
+    #[test]
     fn the_status_bar_follows_the_cursor() {
         let mut app = app();
         app.active_mut()
             .unwrap()
             .document
-            .move_cursor(Motion::Down, 24);
+            .move_cursor(Motion::Down, pane(24));
         app.active_mut()
             .unwrap()
             .document
-            .move_cursor(Motion::End, 24);
+            .move_cursor(Motion::End, pane(24));
         let rows = draw(&app, 80, 24);
         assert!(
             rows[23].contains("Ln 2, Col 23"),

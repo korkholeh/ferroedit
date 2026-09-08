@@ -8,9 +8,10 @@
 use std::path::Path;
 
 use crate::app::diff::DiffState;
-use crate::app::EditorView;
+use crate::app::TextView;
 use crate::editor::document::Document;
 use crate::editor::viewport::Viewport;
+use crate::editor::wrap::Layout;
 use crate::syntax::cache::{Disabled, HighlightCache};
 
 /// A file that moved under a buffer the editor could not simply re-read
@@ -169,15 +170,16 @@ impl Tab {
             .sync(&mut self.document, self.viewport.top_line, height)
     }
 
+    /// How this tab's document is laid out in the pane: the rows it shows, and
+    /// where a line breaks when lines wrap.
+    pub fn layout(&self, view: TextView) -> Layout {
+        view.layout(self.document.line_count())
+    }
+
     /// Scrolls the pane so the cursor is visible, after a move or an edit.
-    pub fn follow_cursor(&mut self, view: EditorView) {
-        self.viewport.clamp(self.document.line_count());
-        self.viewport.follow_cursor(
-            self.document.cursor().line,
-            self.document.cursor_visual_col(),
-            view.height as usize,
-            view.text_width(self.document.line_count()),
-        );
+    pub fn follow_cursor(&mut self, view: TextView) {
+        let layout = self.layout(view);
+        self.viewport.follow_cursor(&self.document, layout);
     }
 
     /// The file this tab is showing, if it has one.

@@ -120,6 +120,22 @@ pub static BINDINGS: &[Binding] = &[
         Command::ReplaceOpen,
         "Ctrl+H",
     ),
+    binding(
+        CTRL,
+        KeyCode::Char('g'),
+        None,
+        Command::GotoLinePrompt,
+        "Ctrl+G",
+    ),
+    // Alt+Z is the key every editor that has this switch uses, and the only
+    // modifier left that no terminal spends on something else here.
+    binding(
+        ALT,
+        KeyCode::Char('z'),
+        None,
+        Command::ToggleWordWrap,
+        "Alt+Z",
+    ),
     // Next and previous are global on purpose: repeating a search after the bar
     // has been dismissed is the common case, and reopening it to press Enter
     // would be a step nobody wants.
@@ -236,6 +252,20 @@ pub static BINDINGS: &[Binding] = &[
     ctrl_extend(KeyCode::Right, Motion::WordRight, "Ctrl+Shift+Right"),
     ctrl_extend(KeyCode::Home, Motion::DocumentStart, "Ctrl+Shift+Home"),
     ctrl_extend(KeyCode::End, Motion::DocumentEnd, "Ctrl+Shift+End"),
+    // The sideways window, for the lines that run off the right edge while
+    // wrapping is off. With it on there is no sideways and both do nothing.
+    editor_binding(
+        ALT,
+        KeyCode::Left,
+        Command::ScrollEditorHorizontal(-1),
+        "Alt+Left",
+    ),
+    editor_binding(
+        ALT,
+        KeyCode::Right,
+        Command::ScrollEditorHorizontal(1),
+        "Alt+Right",
+    ),
     ctrl_editor(KeyCode::Char('a'), Command::SelectAll, "Ctrl+A"),
     // Undo/redo. Ctrl+Y rather than Ctrl+Shift+Z as the redo key: a legacy
     // terminal cannot tell Ctrl+Shift+Z from Ctrl+Z, so binding it would
@@ -481,6 +511,16 @@ const fn editor(code: KeyCode, command: Command, label: &'static str) -> Binding
 
 const fn ctrl_editor(code: KeyCode, command: Command, label: &'static str) -> Binding {
     binding(CTRL, code, Some(FocusTarget::Editor), command, label)
+}
+
+/// An editor binding under a modifier that has no helper of its own.
+const fn editor_binding(
+    mods: KeyModifiers,
+    code: KeyCode,
+    command: Command,
+    label: &'static str,
+) -> Binding {
+    binding(mods, code, Some(FocusTarget::Editor), command, label)
 }
 
 const fn extend(code: KeyCode, motion: Motion, label: &'static str) -> Binding {
@@ -1097,10 +1137,19 @@ mod tests {
         // An *unbound* Alt combination types nothing rather than a stray letter.
         assert_eq!(
             resolve(
-                key(KeyCode::Char('z'), KeyModifiers::ALT),
+                key(KeyCode::Char('k'), KeyModifiers::ALT),
                 FocusTarget::Search
             ),
             None
+        );
+        // A bound one still reaches its command from the bar: word wrap is a
+        // view switch and nothing about the caret (SPEC §58).
+        assert_eq!(
+            resolve(
+                key(KeyCode::Char('z'), KeyModifiers::ALT),
+                FocusTarget::Search
+            ),
+            Some(Command::ToggleWordWrap)
         );
     }
 

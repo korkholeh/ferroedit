@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 
 use crate::app::focus::FocusTarget;
@@ -46,8 +46,19 @@ pub fn hit_test(app: &App, rects: &LayoutRects, event: MouseEvent) -> Option<Com
         MouseEventKind::Down(MouseButton::Left) => left_click(app, rects, at),
         MouseEventKind::Down(MouseButton::Middle) => middle_click(rects, at),
         MouseEventKind::Drag(MouseButton::Left) => drag(app, rects, at),
+        // Shift turns the wheel sideways, which is the gesture a terminal
+        // without a horizontal wheel has; a terminal that does have one sends
+        // `ScrollLeft`/`ScrollRight` itself and both arrive here.
+        MouseEventKind::ScrollDown if event.modifiers.contains(KeyModifiers::SHIFT) => {
+            scroll_sideways(rects, at, 1)
+        }
+        MouseEventKind::ScrollUp if event.modifiers.contains(KeyModifiers::SHIFT) => {
+            scroll_sideways(rects, at, -1)
+        }
         MouseEventKind::ScrollDown => scroll(rects, at, WHEEL_STEP),
         MouseEventKind::ScrollUp => scroll(rects, at, -WHEEL_STEP),
+        MouseEventKind::ScrollRight => scroll_sideways(rects, at, 1),
+        MouseEventKind::ScrollLeft => scroll_sideways(rects, at, -1),
         _ => None,
     }
 }
@@ -276,7 +287,15 @@ fn document_position(app: &App, editor: Rect, at: Position) -> Option<(usize, us
     let gutter = gutter_width(tab.document.line_count()) as u16;
     let row = at.y.saturating_sub(editor.y) as usize;
     let cell = at.x.saturating_sub(editor.x + gutter) as usize;
-    Some((tab.viewport.top_line + row, tab.viewport.left_col.0 + cell))
+    // The rows the pane drew, which is the only thing that knows where a
+    // wrapped line was broken. A point below the last of them belongs to that
+    // last row: a drag off the bottom of a short file selects to the end of
+    // it rather than to a line that is not there.
+    let layout = crate::ui::editor::pane_layout(app, editor, tab.document.line_count());
+    let rows = tab.viewport.visible(&tab.document, layout);
+    let drawn = rows.get(row).or_else(|| rows.last())?;
+    let col = drawn.row.start_col.0 + cell + tab.viewport.left_col.0;
+    Some((drawn.line, col))
 }
 
 /// A click in the explorer selects the row under the pointer and acts on it:
@@ -328,6 +347,22 @@ fn scroll(rects: &LayoutRects, at: Position, delta: i16) -> Option<Command> {
     }
     if rects.explorer.contains(at) || rects.git_panel.contains(at) {
         return Some(Command::ScrollSidebar(delta));
+    }
+    None
+}
+
+/// The wheel's sideways axis: one step of the window per notch, over whichever
+/// pane is under the pointer.
+///
+/// One step and not the wheel's three: a horizontal step is already eight
+/// columns, and a notch that moved the text by two dozen of them would lose
+/// the reader's place on every flick of a trackpad.
+fn scroll_sideways(rects: &LayoutRects, at: Position, delta: i16) -> Option<Command> {
+    if rects.diff.is_some_and(|diff| diff.contains(at)) {
+        return Some(Command::DiffScrollHorizontal(delta));
+    }
+    if rects.editor.contains(at) || rects.editor_scrollbar.contains(at) {
+        return Some(Command::ScrollEditorHorizontal(delta));
     }
     None
 }
@@ -707,6 +742,62 @@ mod tests {
         );
     }
 
+    /// Sideways over the editor: the wheel with `Shift` held, and the
+    /// horizontal wheel a terminal sends on its own. Both land on the same
+    /// command, and the diff viewer gets its own.
+    #[test]
+    fn the_wheel_moves_the_editor_sideways() {
+        let app = app();
+        let r = rects(&app);
+        let mut shifted = wheel(MouseEventKind::ScrollDown, r.editor.x + 1, r.editor.y + 1);
+        shifted.modifiers = crossterm::event::KeyModifiers::SHIFT;
+        assert_eq!(
+            hit_test(&app, &r, shifted),
+            Some(Command::ScrollEditorHorizontal(1))
+        );
+        assert_eq!(
+            hit_test(
+                &app,
+                &r,
+                wheel(MouseEventKind::ScrollLeft, r.editor.x + 1, r.editor.y + 1)
+            ),
+            Some(Command::ScrollEditorHorizontal(-1))
+        );
+        // Unshifted, the same wheel is still the vertical one.
+        assert_eq!(
+            hit_test(
+                &app,
+                &r,
+                wheel(MouseEventKind::ScrollDown, r.editor.x + 1, r.editor.y + 1)
+            ),
+            Some(Command::ScrollEditor(WHEEL_STEP))
+        );
+    }
+
+    /// With wrapping on, a screen row is a row of a line and not a line of its
+    /// own: clicking the second row of a wrapped line has to land in that line,
+    /// at the column that row starts on.
+    #[test]
+    fn clicking_a_wrapped_row_lands_in_the_line_it_belongs_to() {
+        let mut app = app();
+        app.settings.word_wrap = true;
+        app.tabs[0] =
+            crate::app::TabItem::editing(crate::app::Tab::scratch("prose.txt", &"ab ".repeat(60)));
+        app.active_tab = Some(0);
+        let r = rects(&app);
+        // The second row starts at the last word boundary that fits, so its
+        // first cell is that column and the third cell is two past it.
+        let text_width = (r.editor.width - 4) as usize;
+        let second_row = text_width - text_width % 3;
+        assert_eq!(
+            hit_test(&app, &r, click(r.editor.x + 4 + 2, r.editor.y + 1)),
+            Some(Command::PlaceCursor {
+                line: 0,
+                col: second_row + 2,
+            })
+        );
+    }
+
     #[test]
     fn clicking_an_editor_with_no_open_file_only_focuses_it() {
         let app = App::new(crate::app::workspace::Workspace::from_arg(None).unwrap());
@@ -741,15 +832,10 @@ mod tests {
         let app = app();
         let r = rects(&app);
         // Off the bottom-left of the editor: the selection follows to the last
-        // visible row rather than stopping dead where the pointer left.
+        // row the pane actually drew — the end of a three-line file, and not a
+        // line number the pane's height happens to reach.
         let command = hit_test(&app, &r, drag_event(0, r.editor.bottom() + 5));
-        assert_eq!(
-            command,
-            Some(Command::ExtendCursorTo {
-                line: (r.editor.height - 1) as usize,
-                col: 0,
-            })
-        );
+        assert_eq!(command, Some(Command::ExtendCursorTo { line: 2, col: 0 }));
     }
 
     #[test]

@@ -159,6 +159,12 @@ fn readout(app: &App, width: u16, left: u16) -> String {
     if let Some(count) = document.map(|d| d.selected_len()).filter(|n| *n > 0) {
         pieces.push(piece(format!("Sel {count}"), 1));
     }
+    // Shown only while it is on, and beside the line ending for the same
+    // reason: both say the pane is not in the state it is in by default, and a
+    // wrapped file that did not say so reads as a file full of short lines.
+    if app.settings.word_wrap {
+        pieces.push(piece("Wrap".to_string(), 2));
+    }
     pieces.push(piece("UTF-8".to_string(), 6));
     // The line ending is shown only when it is not the default one: it matters
     // when it is CRLF, and it is the surprising one, so it outlives the pieces

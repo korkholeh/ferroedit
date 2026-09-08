@@ -296,6 +296,23 @@ impl DialogState {
         )
     }
 
+    /// Asks which line to jump to (SPEC §58).
+    ///
+    /// The field starts on the line the cursor is already on, so the dialog
+    /// opens on an answer that changes nothing and typing over it is one
+    /// gesture. The prompt says how many lines there are, which is the number
+    /// the question is really about.
+    pub fn goto_line(current: usize, count: usize, return_focus: FocusTarget) -> Self {
+        Self::with_input(
+            "Go to Line",
+            format!("Line number (1–{count})"),
+            &current.to_string(),
+            "Go",
+            Command::SubmitGotoLine,
+            return_focus,
+        )
+    }
+
     /// Asks for a commit message (SPEC §32).
     ///
     /// The prompt says how many files the commit will include, because the

@@ -1658,6 +1658,10 @@ scrolled past its last page — it may scroll until only the last line is left �
 thumb at the bottom rather than running off it, since "you are at the end" is what that
 state means.
 
+*Amended by ADR-057:* the editor can wrap now, and the thumb is still counted in lines —
+so on a wrapped file it is approximate rather than exact. See that ADR for why the
+approximation was taken.
+
 ---
 
 ## ADR-053: A diff is a tab, not a pane over the editor
@@ -1782,3 +1786,57 @@ selection all count rows, and three of them would have to agree about an invisib
 Open, where a mis-aimed click found the one entry in the menu that destroys something.
 Two tests hold the shape of every menu: none starts or ends with a rule, and none has two
 in a row.
+
+---
+
+## ADR-057: Wrapping is a pane setting, and the window is measured in rows
+
+**Decision.** Word wrap is one switch on `Settings`, kept in the config file beside the
+theme and flipped by `Alt+Z` or *View → Word Wrap*. It is off by default. With it on, a
+line is broken at the width of the pane and drawn on as many rows as it needs; with it
+off, a line is one row that runs under the right edge, and the pane is moved sideways to
+read the rest — `Alt+Left`/`Alt+Right`, `Shift`+wheel, and a horizontal wheel where the
+terminal sends one.
+
+**A row, not a line.** `Viewport` now names its top as `(top_line, top_row)`, and every
+walk over it — the wheel, `follow_cursor`, the renderer, the mouse — counts drawn rows.
+A top-of-window that could only name a *line* cannot show the middle of a line that is
+forty rows tall, which is exactly the file wrapping exists for. A pane that does not wrap
+is the same arithmetic with one row per line, so there is one implementation and not two.
+
+**The columns a row reports are the line's own.** `wrap::Row` carries `start_col`/`end_col`
+measured from the start of the *line*: the second row of a wrapped line starts at column
+80, not at column 0. Three things fall out of that. A tab keeps the stop it would have had
+unwrapped. The renderer draws a wrapped row with the same `visible_spans` window it uses
+for a horizontally scrolled one — the two *are* the same operation. And the mouse maps a
+cell back to a column of the line with one addition, so a click and the character drawn
+under it cannot disagree.
+
+**Motion follows the pane.** With wrapping on, `Up`, `Down`, `PageUp`, `PageDown`, `Home`
+and `End` move by drawn row: a paragraph is read a row at a time rather than jumped over
+in one press. `Document::move_cursor` therefore takes a `wrap::Layout` — the pane's height
+and its wrapping width — where it used to take a page height. The preferred column
+(ARCHITECTURE §4) stays a column of the *line* and is read through the row it falls on,
+which is what makes a column of `Down` presses through a wrapped paragraph come back out
+where it started, with no second piece of cursor state to keep in step.
+
+**What it costs.** The scrollbar's thumb is still positioned from `top_line` against the
+line count, so on a wrapped file it is off by however many rows the lines above the window
+took — a thumb a few cells out of place on a bar that is read as "roughly here". The
+sideways window is bounded by the widest line *on screen* rather than the widest in the
+document: measuring five megabytes on every keypress is not a price a scroll may pay, and
+the bound the user can see is the one the text on screen already draws.
+
+Both sideways commands are on the View menu as well as on `Alt+Left`/`Alt+Right`, which
+is ADR-008's rule and not a convenience: `Alt` is the modifier macOS Terminal.app and
+several SSH clients never deliver, and a command reachable only through it is a command
+those users do not have. A test walks `BINDINGS` and fails on any `Alt` binding no menu
+offers.
+
+**Consequence.** `App::text_view` hands out the pane geometry and the wrap setting
+together, because everything that scrolls or moves a cursor needs both and reading them
+separately is how the wrapped and unwrapped answers drift apart. Rows are produced lazily
+(`wrap::Rows` is an iterator) so a one-megabyte line costs the rows under the viewport and
+not the forty thousand below them. Turning wrapping on pulls every tab back to the left
+edge: a pane that wraps has no sideways axis, and a tab returned to later must not still
+be drawn from column 40.

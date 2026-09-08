@@ -28,6 +28,8 @@ These resolve whatever has focus, except behind a dialog: a modal window binds i
 | `Ctrl+O` | Open a file or a folder — browses for one |
 | `Ctrl+F` | Open the find bar, seeded with the selection |
 | `Ctrl+H` | Open the find bar with its replacement row |
+| `Ctrl+G` | Go to a line — asks for the number |
+| `Alt+Z` | Wrap long lines, or stop wrapping them |
 | `F3` | Next match |
 | `Shift+F3` | Previous match |
 
@@ -62,6 +64,8 @@ The document pane. Every motion here also has a `Shift` form that extends the se
 | `Ctrl+Shift+Right` | Extend the selection one word right |
 | `Ctrl+Shift+Home` | Extend the selection to the start of the document |
 | `Ctrl+Shift+End` | Extend the selection to the end of the document |
+| `Alt+Left` | Scroll the editor left |
+| `Alt+Right` | Scroll the editor right |
 | `Ctrl+A` | Select all |
 | `Ctrl+Z` | Undo |
 | `Ctrl+Y` | Redo |
@@ -242,12 +246,16 @@ Every item is a command, and the *Shortcut* column is the same lookup the menu i
 | Search | Replace… | `Ctrl+H` | anywhere |
 | Search | Find Next | `F3` | anywhere |
 | Search | Find Previous | `Shift+F3` | anywhere |
+| Search | Go to Line… | `Ctrl+G` | anywhere |
 | Search | Match Case | `Alt+C` | Find bar |
 | Search | Replace Match | `Alt+R` | Find bar |
 | Search | Replace All | `Alt+A` | Find bar |
 | View | Toggle Sidebar | `Ctrl+B` | anywhere |
 | View | Refresh Explorer | `F5` | Explorer |
 | View | Show Hidden Files | — | — |
+| View | Word Wrap | `Alt+Z` | anywhere |
+| View | Scroll Left | `Alt+Left` | Editor |
+| View | Scroll Right | `Alt+Right` | Editor |
 | View | Focus Explorer | — | — |
 | View | Focus Git | — | — |
 | View | Focus Editor | — | — |

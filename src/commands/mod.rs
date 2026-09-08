@@ -236,6 +236,22 @@ pub enum Command {
 
     /// Scrolls the editor viewport without moving the cursor — the wheel.
     ScrollEditor(i16),
+    /// Moves the editor's window sideways, for the lines that are wider than
+    /// the pane. Nothing to do while lines wrap: there is no sideways then
+    /// (ADR-057).
+    ScrollEditorHorizontal(i16),
+    /// Breaks long lines onto the next row, or stops doing so, and remembers
+    /// the answer in the settings file (SPEC §58).
+    ToggleWordWrap,
+    /// Asks which line to jump to (SPEC §58). `GotoLine` is what jumps.
+    GotoLinePrompt,
+    /// Runs the jump with whatever the open dialog holds. Only the dialog's
+    /// button carries this; activating it turns it into `GotoLine`.
+    SubmitGotoLine,
+    /// Puts the cursor on a one-based line number, as it was typed: parsing it
+    /// is the command's own job, because a dialog field holds text and a user
+    /// can type anything into one.
+    GotoLine(String),
 
     MoveCursor(Motion),
     /// The same motions with the anchor left where it is — Shift+navigation.
@@ -466,6 +482,13 @@ impl Command {
             Self::ScrollEditor(delta) => {
                 step(*delta, "Scroll the editor down", "Scroll the editor up")
             }
+            Self::ScrollEditorHorizontal(delta) => {
+                step(*delta, "Scroll the editor right", "Scroll the editor left")
+            }
+            Self::ToggleWordWrap => "Wrap long lines, or stop wrapping them".into(),
+            Self::GotoLinePrompt => "Go to a line — asks for the number".into(),
+            Self::SubmitGotoLine => "Go to the line that was typed".into(),
+            Self::GotoLine(_) => "Go to a line by number".into(),
 
             Self::MoveCursor(motion) => format!("Move the cursor {}", motion_name(*motion)),
             Self::ExtendSelection(motion) => {
@@ -687,6 +710,8 @@ pub static MENUS: &[MenuDef] = &[
             item("Find Next", Command::FindNext),
             item("Find Previous", Command::FindPrev),
             SEP,
+            item("Go to Line…", Command::GotoLinePrompt),
+            SEP,
             item("Match Case", Command::SearchToggleCase),
             SEP,
             item("Replace Match", Command::ReplaceCurrent),
@@ -699,6 +724,14 @@ pub static MENUS: &[MenuDef] = &[
             item("Toggle Sidebar", Command::ToggleSidebarMode),
             item("Refresh Explorer", Command::ExplorerRefresh),
             item("Show Hidden Files", Command::ToggleHiddenFiles),
+            item("Word Wrap", Command::ToggleWordWrap),
+            SEP,
+            // The sideways window needs entries of its own for the same reason
+            // Word Wrap does: `Alt` is a modifier several terminals never
+            // deliver, and a command reachable only through one is a command
+            // some users do not have (ADR-008).
+            item("Scroll Left", Command::ScrollEditorHorizontal(-1)),
+            item("Scroll Right", Command::ScrollEditorHorizontal(1)),
             SEP,
             item("Focus Explorer", Command::FocusPane(FocusTarget::Explorer)),
             item("Focus Git", Command::FocusPane(FocusTarget::GitPanel)),
@@ -773,6 +806,31 @@ mod tests {
                     .any(|item| item.command == Command::SetTheme(kind)),
                 "no entry for the {} theme",
                 kind.label()
+            );
+        }
+    }
+
+    /// `Alt` is the modifier several terminals never deliver — macOS
+    /// Terminal.app without "Use Option as Meta", and some SSH clients — so a
+    /// command reachable only through it is a command those users do not have
+    /// (ADR-008). Every one of them has to be on a menu as well.
+    #[test]
+    fn every_alt_binding_is_also_a_menu_entry() {
+        let on_a_menu = |command: &Command| {
+            MENUS
+                .iter()
+                .flat_map(MenuDef::entries)
+                .any(|item| &item.command == command)
+        };
+        for binding in crate::event::keyboard::BINDINGS {
+            if !binding.mods.contains(crossterm::event::KeyModifiers::ALT) {
+                continue;
+            }
+            assert!(
+                on_a_menu(&binding.command),
+                "{} runs {:?}, which no menu offers",
+                binding.label,
+                binding.command
             );
         }
     }

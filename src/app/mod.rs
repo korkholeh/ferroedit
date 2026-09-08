@@ -32,6 +32,7 @@ use workspace::Workspace;
 use crate::editor::clipboard::Clipboard;
 use crate::editor::document::{Document, DocumentError};
 use crate::editor::viewport::gutter_width;
+use crate::editor::wrap::Layout;
 use crate::filesystem::tree::{FileTree, TreeRow};
 
 /// The size of the editor pane in cells, mirrored out of the last frame's
@@ -52,6 +53,31 @@ impl EditorView {
     /// Columns left for text once the line-number gutter has taken its share.
     pub fn text_width(self, line_count: usize) -> usize {
         (self.width as usize).saturating_sub(gutter_width(line_count))
+    }
+}
+
+/// The editor pane as the *text* sees it: the geometry of the last drawn frame
+/// plus whether lines wrap in it (SPEC §58).
+///
+/// The two travel together because everything that scrolls or moves a cursor
+/// needs both, and reading them separately at a dozen call sites is how the
+/// wrapped and unwrapped answers drift apart. `layout` is the pair resolved
+/// against a document, which is what settles the width of the gutter.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TextView {
+    pub view: EditorView,
+    pub wrap: bool,
+}
+
+impl TextView {
+    pub fn layout(self, line_count: usize) -> Layout {
+        let width = self.view.text_width(line_count);
+        let height = self.view.height as usize;
+        if self.wrap {
+            Layout::wrapping(height, width)
+        } else {
+            Layout::plain(height, width)
+        }
     }
 }
 
@@ -256,6 +282,16 @@ impl App {
         }
     }
 
+    /// The editor pane, with the wrap setting that decides how a line is laid
+    /// out in it. Everything that scrolls the pane or moves the cursor takes
+    /// this rather than `editor_view` alone.
+    pub fn text_view(&self) -> TextView {
+        TextView {
+            view: self.editor_view,
+            wrap: self.settings.word_wrap,
+        }
+    }
+
     /// Whether the open dialog is one that types into a text field.
     ///
     /// The keyboard asks before resolving a key: in an input dialog `Left` and
@@ -453,7 +489,7 @@ impl App {
         };
         self.active_tab = Some(index);
         self.focus = FocusTarget::Editor;
-        let view = self.editor_view;
+        let view = self.text_view();
         if let Some(tab) = self.editor_at_mut(index) {
             if let Some(line) = line {
                 tab.document.goto_line(line);

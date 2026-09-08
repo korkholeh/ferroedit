@@ -217,8 +217,9 @@ fn sync_editor_view(app: &mut App, rects: &LayoutRects) -> bool {
         return false;
     }
     app.editor_view = view;
+    let text_view = app.text_view();
     if let Some(tab) = app.active_mut() {
-        tab.follow_cursor(view);
+        tab.follow_cursor(text_view);
     }
     true
 }
@@ -299,7 +300,19 @@ fn rx_is_alive(rx: &mpsc::Receiver<AppEvent>) -> bool {
 
 fn handle_event(app: &mut App, rects: &LayoutRects, event: AppEvent) {
     let command = match event {
-        AppEvent::Key(key) => event::keyboard::resolve(key, app.focus, app.dialog_wants_text()),
+        AppEvent::Key(key) => {
+            // Traced like the mouse, and for the reason the mouse is: when a
+            // shortcut "does nothing", the first question is whether the key
+            // reached the process at all. Several terminals never send `Alt`,
+            // and the log is the only place that difference is visible.
+            log::trace!(
+                "key {:?}+{:?} (focus {:?})",
+                key.modifiers,
+                key.code,
+                app.focus
+            );
+            event::keyboard::resolve(key, app.focus, app.dialog_wants_text())
+        }
         AppEvent::Mouse(mouse) => {
             log::trace!("mouse {:?} at {},{}", mouse.kind, mouse.column, mouse.row);
             event::mouse::hit_test(app, rects, mouse)

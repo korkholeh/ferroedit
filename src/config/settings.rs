@@ -64,13 +64,21 @@ impl ThemeKind {
     }
 }
 
-/// Everything the editor persists. One field so far; `#[serde(default)]` is
-/// what lets the next one be added without invalidating the files already
-/// written.
+/// Everything the editor persists. `#[serde(default)]` is what lets the next
+/// field be added without invalidating the files already written — and what
+/// let word wrap join the theme here.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "kebab-case")]
 pub struct Settings {
     pub theme: ThemeKind,
+    /// Whether lines longer than the pane are broken onto the next row rather
+    /// than run off the right edge (SPEC §58, ADR-057).
+    ///
+    /// Off by default: code is written to a column limit and read with the
+    /// indentation carrying the structure, and a wrapped pane is the answer
+    /// for the file that was not — which is a choice the user makes per
+    /// session and the editor then remembers.
+    pub word_wrap: bool,
 }
 
 impl Settings {
@@ -147,9 +155,29 @@ mod tests {
     }
 
     #[test]
+    fn lines_do_not_wrap_until_the_user_says_so() {
+        assert!(!Settings::default().word_wrap);
+    }
+
+    #[test]
+    fn the_wrap_setting_round_trips_through_the_file_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let settings = Settings {
+            theme: ThemeKind::Dark,
+            word_wrap: true,
+        };
+        settings.save_to(&path).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("word-wrap"), "{text}");
+        assert_eq!(Settings::load_from(&path), settings);
+    }
+
+    #[test]
     fn a_theme_round_trips_through_the_file_format() {
         let settings = Settings {
             theme: ThemeKind::LightSimple,
+            ..Settings::default()
         };
         let text = serde_json::to_string(&settings).unwrap();
         assert!(text.contains("light-simple"), "{text}");
@@ -183,6 +211,7 @@ mod tests {
         let path = dir.path().join("ferroedit").join("config.json");
         let settings = Settings {
             theme: ThemeKind::Borland,
+            ..Settings::default()
         };
         settings.save_to(&path).unwrap();
         assert_eq!(Settings::load_from(&path), settings);

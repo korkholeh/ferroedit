@@ -58,7 +58,7 @@ src/
   ui/        mod.rs layout.rs menu.rs tabs.rs editor.rs explorer.rs field.rs
              git.rs search.rs statusbar.rs dialog.rs diff.rs theme.rs
   editor/    mod.rs document.rs cursor.rs selection.rs history.rs search.rs
-             coords.rs viewport.rs clipboard.rs
+             coords.rs viewport.rs wrap.rs clipboard.rs
   filesystem/ mod.rs tree.rs      # file operations; lazy, ignore-aware tree
   git/       mod.rs service.rs parser.rs models.rs diff.rs worker.rs
   syntax/    mod.rs highlighter.rs cache.rs
@@ -111,6 +111,12 @@ fixtures (`tests/fixtures/unicode.txt`) before any UI depends on them. Every fun
 there takes one line as `&str`, so the module is testable without a rope; `Document` is
 what knows about lines, and `editor/viewport.rs` is what knows how many of them fit.
 
+A fifth coordinate joins them once lines can wrap (ADR-057): the **drawn row**. A line is
+one row while wrapping is off and several while it is on, so `editor/wrap.rs` is what
+turns a line into rows and `Viewport` names its top as `(line, row)`. The columns a row
+carries are still the *line's* visual columns, which is why the renderer, the mouse and the
+cursor all keep working in `VisualCol` and nothing gains a second column type.
+
 The caret the user sees is the terminal's own cursor, positioned by the editor widget
 while the editor has focus. It therefore blinks the way the user's terminal is
 configured to, and a screen reader follows it.
@@ -154,6 +160,7 @@ and `activate_dialog_button` substitutes on the way out:
 |---|---|---|
 | `SubmitInput(op)` | `ApplyFileOp(op, text)` | the field stops existing when the dialog closes |
 | `SubmitCommit` | `GitCommit(text)` | the same, for a message |
+| `SubmitGotoLine` | `GotoLine(text)` | the same, for a line number |
 | `SubmitBranch` | `GitCreateBranch(text)` | the same, for a name |
 | `SubmitListChoice` | the highlighted row's own command | the choice is made after the button is built |
 

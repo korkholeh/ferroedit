@@ -8,3 +8,4 @@ pub mod history;
 pub mod search;
 pub mod selection;
 pub mod viewport;
+pub mod wrap;

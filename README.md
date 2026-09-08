@@ -74,6 +74,14 @@ wired to a placeholder — and both [docs/SHORTCUTS.md](docs/SHORTCUTS.md) and t
 help screen are generated from the keymap itself rather than written beside it. `Ctrl+O` opens a path from outside the workspace and File → Save As…
 writes the current buffer somewhere else, keeping its undo history.
 
+Long lines are read whichever way suits the file. `Alt+Z` (or View → Word Wrap) breaks
+them at the width of the pane, on word boundaries, with the continuation rows under a
+blank gutter and `Up`/`Down`/`Home`/`End` moving by what is drawn rather than by whole
+lines; with it off, `Alt+Left`/`Alt+Right`, View → Scroll Left/Right, `Shift`+wheel and a
+horizontal wheel move the window sideways instead — the menu entries are the way out for
+terminals that never deliver `Alt`. The choice is remembered between runs. `Ctrl+G` jumps to a line
+by number.
+
 FerroEdit watches the workspace, so a `git checkout`, a rebase or a file written in
 another terminal shows up in the tree and the panel by itself rather than on `F5`. The
 watch is filtered — what git ignores is ignored here too — so a build writing thousands
@@ -183,7 +191,8 @@ ferroedit +42 main.rs  # open a file at line 42
 - Mouse: click, drag-select, scroll, menus, tabs, explorer
 - Tabs, a `.gitignore`-aware file explorer, and file operations
 - Syntax highlighting
-- Search and replace
+- Search and replace, and Go to Line
+- Word wrap, or horizontal scrolling when it is off
 - Git: status, stage/unstage, commit, pull, push, branches, merge, diff
 - One static binary, SSH-friendly
 

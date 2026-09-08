@@ -14,6 +14,7 @@ use crate::editor::cursor::{Cursor, Motion};
 use crate::editor::history::{EditOperation, History};
 use crate::editor::search::{self, Match};
 use crate::editor::selection::{Position, Selection};
+use crate::editor::wrap::{self, Layout, Row};
 
 /// What a file's lines are separated by on disk.
 ///
@@ -565,9 +566,9 @@ impl Document {
     }
 
     /// Applies a motion with the anchor left where it is — Shift+navigation.
-    pub fn extend_cursor(&mut self, motion: Motion, page: usize) {
+    pub fn extend_cursor(&mut self, motion: Motion, layout: Layout) {
         self.anchor_here();
-        self.step(motion, page);
+        self.step(motion, layout);
     }
 
     /// Extends the selection to a display position — the mouse drag.
@@ -603,18 +604,23 @@ impl Document {
 
     // --- movement ----------------------------------------------------------
 
-    /// Applies a motion. `page` is the height of the editor viewport, which is
-    /// why it is passed in rather than known here: `editor/` has no idea a
-    /// terminal exists.
-    pub fn move_cursor(&mut self, motion: Motion, page: usize) {
+    /// Applies a motion. `layout` is the shape of the editor pane — how many
+    /// rows it shows, and where it breaks a line when it wraps — which is why
+    /// it is passed in rather than known here: `editor/` has no idea a terminal
+    /// exists.
+    ///
+    /// The pane is what `Up`, `Down`, `Home` and `End` are *about* once lines
+    /// wrap (ADR-057): they move by drawn row, so a paragraph reads a row at a
+    /// time instead of jumping over the whole of it.
+    pub fn move_cursor(&mut self, motion: Motion, layout: Layout) {
         // Moving without Shift is how a selection is dismissed, which is why
         // every plain motion goes through here and every extending one does not.
         self.clear_selection();
-        self.step(motion, page);
+        self.step(motion, layout);
     }
 
     /// The motion itself, with no opinion about the anchor.
-    fn step(&mut self, motion: Motion, page: usize) {
+    fn step(&mut self, motion: Motion, layout: Layout) {
         // Moving the caret ends the open undo step (ARCHITECTURE §5): coming
         // back and typing somewhere else is a new edit, not a longer one.
         self.history.seal();
@@ -622,12 +628,14 @@ impl Document {
         match motion {
             Motion::Left => self.step_left(),
             Motion::Right => self.step_right(),
-            Motion::Up => self.step_vertical(-1, 1),
-            Motion::Down => self.step_vertical(1, 1),
-            Motion::PageUp => self.step_vertical(-1, page.max(1)),
-            Motion::PageDown => self.step_vertical(1, page.max(1)),
-            Motion::Home => self.cursor.column = CharIdx(0),
-            Motion::End => self.cursor.column = coords::char_len(&self.cursor_line()),
+            Motion::Up => self.step_vertical(-1, 1, layout),
+            Motion::Down => self.step_vertical(1, 1, layout),
+            Motion::PageUp => self.step_vertical(-1, layout.height.max(1), layout),
+            Motion::PageDown => self.step_vertical(1, layout.height.max(1), layout),
+            // The ends of the *row*, which are the ends of the line whenever
+            // the line is one row — so there is one rule here and not two.
+            Motion::Home => self.cursor.column = self.cursor_row_ends(layout).0,
+            Motion::End => self.cursor.column = self.cursor_row_ends(layout).1,
             Motion::WordLeft => self.step_word(-1),
             Motion::WordRight => self.step_word(1),
             Motion::DocumentStart => {
@@ -683,9 +691,37 @@ impl Document {
         }
     }
 
+    /// The row the cursor is on, under `layout`. One row per line while the
+    /// pane does not wrap, so every caller of it works either way.
+    fn cursor_row(&self, layout: Layout) -> Row {
+        layout
+            .row_at_col(
+                &self.cursor_line(),
+                self.tab_width,
+                self.cursor_visual_col(),
+            )
+            .1
+    }
+
+    /// The ends of the row the cursor is on.
+    ///
+    /// The ends of the *line* while the pane does not wrap, taken without
+    /// laying the line out: `Home` on a four-megabyte line is one assignment,
+    /// and it stays one.
+    fn cursor_row_ends(&self, layout: Layout) -> (CharIdx, CharIdx) {
+        if !layout.wraps() {
+            return (CharIdx(0), coords::char_len(&self.cursor_line()));
+        }
+        let row = self.cursor_row(layout);
+        (row.start, row.end)
+    }
+
     /// Vertical movement lands on the preferred column, then snaps onto a
     /// cluster boundary so the caret can never sit inside a character.
-    fn step_vertical(&mut self, direction: isize, distance: usize) {
+    fn step_vertical(&mut self, direction: isize, distance: usize, layout: Layout) {
+        if layout.wraps() {
+            return self.step_rows(direction, distance, layout);
+        }
         let last_line = self.line_count().saturating_sub(1);
         let target = if direction < 0 {
             self.cursor.line.saturating_sub(distance)
@@ -696,6 +732,43 @@ impl Document {
         let line = self.cursor_line();
         let column = coords::char_at_visual_col(&line, self.cursor.preferred_col, self.tab_width);
         self.cursor.column = coords::snap(&line, column);
+    }
+
+    /// The same movement counted in drawn rows, for a pane that wraps.
+    ///
+    /// The preferred column is still a column of a *line*, so it is read
+    /// through the row it falls on: on the third row of a paragraph it means
+    /// "this far into a row", which is the offset that is then carried onto
+    /// the row moved to. That is what makes a column of `Down` presses through
+    /// a wrapped paragraph come back out where it started, exactly as it does
+    /// through a ragged block of short lines.
+    fn step_rows(&mut self, direction: isize, distance: usize, layout: Layout) {
+        let tab_width = self.tab_width;
+        let text = self.cursor_line().into_owned();
+        let (row, _) = layout.row_at_col(&text, tab_width, self.cursor_visual_col());
+        let preferred = layout
+            .row_at_col(&text, tab_width, self.cursor.preferred_col)
+            .1;
+        let offset = self
+            .cursor
+            .preferred_col
+            .0
+            .saturating_sub(preferred.start_col.0);
+
+        let (line, row) = wrap::step_rows(
+            (self.cursor.line, row),
+            direction * distance as isize,
+            self.line_count(),
+            |line| layout.row_count(&self.line(line), tab_width),
+        );
+
+        let text = self.line(line).into_owned();
+        let target = layout.row_at(&text, tab_width, row).1;
+        // Clamped to where the row ends: a column past it belongs to the row
+        // below, and landing there would be a `Down` that moved by two.
+        let col = VisualCol((target.start_col.0 + offset).min(target.end_col.0));
+        self.cursor.line = line;
+        self.cursor.column = coords::snap(&text, coords::char_at_visual_col(&text, col, tab_width));
     }
 
     fn step_word(&mut self, direction: isize) {
@@ -1023,6 +1096,13 @@ mod tests {
 
     const FIXTURE: &str = include_str!("../../tests/fixtures/unicode.txt");
 
+    /// A pane `height` rows tall that does not wrap — what almost every test
+    /// here is about, because a motion over unwrapped text is a motion over
+    /// lines. The wrapped cases build their own narrow layout.
+    fn pane(height: usize) -> Layout {
+        Layout::plain(height, 80)
+    }
+
     fn doc(text: &str) -> Document {
         Document::from_text(text, Some(PathBuf::from("test.txt")))
     }
@@ -1085,7 +1165,7 @@ mod tests {
     fn a_new_document_is_clean_until_it_is_edited() {
         let mut document = doc("x");
         assert!(!document.is_dirty());
-        document.move_cursor(Motion::Right, 10);
+        document.move_cursor(Motion::Right, pane(10));
         assert!(!document.is_dirty(), "moving is not editing");
         document.insert_char('y');
         assert!(document.is_dirty());
@@ -1094,8 +1174,8 @@ mod tests {
     #[test]
     fn newline_splits_the_line_at_the_cursor() {
         let mut document = doc("abcd");
-        document.move_cursor(Motion::Right, 10);
-        document.move_cursor(Motion::Right, 10);
+        document.move_cursor(Motion::Right, pane(10));
+        document.move_cursor(Motion::Right, pane(10));
         document.insert_newline();
         assert_eq!(text(&document), "ab\ncd");
         assert_eq!(document.cursor().line, 1);
@@ -1106,7 +1186,7 @@ mod tests {
     fn backspace_removes_a_whole_grapheme_cluster() {
         // e + combining acute: one press must take both chars.
         let mut document = doc("e\u{301}");
-        document.move_cursor(Motion::End, 10);
+        document.move_cursor(Motion::End, pane(10));
         document.backspace();
         assert_eq!(text(&document), "");
     }
@@ -1114,8 +1194,8 @@ mod tests {
     #[test]
     fn backspace_at_the_start_of_a_line_joins_it_to_the_previous_one() {
         let mut document = doc("one\ntwo");
-        document.move_cursor(Motion::Down, 10);
-        document.move_cursor(Motion::Home, 10);
+        document.move_cursor(Motion::Down, pane(10));
+        document.move_cursor(Motion::Home, pane(10));
         document.backspace();
         assert_eq!(text(&document), "onetwo");
         assert_eq!(document.cursor().line, 0);
@@ -1140,7 +1220,7 @@ mod tests {
     #[test]
     fn delete_at_the_end_of_a_line_pulls_the_next_one_up() {
         let mut document = doc("one\ntwo");
-        document.move_cursor(Motion::End, 10);
+        document.move_cursor(Motion::End, pane(10));
         document.delete();
         assert_eq!(text(&document), "onetwo");
     }
@@ -1148,7 +1228,7 @@ mod tests {
     #[test]
     fn delete_at_the_end_of_the_document_does_nothing() {
         let mut document = doc("abc");
-        document.move_cursor(Motion::DocumentEnd, 10);
+        document.move_cursor(Motion::DocumentEnd, pane(10));
         document.delete();
         assert_eq!(text(&document), "abc");
         assert!(!document.is_dirty());
@@ -1157,21 +1237,21 @@ mod tests {
     #[test]
     fn left_and_right_cross_line_boundaries() {
         let mut document = doc("ab\ncd");
-        document.move_cursor(Motion::End, 10);
-        document.move_cursor(Motion::Right, 10);
+        document.move_cursor(Motion::End, pane(10));
+        document.move_cursor(Motion::Right, pane(10));
         assert_eq!((document.cursor().line, document.cursor().column.0), (1, 0));
-        document.move_cursor(Motion::Left, 10);
+        document.move_cursor(Motion::Left, pane(10));
         assert_eq!((document.cursor().line, document.cursor().column.0), (0, 2));
     }
 
     #[test]
     fn vertical_movement_keeps_the_preferred_column_over_a_short_line() {
         let mut document = doc("abcdef\n\nabcdef");
-        document.move_cursor(Motion::End, 10);
+        document.move_cursor(Motion::End, pane(10));
         assert_eq!(document.cursor_visual_col(), VisualCol(6));
-        document.move_cursor(Motion::Down, 10);
+        document.move_cursor(Motion::Down, pane(10));
         assert_eq!(document.cursor().column, CharIdx(0), "the line is empty");
-        document.move_cursor(Motion::Down, 10);
+        document.move_cursor(Motion::Down, pane(10));
         assert_eq!(
             document.cursor().column,
             CharIdx(6),
@@ -1183,39 +1263,122 @@ mod tests {
     fn vertical_movement_never_lands_inside_a_cluster() {
         // The wide line puts column 1 in the middle of 日; the cursor must snap.
         let mut document = doc("xx\n日本語");
-        document.move_cursor(Motion::Right, 10);
-        document.move_cursor(Motion::Down, 10);
+        document.move_cursor(Motion::Right, pane(10));
+        document.move_cursor(Motion::Down, pane(10));
         assert_eq!(document.cursor().column, CharIdx(0));
         assert_eq!(document.cursor_visual_col(), VisualCol(0));
+    }
+
+    /// A pane ten columns wide, which is what the wrapped cases are about.
+    fn narrow(height: usize) -> Layout {
+        Layout::wrapping(height, 10)
+    }
+
+    #[test]
+    fn down_moves_by_one_drawn_row_inside_a_wrapped_line() {
+        // Three rows: "aaaa bbbb ", "cccc dddd ", "eeee".
+        let mut document = doc("aaaa bbbb cccc dddd eeee
+next
+");
+        document.move_cursor(Motion::Down, narrow(10));
+        assert_eq!(document.cursor().line, 0, "still the same line");
+        assert_eq!(document.cursor().column, CharIdx(10), "the second row");
+        document.move_cursor(Motion::Down, narrow(10));
+        assert_eq!(document.cursor().column, CharIdx(20));
+        document.move_cursor(Motion::Down, narrow(10));
+        assert_eq!(document.cursor().line, 1, "off the end of the wrapped line");
+    }
+
+    #[test]
+    fn up_walks_back_into_the_rows_of_the_line_above() {
+        let mut document = doc("aaaa bbbb cccc dddd eeee
+next
+");
+        document.place_cursor(1, VisualCol(2));
+        document.move_cursor(Motion::Up, narrow(10));
+        assert_eq!(document.cursor().line, 0);
+        assert_eq!(
+            document.cursor().column,
+            CharIdx(22),
+            "the last row of the line above, two columns in"
+        );
+    }
+
+    #[test]
+    fn the_preferred_column_is_kept_across_a_short_row() {
+        // Row one is full, row two is short, row three is full again: a column
+        // of Down presses has to come back out where it started.
+        let mut document = doc("aaaaaaaaa
+bb
+cccccccccc
+");
+        document.place_cursor(0, VisualCol(7));
+        document.move_cursor(Motion::Down, narrow(10));
+        assert_eq!(document.cursor_visual_col(), VisualCol(2), "the short line");
+        document.move_cursor(Motion::Down, narrow(10));
+        assert_eq!(document.cursor_visual_col(), VisualCol(7));
+    }
+
+    #[test]
+    fn home_and_end_are_the_ends_of_the_drawn_row_when_lines_wrap() {
+        let mut document = doc("aaaa bbbb cccc dddd
+");
+        document.place_cursor(0, VisualCol(12));
+        document.move_cursor(Motion::Home, narrow(10));
+        assert_eq!(document.cursor().column, CharIdx(10), "the row's start");
+        document.move_cursor(Motion::End, narrow(10));
+        assert_eq!(document.cursor().column, CharIdx(19), "and its end");
+    }
+
+    #[test]
+    fn home_and_end_are_still_the_line_when_nothing_wraps() {
+        let mut document = doc("aaaa bbbb cccc dddd
+");
+        document.place_cursor(0, VisualCol(12));
+        document.move_cursor(Motion::Home, pane(10));
+        assert_eq!(document.cursor().column, CharIdx(0));
+        document.move_cursor(Motion::End, pane(10));
+        assert_eq!(document.cursor().column, CharIdx(19));
+    }
+
+    #[test]
+    fn a_page_is_counted_in_drawn_rows_when_lines_wrap() {
+        let mut document = doc("aaaa bbbb cccc dddd eeee ffff
+next
+");
+        // Four rows of the paragraph; a page of two lands on the third.
+        document.move_cursor(Motion::PageDown, Layout::wrapping(2, 10));
+        assert_eq!(document.cursor().line, 0);
+        assert_eq!(document.cursor().column, CharIdx(20));
     }
 
     #[test]
     fn page_movement_stops_at_the_ends_of_the_document() {
         let mut document = doc("1\n2\n3\n4\n5");
-        document.move_cursor(Motion::PageDown, 3);
+        document.move_cursor(Motion::PageDown, pane(3));
         assert_eq!(document.cursor().line, 3);
-        document.move_cursor(Motion::PageDown, 3);
+        document.move_cursor(Motion::PageDown, pane(3));
         assert_eq!(document.cursor().line, 4);
-        document.move_cursor(Motion::PageUp, 100);
+        document.move_cursor(Motion::PageUp, pane(100));
         assert_eq!(document.cursor().line, 0);
     }
 
     #[test]
     fn word_motion_crosses_lines_at_their_ends() {
         let mut document = doc("let x\nlet y");
-        document.move_cursor(Motion::End, 10);
-        document.move_cursor(Motion::WordRight, 10);
+        document.move_cursor(Motion::End, pane(10));
+        document.move_cursor(Motion::WordRight, pane(10));
         assert_eq!((document.cursor().line, document.cursor().column.0), (1, 0));
-        document.move_cursor(Motion::WordLeft, 10);
+        document.move_cursor(Motion::WordLeft, pane(10));
         assert_eq!((document.cursor().line, document.cursor().column.0), (0, 5));
     }
 
     #[test]
     fn document_start_and_end_reach_both_ends() {
         let mut document = doc("one\ntwo\nthree");
-        document.move_cursor(Motion::DocumentEnd, 10);
+        document.move_cursor(Motion::DocumentEnd, pane(10));
         assert_eq!((document.cursor().line, document.cursor().column.0), (2, 5));
-        document.move_cursor(Motion::DocumentStart, 10);
+        document.move_cursor(Motion::DocumentStart, pane(10));
         assert_eq!((document.cursor().line, document.cursor().column.0), (0, 0));
     }
 
@@ -1247,7 +1410,7 @@ mod tests {
     #[test]
     fn every_fixture_line_can_be_walked_and_deleted_backwards() {
         let mut document = Document::from_text(FIXTURE, None);
-        document.move_cursor(Motion::DocumentEnd, 10);
+        document.move_cursor(Motion::DocumentEnd, pane(10));
         // Every press must make progress and never split a cluster; 64 is well
         // over the fixture's cluster count and well under an infinite loop.
         for _ in 0..64 {
@@ -1262,20 +1425,20 @@ mod tests {
     fn shift_navigation_leaves_an_anchor_behind_and_plain_navigation_drops_it() {
         let mut document = doc("hello world");
         assert!(document.selection().is_none());
-        document.extend_cursor(Motion::WordRight, 10);
+        document.extend_cursor(Motion::WordRight, pane(10));
         let selection = document.selection().expect("Shift+Ctrl+Right selects");
         assert_eq!(selection.start(), Position::new(0, CharIdx(0)));
         assert_eq!(document.selected_text().as_deref(), Some("hello "));
-        document.move_cursor(Motion::Left, 10);
+        document.move_cursor(Motion::Left, pane(10));
         assert!(document.selection().is_none(), "moving dismisses it");
     }
 
     #[test]
     fn a_selection_can_be_extended_backwards() {
         let mut document = doc("hello");
-        document.move_cursor(Motion::End, 10);
-        document.extend_cursor(Motion::Left, 10);
-        document.extend_cursor(Motion::Left, 10);
+        document.move_cursor(Motion::End, pane(10));
+        document.extend_cursor(Motion::Left, pane(10));
+        document.extend_cursor(Motion::Left, pane(10));
         assert_eq!(document.selected_text().as_deref(), Some("lo"));
         assert_eq!(document.cursor().column, CharIdx(3), "the head moved");
     }
@@ -1283,17 +1446,17 @@ mod tests {
     #[test]
     fn extending_across_lines_takes_the_newlines_with_it() {
         let mut document = doc("one\ntwo\nthree");
-        document.extend_cursor(Motion::Down, 10);
-        document.extend_cursor(Motion::End, 10);
+        document.extend_cursor(Motion::Down, pane(10));
+        document.extend_cursor(Motion::End, pane(10));
         assert_eq!(document.selected_text().as_deref(), Some("one\ntwo"));
     }
 
     #[test]
     fn extending_over_a_cluster_never_splits_it() {
         let mut document = doc("é👨‍👩‍👧x");
-        document.extend_cursor(Motion::Right, 10);
+        document.extend_cursor(Motion::Right, pane(10));
         assert_eq!(document.selected_text().as_deref(), Some("é"));
-        document.extend_cursor(Motion::Right, 10);
+        document.extend_cursor(Motion::Right, pane(10));
         assert_eq!(document.selected_text().as_deref(), Some("é👨‍👩‍👧"));
     }
 
@@ -1359,7 +1522,7 @@ mod tests {
     #[test]
     fn typing_replaces_the_selection() {
         let mut document = doc("hello world");
-        document.extend_cursor(Motion::WordRight, 10);
+        document.extend_cursor(Motion::WordRight, pane(10));
         document.insert_char('!');
         assert_eq!(text(&document), "!world");
         assert!(document.selection().is_none());
@@ -1369,12 +1532,12 @@ mod tests {
     #[test]
     fn backspace_and_delete_take_the_selection_rather_than_one_character() {
         let mut document = doc("hello world");
-        document.extend_cursor(Motion::WordRight, 10);
+        document.extend_cursor(Motion::WordRight, pane(10));
         document.backspace();
         assert_eq!(text(&document), "world");
 
         let mut document = doc("hello world");
-        document.extend_cursor(Motion::WordRight, 10);
+        document.extend_cursor(Motion::WordRight, pane(10));
         document.delete();
         assert_eq!(text(&document), "world");
     }
@@ -1382,9 +1545,9 @@ mod tests {
     #[test]
     fn deleting_a_selection_that_spans_lines_joins_what_is_left() {
         let mut document = doc("one\ntwo\nthree");
-        document.move_cursor(Motion::Right, 10);
-        document.extend_cursor(Motion::Down, 10);
-        document.extend_cursor(Motion::Down, 10);
+        document.move_cursor(Motion::Right, pane(10));
+        document.extend_cursor(Motion::Down, pane(10));
+        document.extend_cursor(Motion::Down, pane(10));
         assert!(document.delete_selection());
         assert_eq!(text(&document), "ohree");
         assert_eq!(document.cursor().line, 0);
@@ -1401,7 +1564,7 @@ mod tests {
     #[test]
     fn a_paste_is_one_operation_whatever_it_contains() {
         let mut document = doc("ab");
-        document.move_cursor(Motion::Right, 10);
+        document.move_cursor(Motion::Right, pane(10));
         document.insert_text("one\ntwo\n");
         assert_eq!(text(&document), "aone\ntwo\nb");
         assert_eq!(document.cursor().line, 2);
@@ -1431,7 +1594,7 @@ mod tests {
         std::fs::write(&path, "one two").unwrap();
 
         let mut document = Document::open(&path).unwrap();
-        document.extend_cursor(Motion::WordRight, 10);
+        document.extend_cursor(Motion::WordRight, pane(10));
         document.save().unwrap();
         assert_eq!(document.selected_text().as_deref(), Some("one "));
     }
@@ -1522,7 +1685,7 @@ mod tests {
         std::fs::write(&path, "one\r\ntwo\r\n").unwrap();
 
         let mut document = Document::open(&path).unwrap();
-        document.move_cursor(Motion::End, 10);
+        document.move_cursor(Motion::End, pane(10));
         document.insert_char('!');
         document.save().unwrap();
 
@@ -1591,8 +1754,8 @@ mod tests {
     #[test]
     fn undo_puts_the_caret_back_where_the_edit_started() {
         let mut document = doc("one\ntwo\n");
-        document.move_cursor(Motion::Down, 10);
-        document.move_cursor(Motion::End, 10);
+        document.move_cursor(Motion::Down, pane(10));
+        document.move_cursor(Motion::End, pane(10));
         type_text(&mut document, "!");
         document.undo();
         assert_eq!(document.cursor().line, 1);
@@ -1603,7 +1766,7 @@ mod tests {
     fn moving_the_caret_ends_the_undo_step() {
         let mut document = doc("");
         type_text(&mut document, "ab");
-        document.move_cursor(Motion::Left, 10);
+        document.move_cursor(Motion::Left, pane(10));
         type_text(&mut document, "c");
         document.undo();
         assert_eq!(text(&document), "ab", "only what was typed after the move");
@@ -1646,7 +1809,7 @@ mod tests {
     #[test]
     fn backspacing_a_word_undoes_as_a_word() {
         let mut document = doc("hello world");
-        document.move_cursor(Motion::End, 10);
+        document.move_cursor(Motion::End, pane(10));
         for _ in 0..5 {
             document.backspace();
         }
@@ -1667,7 +1830,7 @@ mod tests {
     #[test]
     fn undoing_a_cluster_deletion_puts_the_whole_cluster_back() {
         let mut document = doc("a\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}b");
-        document.move_cursor(Motion::End, 10);
+        document.move_cursor(Motion::End, pane(10));
         document.backspace();
         document.backspace();
         assert_eq!(
@@ -1692,8 +1855,8 @@ mod tests {
     #[test]
     fn a_cut_undoes_in_one_step() {
         let mut document = doc("one\ntwo\nthree\n");
-        document.extend_cursor(Motion::Down, 10);
-        document.extend_cursor(Motion::Down, 10);
+        document.extend_cursor(Motion::Down, pane(10));
+        document.extend_cursor(Motion::Down, pane(10));
         assert_eq!(document.selected_text().as_deref(), Some("one\ntwo\n"));
         document.delete_selection();
         assert_eq!(text(&document), "three\n");
@@ -1740,7 +1903,7 @@ mod tests {
         // The stored cursor is clamped, not trusted: a bug elsewhere must cost
         // a misplaced caret, never a panic (SPEC §45).
         let mut document = doc("one\ntwo\n");
-        document.move_cursor(Motion::DocumentEnd, 10);
+        document.move_cursor(Motion::DocumentEnd, pane(10));
         type_text(&mut document, "x");
         document.select_all();
         document.delete_selection();
@@ -1838,7 +2001,7 @@ mod tests {
     fn the_revision_counts_changes_and_nothing_else() {
         let mut document = Document::from_text("a\n", None);
         let start = document.revision();
-        document.move_cursor(Motion::Right, 10);
+        document.move_cursor(Motion::Right, pane(10));
         assert_eq!(document.revision(), start, "moving is not a change");
         document.insert_char('b');
         assert!(document.revision() > start);
@@ -1937,7 +2100,7 @@ mod tests {
         let (_dir, path) = on_disk("one\ntwo\nthree\nfour\n");
         let mut document = Document::open(&path).unwrap();
         document.goto_line(4);
-        document.move_cursor(Motion::End, 10);
+        document.move_cursor(Motion::End, pane(10));
         std::fs::write(&path, "1\n").unwrap();
 
         document.reload().unwrap();

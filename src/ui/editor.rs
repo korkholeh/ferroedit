@@ -12,14 +12,33 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::focus::FocusTarget;
-use crate::app::App;
+use crate::app::{App, EditorView, TextView};
 use crate::editor::coords::{self, VisualCol};
 use crate::editor::search::Match;
 use crate::editor::selection::Selection;
 use crate::editor::viewport::gutter_width;
+use crate::editor::wrap;
 use crate::syntax::highlighter::{self, StyleKind, Token};
 use crate::ui::scrollbar;
 use crate::ui::theme::Theme;
+
+/// How the document is laid out in `area`: the rows it shows, and where a line
+/// breaks when wrapping is on.
+///
+/// Taken from the rect being drawn rather than from `App::editor_view`, which
+/// is the *last* frame's geometry: the renderer and the mouse both go through
+/// here, so what is drawn and what a click resolves to cannot disagree about
+/// the pane they are in.
+pub fn pane_layout(app: &App, area: Rect, line_count: usize) -> wrap::Layout {
+    TextView {
+        view: EditorView {
+            width: area.width,
+            height: area.height,
+        },
+        wrap: app.settings.word_wrap,
+    }
+    .layout(line_count)
+}
 
 pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let Some(tab) = app.active() else {
@@ -35,30 +54,38 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let tab_width = document.tab_width();
     let gutter = gutter_width(document.line_count());
     let text_width = (area.width as usize).saturating_sub(gutter);
-    let top = tab.viewport.top_line;
+    let layout = pane_layout(app, area, document.line_count());
     let left = tab.viewport.left_col;
 
     let selection = document.selection();
     let hits = app.search.open.then_some(app.search.matches.as_slice());
     let mut columns = Vec::new();
-    let lines: Vec<Line> = (top..document.line_count())
-        .take(area.height as usize)
-        .map(|index| {
-            let text = document.line(index);
-            let mut spans = vec![Span::styled(
-                format!("{:>width$}  ", index + 1, width = gutter - 2),
-                Style::new().fg(theme.line_number),
-            )];
-            match_columns(hits, index, &text, tab_width, &mut columns);
+    let rows = tab.viewport.visible(document, layout);
+    let lines: Vec<Line> = rows
+        .iter()
+        .map(|visible| {
+            let text = document.line(visible.line);
+            // Only the first row of a line is numbered: a continuation row is
+            // the same line, and a gutter that repeated the number would say
+            // the file has more lines in it than it does.
+            let mut spans = vec![if visible.is_first() {
+                Span::styled(
+                    format!("{:>width$}  ", visible.line + 1, width = gutter - 2),
+                    Style::new().fg(theme.line_number),
+                )
+            } else {
+                Span::raw(" ".repeat(gutter))
+            }];
+            match_columns(hits, visible.line, &text, tab_width, &mut columns);
             spans.extend(visible_spans(
                 &text,
-                left,
-                text_width,
+                VisualCol(visible.row.start_col.0 + left.0),
+                row_width(&text, visible.row, layout, text_width),
                 tab_width,
-                selected_columns(selection, index, &text, tab_width),
+                selected_columns(selection, visible.line, &text, tab_width),
                 &columns,
                 theme,
-                tab.highlights.tokens(index),
+                tab.highlights.tokens(visible.line),
             ));
             Line::from(spans)
         })
@@ -73,21 +100,61 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     }
     let cursor = document.cursor();
     let col = document.cursor_visual_col();
-    let row = cursor.line.checked_sub(top);
-    let cell = col.0.checked_sub(left.0);
-    if let (Some(row), Some(cell)) = (row, cell) {
-        if row < area.height as usize && cell < text_width {
-            frame.set_cursor_position((area.x + (gutter + cell) as u16, area.y + row as u16));
-        }
+    let index = layout
+        .row_at_col(&document.line(cursor.line), tab_width, col)
+        .0;
+    let Some(screen_row) = rows
+        .iter()
+        .position(|row| row.line == cursor.line && row.index == index)
+    else {
+        return;
+    };
+    let Some(cell) = col.0.checked_sub(rows[screen_row].row.start_col.0 + left.0) else {
+        return;
+    };
+    // A wrapped row that is full to the edge puts the caret one cell past its
+    // last character — there is no column beyond it to move to, and hiding the
+    // caret at the end of such a row would be worse than drawing it against the
+    // scrollbar. An unwrapped pane has that column: it scrolls sideways.
+    let limit = if layout.wraps() {
+        text_width
+    } else {
+        text_width.saturating_sub(1)
+    };
+    if cell <= limit {
+        let x = (gutter + cell).min(area.width.saturating_sub(1) as usize);
+        frame.set_cursor_position((area.x + x as u16, area.y + screen_row as u16));
     }
+}
+
+/// How many cells of a line one row draws.
+///
+/// Unwrapped it is the whole pane — the line runs under the right edge and the
+/// window is moved sideways to read the rest. Wrapped it is the row's own
+/// columns, plus the one cell a selected line break is drawn in, which only
+/// the last row of a line has.
+fn row_width(
+    text: &str,
+    row: crate::editor::wrap::Row,
+    layout: wrap::Layout,
+    text_width: usize,
+) -> usize {
+    if !layout.wraps() {
+        return text_width;
+    }
+    let last = row.end >= coords::char_len(text);
+    let width = if last { row.width() + 1 } else { row.width() };
+    width.min(text_width)
 }
 
 /// The editor's scrollbar, in the column `ui::layout` keeps beside the text
 /// (ADR-052).
 ///
-/// Measured in document lines rather than in wrapped rows because the editor
-/// does not wrap: one line is one row, so the thumb's position is the viewport's
-/// `top_line` with nothing to convert.
+/// Measured in document lines rather than in drawn rows, wrapping or not: the
+/// thumb is then the viewport's `top_line` with nothing to convert, and a
+/// wrapped file's bar is off by however many rows the lines above the window
+/// took — which is a thumb a few cells out of place on a bar the user reads as
+/// "roughly here", and not a wrong answer to a question anybody asks of it.
 pub fn render_scrollbar(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let Some(tab) = app.active() else {
         return;
