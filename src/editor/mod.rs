@@ -1,5 +1,6 @@
 //! Headless editor core. Compiles and is testable without ratatui/crossterm.
 
+pub mod charset;
 pub mod clipboard;
 pub mod coords;
 pub mod cursor;

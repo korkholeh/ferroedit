@@ -1323,6 +1323,42 @@ tmux, plain ssh). The pty harness is a stand-in, not a substitute — particular
 the terminal cursor's appearance, for wide-character and ZWJ rendering, and for mouse
 reporting.
 
+### The status bar answers back (ADR-058)
+
+The four readouts that describe the file are controls now: the cursor position opens Go to
+Line, `UTF-8` the encoding picker, `LF`/`CRLF` the line-ending picker, and the grammar's
+name the syntax picker. Each is a View menu entry as well, so none of them needs a mouse.
+The line ending is shown on every file rather than only on CRLF ones.
+
+- Converting the line endings asks first and then writes the file, because that is what a
+  conversion is; the confirmation says the save takes the rest of the buffer with it, and
+  Cancel is its default.
+- The chosen grammar outranks detection until the tab's path changes, so a `.txt` file full
+  of shell script can be coloured as one.
+- The syntax picker has a filter over its 77 rows — `DialogBody::List` became `Picker`,
+  which is the browser's `items`/`visible` split and its filter field (ADR-051).
+- The rects the mouse hit-tests come from `ui::statusbar` itself, so a piece the bar dropped
+  to fit a narrow terminal (ADR-039) has no rect and cannot be clicked.
+
+### Legacy encodings (ADR-059)
+
+A document carries a `Charset` — an `encoding_rs` decoder and whether the file has a byte
+order mark — instead of being UTF-8 or nothing. Twenty-five of them in the picker, from
+UTF-16 to KOI8-U to Shift_JIS.
+
+- A file is read as its own mark says, else UTF-8 when the bytes are valid UTF-8, else
+  Windows-1252 with the status bar saying so. Every byte of that fallback round-trips, so a
+  wrong guess is one the user can look at and correct rather than one that costs them the
+  file.
+- Choosing an encoding asks what it means: **Reopen** re-reads the bytes (undoable, like
+  every reload), **Convert and Save** keeps the text and writes it out.
+- A save that cannot hold what is in the buffer is refused, naming the character, with the
+  file on disk untouched — the Encoding Standard would have written `&#1071;` there.
+- Binary files are still refused: a NUL in the first 8 KB of the decoded head.
+- The syntax and encoding pickers draw their rows in a framed, scrollbarred box, the way the
+  file browser has since ADR-051.
+- The branch on the status bar opens the branch picker.
+
 ## Next
 
 Phase 14 continues. What is left of it, roughly in order of how much it is worth:

@@ -17,6 +17,8 @@ use crate::app::browser::Browser;
 use crate::app::focus::FocusTarget;
 use crate::app::input_field::InputField;
 use crate::commands::{Command, FileOp};
+use crate::editor::charset::Charset;
+use crate::editor::document::LineEnding;
 use crate::git::models::Branch;
 
 /// The most rows a list body shows at once. Past it the list scrolls: a picker
@@ -76,17 +78,162 @@ pub enum DialogBody {
     /// reason: every list the editor needed until now had a pane behind it that
     /// already listed the same things better. A branch list has no such pane
     /// (ADR-035).
-    List {
-        prompt: String,
-        items: Vec<ListItem>,
-        selected: usize,
-        scroll: usize,
-    },
+    List(Picker),
     /// A directory listing and a filter field over it — the Open dialog
     /// (ADR-051). It is the `List` body plus the two things browsing needs and
     /// a picker does not: a place that changes under the rows, and text to
     /// narrow them with.
     Browser(Browser),
+}
+
+/// A list to choose from: every row it was built with, which of them the
+/// filter leaves, and where the selection is among those.
+///
+/// It was four fields on `DialogBody::List` until the syntax picker arrived
+/// (ADR-058). Two hundred grammars stepped through ten rows at a time is a list
+/// nobody reaches the end of, so the picker borrowed the browser's filter — and
+/// with it the browser's `items`/`visible` split, for the same reason: a filter
+/// that is cleared must not have lost anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Picker {
+    pub prompt: String,
+    items: Vec<ListItem>,
+    /// Indices into `items`, in display order.
+    visible: Vec<usize>,
+    /// `None` for a list short enough to read whole — the branch pickers, whose
+    /// rows are counted in handfuls and whose dialog would only be harder to
+    /// answer with a field in it.
+    pub filter: Option<InputField>,
+    /// Index into `visible`.
+    selected: usize,
+    scroll: usize,
+}
+
+impl Picker {
+    fn new(prompt: String, items: Vec<ListItem>, selected: usize, filtered: bool) -> Self {
+        let visible = (0..items.len()).collect();
+        Self {
+            prompt,
+            items,
+            visible,
+            filter: filtered.then(InputField::default),
+            selected,
+            scroll: 0,
+        }
+    }
+
+    /// The rows to draw, in display order.
+    pub fn rows(&self) -> impl Iterator<Item = &ListItem> {
+        self.visible.iter().filter_map(|i| self.items.get(*i))
+    }
+
+    /// How many rows are shown, which is what the box is sized to and what the
+    /// selection is clamped against.
+    pub fn len(&self) -> usize {
+        self.visible.len()
+    }
+
+    /// Whether the picker was built with no rows at all — not the same question
+    /// as a filter that currently matches nothing.
+    pub fn has_no_items(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    pub fn selected(&self) -> usize {
+        self.selected
+    }
+
+    pub fn scroll(&self) -> usize {
+        self.scroll
+    }
+
+    pub fn selected_item(&self) -> Option<&ListItem> {
+        self.visible
+            .get(self.selected)
+            .and_then(|i| self.items.get(*i))
+    }
+
+    /// The widest row, counted over *every* item and not only the shown ones: a
+    /// box that changed width under a filter would move the rows sideways while
+    /// they are being read.
+    fn width(&self) -> usize {
+        self.items
+            .iter()
+            .map(|item| item.label.width() + LIST_MARKER_WIDTH)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Moves the selection, clamped at both ends like the browser's.
+    fn step(&mut self, delta: i16, height: usize) {
+        if self.visible.is_empty() {
+            self.selected = 0;
+            self.scroll = 0;
+            return;
+        }
+        let last = self.visible.len() - 1;
+        self.selected = if delta < 0 {
+            self.selected.saturating_sub(delta.unsigned_abs() as usize)
+        } else {
+            (self.selected + delta as usize).min(last)
+        };
+        self.follow_selection(height);
+    }
+
+    fn select_visible_row(&mut self, row: usize, height: usize) {
+        if self.visible.is_empty() {
+            return;
+        }
+        self.selected = (self.scroll + row).min(self.visible.len() - 1);
+        self.follow_selection(height);
+    }
+
+    /// Re-applies the filter after the field has been edited, keeping the
+    /// selection on the same row when that row is still shown.
+    ///
+    /// Unlike the browser there is no row that survives every filter, so a
+    /// selection with nowhere to go lands on the first match — which is the row
+    /// the typing was aiming at.
+    fn refilter(&mut self, height: usize) {
+        let previous = self.selected_item().map(|item| item.label.clone());
+        self.rebuild_visible();
+        self.selected = previous
+            .and_then(|label| {
+                self.visible
+                    .iter()
+                    .position(|i| self.items[*i].label == label)
+            })
+            .unwrap_or(0);
+        self.follow_selection(height);
+    }
+
+    fn follow_selection(&mut self, height: usize) {
+        let height = height.max(1);
+        if self.selected < self.scroll {
+            self.scroll = self.selected;
+        } else if self.selected >= self.scroll + height {
+            self.scroll = self.selected + 1 - height;
+        }
+        self.scroll = self.scroll.min(self.visible.len().saturating_sub(height));
+    }
+
+    /// Case-insensitive, and a substring rather than a prefix: `script` is how
+    /// you reach both JavaScript and PostScript without knowing which word the
+    /// grammar's name starts with.
+    fn rebuild_visible(&mut self) {
+        let query = self
+            .filter
+            .as_ref()
+            .map(|field| field.value.trim().to_lowercase())
+            .unwrap_or_default();
+        self.visible = self
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| query.is_empty() || item.label.to_lowercase().contains(&query))
+            .map(|(index, _)| index)
+            .collect();
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -348,6 +495,7 @@ impl DialogState {
             branch_count(items.len()),
             items,
             selected,
+            false,
             vec![
                 DialogButton::new("Switch", Some(Command::SubmitListChoice)),
                 DialogButton::new("New…", Some(Command::GitNewBranchPrompt)),
@@ -370,6 +518,7 @@ impl DialogState {
             branch_count(items.len()),
             items,
             0,
+            false,
             vec![
                 DialogButton::new("Merge", Some(Command::SubmitListChoice)),
                 DialogButton::new("Cancel", None),
@@ -408,6 +557,165 @@ impl DialogState {
         )
     }
 
+    /// The line-ending picker, opened from the status bar's `LF` / `CRLF`
+    /// (SPEC §17, §38, ADR-058).
+    ///
+    /// Choosing a row does not convert anything: it opens the confirmation
+    /// below, because the conversion rewrites every line of the file and this
+    /// dialog is one click away from a readout the user was only reading.
+    pub fn line_ending(current: LineEnding, return_focus: FocusTarget) -> Self {
+        let items: Vec<ListItem> = [LineEnding::Lf, LineEnding::Crlf]
+            .into_iter()
+            .map(|ending| ListItem {
+                label: format!("{} — {}", ending.label(), ending.platforms()),
+                command: Command::ConvertLineEndingPrompt(ending),
+                current: ending == current,
+            })
+            .collect();
+        let selected = items.iter().position(|item| item.current).unwrap_or(0);
+        Self::list(
+            "Line Endings",
+            "How this file's lines are separated on disk".to_string(),
+            items,
+            selected,
+            false,
+            vec![
+                DialogButton::new("Choose", Some(Command::SubmitListChoice)),
+                DialogButton::new("Cancel", None),
+            ],
+            return_focus,
+        )
+    }
+
+    /// Asked before the file is rewritten (ADR-058).
+    ///
+    /// Cancel is the default: the picker behind this is reachable by a single
+    /// click on a readout, and the answer that writes to disk must not be the
+    /// one a reflex `Enter` gives. The message says the save takes the rest of
+    /// the buffer with it, because it does.
+    pub fn convert_line_ending(
+        title: &str,
+        ending: LineEnding,
+        dirty: bool,
+        return_focus: FocusTarget,
+    ) -> Self {
+        let message = if dirty {
+            format!(
+                "Rewrite {title} with {} endings, saving your unsaved changes with it?",
+                ending.label()
+            )
+        } else {
+            format!("Rewrite {title} with {} endings?", ending.label())
+        };
+        Self::confirm(
+            "Convert Line Endings",
+            message,
+            vec![
+                DialogButton::new("Cancel", None),
+                DialogButton::new("Convert and Save", Some(Command::ConvertLineEnding(ending))),
+            ],
+            return_focus,
+        )
+    }
+
+    /// The encoding picker, opened from the status bar's charset name
+    /// (SPEC §17, ADR-059).
+    ///
+    /// Choosing a row asks what to *do* with it rather than doing either thing,
+    /// because there are two and neither is the obvious one: a file that was
+    /// decoded wrongly wants re-reading, and a file that is right wants writing
+    /// out in another charset.
+    pub fn encoding(current: Charset, return_focus: FocusTarget) -> Self {
+        let items: Vec<ListItem> = Charset::ALL
+            .iter()
+            .map(|charset| ListItem {
+                label: charset.label.to_string(),
+                command: Command::EncodingChoice(charset.label.to_string()),
+                current: *charset == current,
+            })
+            .collect();
+        let selected = items.iter().position(|item| item.current).unwrap_or(0);
+        Self::list(
+            "Encoding",
+            format!("{} encodings", items.len()),
+            items,
+            selected,
+            true,
+            vec![
+                DialogButton::new("Choose", Some(Command::SubmitListChoice)),
+                DialogButton::new("Cancel", None),
+            ],
+            return_focus,
+        )
+    }
+
+    /// The two things a chosen encoding can mean (ADR-059).
+    ///
+    /// *Reopen* re-reads the bytes on disk and decodes them again — the answer
+    /// when the file came out as mojibake, and the reason the picker cannot
+    /// simply act. *Convert and Save* keeps the text and writes it out in the
+    /// new charset. Cancel is the default, as it is for the line endings: both
+    /// buttons touch a file, and the picker behind them is one click from a
+    /// readout somebody was only reading.
+    ///
+    /// Reopen is offered only for a file there is something to re-read from,
+    /// and the message says what an unsaved buffer would lose — though it is
+    /// undoable, like every other reload (ADR-043).
+    pub fn choose_encoding(
+        title: &str,
+        charset: Charset,
+        named: bool,
+        dirty: bool,
+        return_focus: FocusTarget,
+    ) -> Self {
+        let message = match (named, dirty) {
+            (true, true) => format!(
+                "{title} as {}: reopen, losing unsaved changes to an undo, or convert and save?",
+                charset.label
+            ),
+            (true, false) => format!("Reopen or rewrite {title} as {}?", charset.label),
+            (false, _) => format!("Write {title} as {}?", charset.label),
+        };
+        let mut buttons = vec![DialogButton::new("Cancel", None)];
+        if named {
+            buttons.push(DialogButton::new(
+                "Reopen",
+                Some(Command::ReopenWithEncoding(charset.label.to_string())),
+            ));
+        }
+        buttons.push(DialogButton::new(
+            "Convert and Save",
+            Some(Command::ConvertEncoding(charset.label.to_string())),
+        ));
+        Self::confirm("Encoding", message, buttons, return_focus)
+    }
+
+    /// The syntax-mode picker, opened from the status bar's grammar name
+    /// (SPEC §21, ADR-058).
+    ///
+    /// The rows are built by `commands::execute` from the syntax set, because
+    /// dialog state has no business knowing what syntect is. It is the one
+    /// picker with a filter: there are hundreds of grammars.
+    pub fn syntax_mode(items: Vec<ListItem>, return_focus: FocusTarget) -> Self {
+        let selected = items.iter().position(|item| item.current).unwrap_or(0);
+        let prompt = match items.len() {
+            1 => "1 grammar".to_string(),
+            count => format!("{count} grammars"),
+        };
+        Self::list(
+            "Syntax Mode",
+            prompt,
+            items,
+            selected,
+            true,
+            vec![
+                DialogButton::new("Use", Some(Command::SubmitListChoice)),
+                DialogButton::new("Cancel", None),
+            ],
+            return_focus,
+        )
+    }
+
     fn branch_items(branches: &[Branch], command: impl Fn(&Branch) -> Command) -> Vec<ListItem> {
         branches
             .iter()
@@ -419,22 +727,26 @@ impl DialogState {
             .collect()
     }
 
+    /// The shape every picker shares: a prompt, rows to choose from, and the
+    /// confirm button that acts on the highlighted one.
+    ///
+    /// `filtered` grows the body a filter field, which also changes what the
+    /// dialog's keys mean — `Left` becomes a caret move and the list keeps
+    /// `Up`/`Down`, exactly as it does in the browser (ADR-019, ADR-051). It is
+    /// worth that trade only for a list too long to step through, which is why
+    /// the branch pickers do not take it.
     fn list(
         title: &str,
         prompt: String,
         items: Vec<ListItem>,
         selected: usize,
+        filtered: bool,
         buttons: Vec<DialogButton>,
         return_focus: FocusTarget,
     ) -> Self {
         Self {
             title: title.into(),
-            body: DialogBody::List {
-                prompt,
-                items,
-                selected,
-                scroll: 0,
-            },
+            body: DialogBody::List(Picker::new(prompt, items, selected, filtered)),
             buttons,
             selected: 0,
             return_focus,
@@ -528,6 +840,7 @@ impl DialogState {
     pub fn field(&self) -> Option<&InputField> {
         match &self.body {
             DialogBody::Input { field, .. } => Some(field),
+            DialogBody::List(picker) => picker.filter.as_ref(),
             DialogBody::Browser(browser) => Some(&browser.filter),
             _ => None,
         }
@@ -536,8 +849,47 @@ impl DialogState {
     pub fn field_mut(&mut self) -> Option<&mut InputField> {
         match &mut self.body {
             DialogBody::Input { field, .. } => Some(field),
+            DialogBody::List(picker) => picker.filter.as_mut(),
             DialogBody::Browser(browser) => Some(&mut browser.filter),
             _ => None,
+        }
+    }
+
+    /// Whether the field this dialog has narrows a list rather than asking for
+    /// a name, which is what decides the `Filter:` label in front of it.
+    ///
+    /// It is also what decides the box the rows are drawn in: a list with a
+    /// filter over it is a list long enough to scroll, and a scrolling list
+    /// wants a frame around it and a bar down its edge (ADR-051, ADR-058) —
+    /// otherwise the rows read as three lines of the dialog and nothing says
+    /// there are seventy more.
+    pub fn field_filters(&self) -> bool {
+        match &self.body {
+            DialogBody::List(picker) => picker.filter.is_some(),
+            DialogBody::Browser(_) => true,
+            _ => false,
+        }
+    }
+
+    /// How many rows the list holds and where its window starts — what the
+    /// scrollbar beside it is drawn from.
+    pub fn list_extent(&self) -> (usize, usize) {
+        match &self.body {
+            DialogBody::List(picker) => (picker.len(), picker.scroll()),
+            DialogBody::Browser(browser) => (browser.len(), browser.scroll()),
+            _ => (0, 0),
+        }
+    }
+
+    /// Re-narrows a filtered body after its field has been typed into.
+    ///
+    /// Both bodies with a filter need it and neither caller knows which one it
+    /// has, so the dialog answers for both.
+    pub fn refilter(&mut self, height: usize) {
+        match &mut self.body {
+            DialogBody::List(picker) if picker.filter.is_some() => picker.refilter(height),
+            DialogBody::Browser(browser) => browser.refilter(height),
+            _ => {}
         }
     }
 
@@ -560,7 +912,8 @@ impl DialogState {
     pub fn prompt(&self) -> &str {
         match &self.body {
             DialogBody::Message(message) => message,
-            DialogBody::Input { prompt, .. } | DialogBody::List { prompt, .. } => prompt,
+            DialogBody::Input { prompt, .. } => prompt,
+            DialogBody::List(picker) => &picker.prompt,
             // The browser's prompt is where it is, which changes under it.
             DialogBody::Browser(_) => "",
         }
@@ -599,7 +952,7 @@ impl DialogState {
     /// whether the layout reserves an area for one.
     pub fn has_list_body(&self) -> bool {
         match &self.body {
-            DialogBody::List { items, .. } => !items.is_empty(),
+            DialogBody::List(picker) => !picker.has_no_items(),
             DialogBody::Browser(_) => true,
             _ => false,
         }
@@ -608,11 +961,7 @@ impl DialogState {
     /// The widest row the body wants to draw, so the box can be sized to it.
     pub fn body_width(&self) -> usize {
         match &self.body {
-            DialogBody::List { items, .. } => items
-                .iter()
-                .map(|item| item.label.width() + LIST_MARKER_WIDTH)
-                .max()
-                .unwrap_or(0),
+            DialogBody::List(picker) => picker.width(),
             DialogBody::Browser(browser) => browser
                 .rows()
                 .map(|entry| entry.name.width() + LIST_MARKER_WIDTH + usize::from(entry.is_dir))
@@ -622,21 +971,20 @@ impl DialogState {
         }
     }
 
-    /// The rows a list body holds, and an empty slice for the bodies that are
-    /// not one — so the renderer and the layout can ask without matching.
-    pub fn items(&self) -> &[ListItem] {
-        match &self.body {
-            DialogBody::List { items, .. } => items,
-            _ => &[],
-        }
+    /// The rows a list body draws, in display order, and nothing for the
+    /// bodies that are not one — so the renderer can ask without matching.
+    pub fn rows(&self) -> impl Iterator<Item = &ListItem> {
+        let picker = match &self.body {
+            DialogBody::List(picker) => Some(picker),
+            _ => None,
+        };
+        picker.into_iter().flat_map(Picker::rows)
     }
 
     /// Which row the list highlights, and the first row it draws.
     pub fn list_view(&self) -> (usize, usize) {
         match &self.body {
-            DialogBody::List {
-                selected, scroll, ..
-            } => (*selected, *scroll),
+            DialogBody::List(picker) => (picker.selected(), picker.scroll()),
             _ => (0, 0),
         }
     }
@@ -644,9 +992,7 @@ impl DialogState {
     /// The row the confirm button would act on.
     pub fn selected_item(&self) -> Option<&ListItem> {
         match &self.body {
-            DialogBody::List {
-                items, selected, ..
-            } => items.get(*selected),
+            DialogBody::List(picker) => picker.selected_item(),
             _ => None,
         }
     }
@@ -658,37 +1004,11 @@ impl DialogState {
     /// like the explorer's, and a list that jumps from its last row to its
     /// first under a held key is a list that loses the reader's place.
     pub fn step_list(&mut self, delta: i16, height: usize) {
-        if let DialogBody::Browser(browser) = &mut self.body {
-            browser.step(delta, height);
-            return;
+        match &mut self.body {
+            DialogBody::Browser(browser) => browser.step(delta, height),
+            DialogBody::List(picker) => picker.step(delta, height),
+            _ => {}
         }
-        let DialogBody::List {
-            items,
-            selected,
-            scroll,
-            ..
-        } = &mut self.body
-        else {
-            return;
-        };
-        if items.is_empty() {
-            *selected = 0;
-            *scroll = 0;
-            return;
-        }
-        let last = items.len() - 1;
-        *selected = if delta < 0 {
-            selected.saturating_sub(delta.unsigned_abs() as usize)
-        } else {
-            (*selected + delta as usize).min(last)
-        };
-        let height = height.max(1).min(items.len());
-        if *selected < *scroll {
-            *scroll = *selected;
-        } else if *selected >= *scroll + height {
-            *scroll = *selected + 1 - height;
-        }
-        *scroll = (*scroll).min(items.len().saturating_sub(height));
     }
 
     /// Selects a row by its place in the *visible* window.
@@ -698,23 +1018,11 @@ impl DialogState {
     /// which has the rects but not the dialog. A visible row is by definition
     /// already in view, so nothing has to be scrolled afterwards.
     pub fn select_visible_row(&mut self, row: usize, height: usize) {
-        if let DialogBody::Browser(browser) = &mut self.body {
-            browser.select_visible_row(row, height);
-            return;
+        match &mut self.body {
+            DialogBody::Browser(browser) => browser.select_visible_row(row, height),
+            DialogBody::List(picker) => picker.select_visible_row(row, height),
+            _ => {}
         }
-        let DialogBody::List {
-            items,
-            selected,
-            scroll,
-            ..
-        } = &mut self.body
-        else {
-            return;
-        };
-        if items.is_empty() {
-            return;
-        }
-        *selected = (*scroll + row).min(items.len() - 1);
     }
 
     /// How many rows the body needs, which is what the box's height is built
@@ -725,7 +1033,12 @@ impl DialogState {
             // with the buttons directly beneath the sentence.
             DialogBody::Message(_) => 2,
             DialogBody::Input { .. } => 2,
-            DialogBody::List { items, .. } => 1 + MAX_LIST_ROWS.min(items.len()).max(1),
+            // The prompt, the rows, and — when there is a filter — the field
+            // and the two border rows of the box the rows are drawn inside.
+            DialogBody::List(picker) => {
+                1 + 3 * usize::from(picker.filter.is_some())
+                    + MAX_LIST_ROWS.min(picker.len()).max(1)
+            }
             // The location line, the filter, the rows under both, and the two
             // border rows of the frame the rows are drawn inside.
             DialogBody::Browser(browser) => 4 + MAX_BROWSER_ROWS.min(browser.len()).max(1),
@@ -941,7 +1254,7 @@ mod tests {
     #[test]
     fn a_remote_row_switches_to_the_local_branch_it_would_create() {
         let dialog = DialogState::switch_branch(&branches(), FocusTarget::GitPanel);
-        let items = dialog.items();
+        let items: Vec<&ListItem> = dialog.rows().collect();
         assert_eq!(items[1].command, Command::GitSwitchBranch("topic".into()));
         assert_eq!(items[2].label, "origin/topic");
         assert_eq!(items[2].command, Command::GitSwitchBranch("topic".into()));
@@ -952,10 +1265,10 @@ mod tests {
     #[test]
     fn the_merge_picker_leaves_out_the_branch_you_are_on() {
         let dialog = DialogState::merge_branch(&branches(), FocusTarget::GitPanel);
-        let labels: Vec<&str> = dialog.items().iter().map(|i| i.label.as_str()).collect();
+        let labels: Vec<&str> = dialog.rows().map(|i| i.label.as_str()).collect();
         assert_eq!(labels, vec!["topic", "origin/topic"]);
         assert_eq!(
-            dialog.items()[1].command,
+            dialog.rows().nth(1).expect("two rows").command,
             Command::GitMerge("origin/topic".into())
         );
         assert_eq!(dialog.buttons[0].label, "Merge");
@@ -1026,7 +1339,7 @@ mod tests {
     #[test]
     fn a_body_that_is_not_a_list_answers_the_list_questions_harmlessly() {
         let mut dialog = DialogState::unsaved_on_quit(0, "a.txt", 1, FocusTarget::Editor);
-        assert!(dialog.items().is_empty());
+        assert_eq!(dialog.rows().count(), 0);
         assert!(dialog.selected_item().is_none());
         dialog.step_list(3, MAX_LIST_ROWS);
         dialog.select_visible_row(2, MAX_LIST_ROWS);

@@ -192,7 +192,7 @@ A message and a row of buttons, or a list to choose from (SPEC §33). `Left` and
 
 ## Dialog with a text field
 
-A dialog that asks for a name, and the Open browser, whose field filters its listing (ADR-051). These replace the plain dialog's keys while the field is open, which is why `Left` moves a caret here and a button selection there (ADR-019); `Up` and `Down` are still the list's, since the caret has no use for them.
+A dialog that asks for a name, and the two whose field filters a list under it: the Open browser (ADR-051) and the syntax and encoding pickers (ADR-058, ADR-059). These replace the plain dialog's keys while the field is open, which is why `Left` moves a caret here and a button selection there (ADR-019); `Up` and `Down` are still the list's, since the caret has no use for them.
 
 | Keys | Action |
 |---|---|
@@ -254,6 +254,9 @@ Every item is a command, and the *Shortcut* column is the same lookup the menu i
 | View | Refresh Explorer | `F5` | Explorer |
 | View | Show Hidden Files | — | — |
 | View | Word Wrap | `Alt+Z` | anywhere |
+| View | Syntax Mode… | — | — |
+| View | Line Endings… | — | — |
+| View | Encoding… | — | — |
 | View | Scroll Left | `Alt+Left` | Editor |
 | View | Scroll Right | `Alt+Right` | Editor |
 | View | Focus Explorer | — | — |
@@ -282,7 +285,7 @@ Every item is a command, and the *Shortcut* column is the same lookup the menu i
 
 ## Mouse
 
-Clicking a row of a dialog's list selects it without choosing it — unlike the explorer's rows (ADR-020), the confirm button is right there and choosing a branch by accident is a checkout. The Open browser is the exception: a click on the row that is *already* selected walks into it, so browsing costs one click a step, and the wheel over its rows moves the selection through them (ADR-051). Clicking in the editor places the cursor, dragging selects, and a double-click selects the word under the pointer. The wheel scrolls the pane under the pointer without moving the cursor. Clicking a tab switches to it; clicking its `×`, or middle-clicking it, closes it. When there are more tabs than fit, the wheel over the tab strip scrolls it sideways and its `‹` and `›` arrows step it one tab at a time. Clicking a row in the explorer opens the file or folds the directory in one click (ADR-020). Clicking a row of the find bar puts the caret in that row's field, and its `[Aa]`, `[Replace]` and `[All]` are clickable — the fallback for terminals that swallow `Alt`.
+Clicking a row of a dialog's list selects it without choosing it — unlike the explorer's rows (ADR-020), the confirm button is right there and choosing a branch by accident is a checkout. The Open browser is the exception: a click on the row that is *already* selected walks into it, so browsing costs one click a step, and the wheel over its rows moves the selection through them (ADR-051). Clicking in the editor places the cursor, dragging selects, and a double-click selects the word under the pointer. The wheel scrolls the pane under the pointer without moving the cursor. Clicking a tab switches to it; clicking its `×`, or middle-clicking it, closes it. When there are more tabs than fit, the wheel over the tab strip scrolls it sideways and its `‹` and `›` arrows step it one tab at a time. Clicking a row in the explorer opens the file or folds the directory in one click (ADR-020). Clicking a row of the find bar puts the caret in that row's field, and its `[Aa]`, `[Replace]` and `[All]` are clickable — the fallback for terminals that swallow `Alt`. On the status bar, most of the right-hand readout is questions (ADR-058): `Ln 12, Col 8` opens Go to Line, the charset name the encoding picker (ADR-059), `LF` / `CRLF` the line-ending picker, the grammar's name the syntax picker, and the branch name the branch picker. Each is a menu entry too, so none of them needs a mouse. What is left — the notification, the focus label, the selection count — reports where you already are and stays inert.
 
 ## Terminal limits
 

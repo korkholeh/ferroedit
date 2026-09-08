@@ -151,8 +151,8 @@ table; a key with no entry there does nothing.
 ";
 
 const INPUT_DIALOG_NOTE: &str = "\
-A dialog that asks for a name, and the Open browser, whose field filters its listing \
-(ADR-051). These replace the plain dialog's keys while the field is open, which is why \
+A dialog that asks for a name, and the two whose field filters a list under it: the Open \
+browser (ADR-051) and the syntax and encoding pickers (ADR-058, ADR-059). These replace the plain dialog's keys while the field is open, which is why \
 `Left` moves a caret here and a button selection there (ADR-019); `Up` and `Down` are \
 still the list's, since the caret has no use for them.";
 
@@ -186,7 +186,12 @@ closes it. When there are more tabs than fit, the wheel over the tab strip scrol
 sideways and its `‹` and `›` arrows step it one tab at a time. Clicking a row in the explorer opens the file or folds the directory in one \
 click (ADR-020). Clicking a row of the find bar puts the caret in that row's field, and \
 its `[Aa]`, `[Replace]` and `[All]` are clickable — the fallback for terminals that \
-swallow `Alt`.
+swallow `Alt`. On the status bar, most of the right-hand readout is questions \
+(ADR-058): `Ln 12, Col 8` opens Go to Line, the charset name the encoding picker \
+(ADR-059), `LF` / `CRLF` the line-ending picker, the grammar's name the syntax picker, \
+and the branch name the branch picker. Each is a menu entry too, so none of them needs a \
+mouse. What is left — the notification, the focus label, the selection count — reports \
+where you already are and stays inert.
 ";
 
 const LIMITS: &str = "\

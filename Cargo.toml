@@ -47,6 +47,11 @@ arboard = { version = "3", optional = true }
 # static musl build is unaffected (ADR-003); the C `fsevent-sys` it links on
 # macOS is not in any release target.
 notify = "7"
+# Legacy encodings (ADR-059). Pure Rust, so a static musl build is unaffected
+# (ADR-003), and taken without `simd-accel` — which needs nightly — or any of
+# the `fast-*-encode` tables, which trade ~150 KB of binary each for encode
+# speed on scripts a text editor writes a few kilobytes of at a time.
+encoding_rs = { version = "0.8.40", default-features = false, features = ["alloc"] }
 
 [build-dependencies]
 # Same features as the runtime dependency: the dump `build.rs` writes has to be

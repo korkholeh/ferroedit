@@ -659,6 +659,20 @@ mod tests {
         assert!(draw(&app, 100, 24)[23].contains("Wrap"));
     }
 
+    /// It used to be shown for CRLF alone, while nothing could be done about
+    /// it. It is a question now (ADR-058), and a bar that mentioned only the
+    /// surprising case could not be asked "and what is it here?".
+    #[test]
+    fn the_status_bar_always_names_the_line_ending() {
+        let mut app = app();
+        assert!(draw(&app, 100, 24)[23].contains("LF"));
+        app.active_mut()
+            .unwrap()
+            .document
+            .set_line_ending(crate::editor::document::LineEnding::Crlf);
+        assert!(draw(&app, 100, 24)[23].contains("CRLF"));
+    }
+
     #[test]
     fn the_status_bar_follows_the_cursor() {
         let mut app = app();

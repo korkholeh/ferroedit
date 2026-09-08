@@ -204,6 +204,17 @@ fn left_click(app: &App, rects: &LayoutRects, at: Position) -> Option<Command> {
     if rects.git_panel.contains(at) {
         return Some(git_click(app, rects.git_panel, at));
     }
+    // The readout on the status bar is four questions and three statements
+    // (ADR-058). A click on one of the questions opens the dialog that answers
+    // it; the rest of the row — the notification, the branch, the focus label —
+    // is not a control and stays inert.
+    if rects.status_bar.contains(at) {
+        return rects
+            .status_zones
+            .iter()
+            .find(|(_, rect)| rect.contains(at))
+            .map(|(zone, _)| zone.command());
+    }
     None
 }
 
@@ -381,6 +392,7 @@ mod tests {
     use super::*;
     use crate::editor::coords::VisualCol;
     use crate::ui::layout;
+    use crate::ui::statusbar::StatusZone;
 
     fn app() -> App {
         App::fixture()
@@ -926,10 +938,51 @@ mod tests {
     }
 
     #[test]
-    fn a_click_on_the_status_bar_is_not_a_command() {
+    fn a_click_on_the_left_half_of_the_status_bar_is_not_a_command() {
         let app = app();
         let r = rects(&app);
         assert_eq!(hit_test(&app, &r, click(1, r.status_bar.y)), None);
+    }
+
+    /// Every readout with an unambiguous dialog behind it opens that dialog
+    /// (ADR-058, ADR-059). The rects come from `ui::statusbar` itself, so this
+    /// is also the test that the pieces are where they were drawn.
+    #[test]
+    fn the_readouts_with_a_dialog_behind_them_are_clickable() {
+        let app = app();
+        let r = rects(&app);
+        let row = r.status_bar.y;
+        for (zone, rect) in &r.status_zones {
+            assert_eq!(
+                hit_test(&app, &r, click(rect.x, row)),
+                Some(zone.command()),
+                "{zone:?} at {rect:?}"
+            );
+        }
+        let zones: Vec<StatusZone> = r.status_zones.iter().map(|(zone, _)| *zone).collect();
+        assert_eq!(
+            zones,
+            vec![
+                StatusZone::Cursor,
+                StatusZone::Encoding,
+                StatusZone::LineEnding,
+                StatusZone::Language,
+                StatusZone::Branch,
+            ]
+        );
+    }
+
+    /// The gap between two pieces is not either of them: a click there is a
+    /// click on the bar, which does nothing.
+    #[test]
+    fn the_space_between_two_readouts_is_not_a_command() {
+        let app = app();
+        let r = rects(&app);
+        let (_, cursor) = r.status_zones[0];
+        assert_eq!(
+            hit_test(&app, &r, click(cursor.right(), r.status_bar.y)),
+            None
+        );
     }
     /// The fixture with the replace bar open, which is the case with every
     /// clickable piece on screen at once.

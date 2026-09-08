@@ -184,6 +184,32 @@ pub fn detect(path: Option<&Path>, first_line: &str) -> &'static SyntaxReference
         .unwrap_or_else(|| set.find_syntax_plain_text())
 }
 
+/// Every grammar in the set, by name, in alphabetical order and without
+/// duplicates — the rows of the syntax picker (ADR-058).
+///
+/// Built once: the set is `'static`, so the names are too, and the picker is
+/// opened often enough that sorting two hundred strings on each open would be
+/// work with no reason to happen twice.
+pub fn names() -> &'static [&'static str] {
+    static NAMES: OnceLock<Vec<&'static str>> = OnceLock::new();
+    NAMES.get_or_init(|| {
+        let mut names: Vec<&'static str> = syntax_set()
+            .syntaxes()
+            .iter()
+            .map(|syntax| syntax.name.as_str())
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        names
+    })
+}
+
+/// The grammar with this name, which is how a row of the picker becomes a
+/// choice. `None` for a name no grammar answers to.
+pub fn by_name(name: &str) -> Option<&'static SyntaxReference> {
+    syntax_set().find_syntax_by_name(name)
+}
+
 /// The parser's position between two lines: everything needed to resume.
 ///
 /// Cloning one is ~1.5 µs, which is what makes the checkpoint cache in

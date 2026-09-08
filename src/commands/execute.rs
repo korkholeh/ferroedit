@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use crate::app::dialog::{DialogState, MAX_LIST_ROWS};
+use crate::app::dialog::{DialogState, ListItem, MAX_LIST_ROWS};
 use crate::app::diff::{DiffState, HORIZONTAL_STEP};
 use crate::app::focus::FocusTarget;
 use crate::app::git::NotStarted;
@@ -14,14 +14,16 @@ use crate::app::tabs::{active_after_close, Stale, TabItem};
 use crate::app::{App, LastClick, SidebarMode};
 use crate::commands::{Command, FileOp, MenuEntry, MENUS};
 use crate::config::ThemeKind;
+use crate::editor::charset::Charset;
 use crate::editor::coords::VisualCol;
-use crate::editor::document::{DiskState, Document};
+use crate::editor::document::{DiskState, Document, LineEnding};
 use crate::editor::wrap;
 use crate::filesystem;
 use crate::filesystem::watcher::FsChange;
 use crate::git::diff::DiffSide;
 use crate::git::models::{Change, Operation};
 use crate::git::{GitJob, JobFailure, JobOutcome};
+use crate::syntax::highlighter;
 
 pub fn execute_command(app: &mut App, command: Command) {
     log::debug!("command {command:?} (focus {:?})", app.focus);
@@ -179,6 +181,16 @@ pub fn execute_command(app: &mut App, command: Command) {
         // and `SubmitCommit` are; see `activate_dialog_button`.
         Command::SubmitGotoLine => log::warn!("a line was submitted with no dialog open"),
         Command::GotoLine(typed) => goto_line(app, &typed),
+
+        Command::LineEndingPrompt => prompt_line_ending(app),
+        Command::ConvertLineEndingPrompt(ending) => confirm_line_ending(app, ending),
+        Command::ConvertLineEnding(ending) => convert_line_ending(app, ending),
+        Command::EncodingPrompt => prompt_encoding(app),
+        Command::EncodingChoice(name) => confirm_encoding(app, &name),
+        Command::ReopenWithEncoding(name) => reopen_with_encoding(app, &name),
+        Command::ConvertEncoding(name) => convert_encoding(app, &name),
+        Command::LanguagePrompt => prompt_language(app),
+        Command::SetLanguage(name) => set_language(app, &name),
         Command::ScrollEditorHorizontal(delta) => scroll_editor_columns(app, delta),
 
         Command::MoveCursor(motion) => {
@@ -550,6 +562,217 @@ fn prompt_goto_line(app: &mut App) {
     let count = tab.document.line_count();
     let return_focus = dialog_return_focus(app);
     open_dialog(app, DialogState::goto_line(current, count, return_focus));
+}
+
+// --- what the status bar says about a file (ADR-058) ------------------------
+
+/// Asks what the active file's lines should be separated by.
+fn prompt_line_ending(app: &mut App) {
+    let Some(tab) = app.active() else {
+        app.notifications.warning("No file open");
+        return;
+    };
+    let current = tab.document.line_ending();
+    let return_focus = dialog_return_focus(app);
+    open_dialog(app, DialogState::line_ending(current, return_focus));
+}
+
+/// Asks before the file is rewritten.
+///
+/// Choosing the ending the file already has is not a question — there is
+/// nothing to rewrite — so it says so and stops rather than offering to write
+/// the file for no reason.
+fn confirm_line_ending(app: &mut App, ending: LineEnding) {
+    let Some(tab) = app.active() else {
+        app.notifications.warning("No file open");
+        return;
+    };
+    if tab.document.line_ending() == ending {
+        app.notifications
+            .info(format!("Already {} line endings", ending.label()));
+        return;
+    }
+    let title = tab.document.title().to_string();
+    let dirty = tab.document.is_dirty();
+    let return_focus = dialog_return_focus(app);
+    open_dialog(
+        app,
+        DialogState::convert_line_ending(&title, ending, dirty, return_focus),
+    );
+}
+
+/// Sets the ending and writes the file, which is what the user just approved.
+///
+/// A buffer with no file behind it keeps the choice without a save: there is
+/// nothing to rewrite yet, and the first Save As writes it with the ending that
+/// was chosen here.
+fn convert_line_ending(app: &mut App, ending: LineEnding) {
+    let Some(index) = app.active_tab else {
+        app.notifications.warning("No file open");
+        return;
+    };
+    let Some(tab) = app.editor_at_mut(index) else {
+        app.notifications.warning("No file open");
+        return;
+    };
+    tab.document.set_line_ending(ending);
+    let named = tab.document.path().is_some();
+    if !named {
+        app.notifications
+            .info(format!("Line endings set to {}", ending.label()));
+        return;
+    }
+    if save_tab(app, index) {
+        // After `save_tab`'s own "Saved …", because this is the question the
+        // user asked and the file name is not news.
+        app.notifications
+            .info(format!("Converted to {} line endings", ending.label()));
+    }
+}
+
+/// Opens the encoding picker (SPEC §17, ADR-059).
+fn prompt_encoding(app: &mut App) {
+    let Some(tab) = app.active() else {
+        app.notifications.warning("No file open");
+        return;
+    };
+    let current = tab.document.charset();
+    let return_focus = dialog_return_focus(app);
+    open_dialog(app, DialogState::encoding(current, return_focus));
+}
+
+/// Asks what the chosen encoding should mean — reopen, or convert.
+///
+/// Choosing the charset the file already has is not a question, exactly as it
+/// is not one for the line endings: there is nothing to re-read and nothing to
+/// rewrite.
+fn confirm_encoding(app: &mut App, name: &str) {
+    let Some(charset) = Charset::by_label(name) else {
+        app.notifications
+            .warning(format!("No encoding named {name}"));
+        return;
+    };
+    let Some(tab) = app.active() else {
+        app.notifications.warning("No file open");
+        return;
+    };
+    if tab.document.charset() == charset {
+        app.notifications.info(format!("Already {}", charset.label));
+        return;
+    }
+    let title = tab.document.title().to_string();
+    let named = tab.document.path().is_some();
+    let dirty = tab.document.is_dirty();
+    let return_focus = dialog_return_focus(app);
+    open_dialog(
+        app,
+        DialogState::choose_encoding(&title, charset, named, dirty, return_focus),
+    );
+}
+
+/// Re-reads the file with the chosen encoding — the answer for a file that came
+/// out as mojibake.
+///
+/// The step is undoable, so a second wrong guess costs `Ctrl+Z` and not a
+/// re-open; the viewport and the highlighting are brought back into step the
+/// same way a reload brings them.
+fn reopen_with_encoding(app: &mut App, name: &str) {
+    let Some(charset) = Charset::by_label(name) else {
+        app.notifications
+            .warning(format!("No encoding named {name}"));
+        return;
+    };
+    let view = app.text_view();
+    let Some(tab) = app.active_mut() else {
+        app.notifications.warning("No file open");
+        return;
+    };
+    match tab.document.reopen_as(charset) {
+        Ok(()) => {
+            tab.mark_stale(None);
+            tab.follow_cursor(view);
+            app.notifications
+                .info(format!("Reopened as {}", charset.label));
+        }
+        Err(err) => {
+            log::error!("reopen failed: {err}");
+            app.notifications.error(format!("Failed to reopen: {err}"));
+        }
+    }
+}
+
+/// Writes the buffer out in the chosen encoding, keeping the text.
+///
+/// A character the charset cannot hold makes the save fail with the file on
+/// disk untouched (ADR-059), so the buffer is put back to the charset it had:
+/// a tab left claiming an encoding it cannot be written in would fail again on
+/// the next `Ctrl+S`, for a reason the user has since forgotten.
+fn convert_encoding(app: &mut App, name: &str) {
+    let Some(charset) = Charset::by_label(name) else {
+        app.notifications
+            .warning(format!("No encoding named {name}"));
+        return;
+    };
+    let Some(index) = app.active_tab else {
+        app.notifications.warning("No file open");
+        return;
+    };
+    let Some(tab) = app.editor_at_mut(index) else {
+        app.notifications.warning("No file open");
+        return;
+    };
+    let previous = tab.document.charset();
+    tab.document.set_charset(charset);
+    if tab.document.path().is_none() {
+        app.notifications
+            .info(format!("Encoding set to {}", charset.label));
+        return;
+    }
+    if save_tab(app, index) {
+        app.notifications
+            .info(format!("Converted to {}", charset.label));
+    } else if let Some(tab) = app.editor_at_mut(index) {
+        tab.document.set_charset(previous);
+    }
+}
+
+/// Opens the syntax picker with every grammar in the set, the one in use
+/// highlighted (SPEC §21).
+fn prompt_language(app: &mut App) {
+    let Some(tab) = app.active() else {
+        app.notifications.warning("No file open");
+        return;
+    };
+    let current = tab.highlights.language();
+    let items: Vec<ListItem> = highlighter::names()
+        .iter()
+        .map(|name| ListItem {
+            label: (*name).to_string(),
+            command: Command::SetLanguage((*name).to_string()),
+            current: *name == current,
+        })
+        .collect();
+    let return_focus = dialog_return_focus(app);
+    open_dialog(app, DialogState::syntax_mode(items, return_focus));
+}
+
+/// Highlights the active tab with a grammar chosen by name.
+///
+/// Nothing on disk changes: this is what the file *looks* like, not what it is,
+/// which is why it needs no confirmation where the line-ending conversion does.
+fn set_language(app: &mut App, name: &str) {
+    let Some(syntax) = highlighter::by_name(name) else {
+        app.notifications
+            .warning(format!("No grammar named {name}"));
+        return;
+    };
+    let Some(tab) = app.active_mut() else {
+        app.notifications.warning("No file open");
+        return;
+    };
+    tab.highlights.set_syntax(syntax, &tab.document);
+    app.notifications
+        .info(format!("Highlighting as {}", syntax.name));
 }
 
 // --- search ----------------------------------------------------------------
@@ -1010,11 +1233,10 @@ fn edit_field(app: &mut App, operation: impl FnOnce(&mut InputField)) {
     if let Some(field) = dialog.field_mut() {
         operation(field);
     }
-    // In the browser that field is the filter, so editing it changes which
-    // rows exist and where the selection is among them.
-    if let Some(browser) = dialog.browser_mut() {
-        browser.refilter(height);
-    }
+    // In the browser — and in the syntax picker (ADR-058) — that field is a
+    // filter, so editing it changes which rows exist and where the selection is
+    // among them.
+    dialog.refilter(height);
 }
 
 /// Undoes or redoes one step on the active tab.
@@ -2612,7 +2834,7 @@ mod tests {
 
         execute_command(&mut app, Command::GitBranchPrompt);
         let dialog = app.dialog.as_ref().expect("a picker");
-        let labels: Vec<&str> = dialog.items().iter().map(|i| i.label.as_str()).collect();
+        let labels: Vec<&str> = dialog.rows().map(|i| i.label.as_str()).collect();
         assert_eq!(labels, vec!["main", "topic"]);
         assert_eq!(app.focus, FocusTarget::Dialog);
 
@@ -3043,6 +3265,340 @@ mod tests {
             notification.message.starts_with("Failed to save:"),
             "{}",
             notification.message
+        );
+    }
+
+    // --- what the status bar says about a file (ADR-058) ------------------
+
+    /// A tab over a real file with the text and endings given, so the
+    /// conversion can be checked where it happens: on disk.
+    fn app_over_file(dir: &std::path::Path, text: &str) -> App {
+        let path = dir.join("a.txt");
+        std::fs::write(&path, text).unwrap();
+        let mut app = App::fixture_in(dir);
+        app.tabs = vec![TabItem::editing(crate::app::Tab::new(
+            Document::open(&path).unwrap(),
+        ))];
+        app.active_tab = Some(0);
+        app
+    }
+
+    /// The picker offers both endings and marks the one the file has; choosing
+    /// a row asks rather than converting, because the conversion rewrites every
+    /// line of the file and the picker is one click from a readout.
+    #[test]
+    fn the_line_ending_picker_asks_before_it_rewrites_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_over_file(dir.path(), "one\ntwo\n");
+
+        execute_command(&mut app, Command::LineEndingPrompt);
+        let dialog = app.dialog.as_ref().expect("a picker");
+        let rows: Vec<(&str, bool)> = dialog
+            .rows()
+            .map(|item| (item.label.as_str(), item.current))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![("LF — Unix, macOS", true), ("CRLF — Windows", false)]
+        );
+
+        // Down to CRLF, then the default Choose button.
+        execute_command(&mut app, Command::DialogListMove(1));
+        execute_command(&mut app, Command::DialogActivate);
+        let dialog = app.dialog.as_ref().expect("a confirmation");
+        assert_eq!(dialog.title, "Convert Line Endings");
+        assert_eq!(
+            dialog.buttons[0].label, "Cancel",
+            "the default is the safe one"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("a.txt")).unwrap(),
+            b"one\ntwo\n",
+            "and nothing has been written yet"
+        );
+    }
+
+    #[test]
+    fn converting_rewrites_the_file_and_leaves_it_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_over_file(dir.path(), "one\ntwo\n");
+
+        execute_command(&mut app, Command::ConvertLineEnding(LineEnding::Crlf));
+
+        assert_eq!(
+            std::fs::read(dir.path().join("a.txt")).unwrap(),
+            b"one\r\ntwo\r\n"
+        );
+        let document = &app.active().unwrap().document;
+        assert_eq!(document.line_ending(), LineEnding::Crlf);
+        assert!(!document.is_dirty(), "the buffer is what is on disk again");
+        assert_eq!(
+            app.notifications.current().map(|n| n.message.clone()),
+            Some("Converted to CRLF line endings".to_string())
+        );
+    }
+
+    /// The rope holds `\n` alone whatever the file used, so a conversion must
+    /// not touch a character of the text.
+    #[test]
+    fn converting_changes_the_endings_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_over_file(dir.path(), "one\r\ntwo\r\n");
+        assert_eq!(
+            app.active().unwrap().document.line_ending(),
+            LineEnding::Crlf
+        );
+
+        execute_command(&mut app, Command::ConvertLineEnding(LineEnding::Lf));
+
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "one\ntwo\n"
+        );
+        assert_eq!(app.active().unwrap().document.line(0), "one");
+    }
+
+    /// Choosing the ending the file already has is not a question.
+    #[test]
+    fn choosing_the_ending_the_file_already_has_says_so_and_asks_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_over_file(dir.path(), "one\ntwo\n");
+
+        execute_command(&mut app, Command::ConvertLineEndingPrompt(LineEnding::Lf));
+
+        assert!(app.dialog.is_none());
+        assert_eq!(
+            app.notifications.current().map(|n| n.message.clone()),
+            Some("Already LF line endings".to_string())
+        );
+    }
+
+    /// There is nothing to rewrite before the buffer has a file, so the choice
+    /// is kept for the first Save As rather than reported as a failed save.
+    #[test]
+    fn converting_an_unnamed_buffer_keeps_the_choice_without_a_save() {
+        let mut app = app();
+        app.tabs = vec![TabItem::editing(crate::app::Tab::new(Document::from_text(
+            "one\ntwo\n",
+            None,
+        )))];
+        app.active_tab = Some(0);
+        execute_command(&mut app, Command::ConvertLineEnding(LineEnding::Crlf));
+
+        let document = &app.active().unwrap().document;
+        assert_eq!(document.line_ending(), LineEnding::Crlf);
+        assert!(document.is_dirty(), "the write is still owed");
+        assert_eq!(
+            app.notifications.current().map(|n| n.message.clone()),
+            Some("Line endings set to CRLF".to_string())
+        );
+    }
+
+    /// The picker starts on the charset the file was read with, and choosing a
+    /// row asks what to do with it rather than doing either thing (ADR-059).
+    #[test]
+    fn the_encoding_picker_starts_on_the_file_s_own_charset_and_then_asks() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_over_file(dir.path(), "one\ntwo\n");
+
+        execute_command(&mut app, Command::EncodingPrompt);
+        let dialog = app.dialog.as_ref().expect("a picker");
+        assert_eq!(
+            dialog.selected_item().map(|item| item.label.as_str()),
+            Some("UTF-8")
+        );
+        assert!(dialog.field_filters(), "long enough to need a filter");
+
+        for ch in "1251".chars() {
+            execute_command(&mut app, Command::DialogInputChar(ch));
+        }
+        let rows: Vec<&str> = app
+            .dialog
+            .as_ref()
+            .unwrap()
+            .rows()
+            .map(|item| item.label.as_str())
+            .collect();
+        assert_eq!(rows, vec!["Windows-1251"]);
+
+        execute_command(&mut app, Command::DialogActivate);
+        let dialog = app.dialog.as_ref().expect("a confirmation");
+        let buttons: Vec<&str> = dialog.buttons.iter().map(|b| b.label.as_str()).collect();
+        assert_eq!(buttons, vec!["Cancel", "Reopen", "Convert and Save"]);
+        assert_eq!(
+            std::fs::read(dir.path().join("a.txt")).unwrap(),
+            b"one\ntwo\n",
+            "and nothing has been written yet"
+        );
+    }
+
+    /// The two answers a chosen encoding can have: keep the bytes and read them
+    /// again, or keep the text and write it out differently.
+    #[test]
+    fn reopening_reads_the_same_bytes_again_and_converting_rewrites_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        let koi8 = Charset::by_label("KOI8-U").unwrap();
+        let mut bytes = Vec::new();
+        koi8.encode("Привіт\n", &mut bytes);
+        std::fs::write(&path, &bytes).unwrap();
+
+        let mut app = app();
+        app.tabs = vec![TabItem::editing(crate::app::Tab::new(
+            Document::open(&path).unwrap(),
+        ))];
+        app.active_tab = Some(0);
+        assert_ne!(app.active().unwrap().document.line(0), "Привіт");
+
+        execute_command(&mut app, Command::ReopenWithEncoding("KOI8-U".into()));
+        assert_eq!(app.active().unwrap().document.line(0), "Привіт");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes,
+            "reopening reads and does not write"
+        );
+
+        execute_command(&mut app, Command::ConvertEncoding("UTF-8".into()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "Привіт\n");
+        assert_eq!(app.active().unwrap().document.charset(), Charset::UTF8);
+    }
+
+    /// A conversion that cannot hold the text writes nothing, and leaves the
+    /// tab on the charset it can still be saved in.
+    #[test]
+    fn converting_to_a_charset_that_cannot_hold_the_text_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_over_file(dir.path(), "Привіт\n");
+
+        execute_command(&mut app, Command::ConvertEncoding("Windows-1252".into()));
+
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "Привіт\n"
+        );
+        assert_eq!(app.active().unwrap().document.charset(), Charset::UTF8);
+        let message = app.notifications.current().unwrap().message.clone();
+        assert!(message.contains("Windows-1252 cannot hold"), "{message}");
+    }
+
+    /// Choosing the charset the file already has is not a question.
+    #[test]
+    fn choosing_the_charset_the_file_already_has_says_so_and_asks_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_over_file(dir.path(), "one\n");
+
+        execute_command(&mut app, Command::EncodingChoice("UTF-8".into()));
+
+        assert!(app.dialog.is_none());
+        assert_eq!(
+            app.notifications.current().map(|n| n.message.clone()),
+            Some("Already UTF-8".to_string())
+        );
+    }
+
+    /// The grammar the user names outranks the one detection chose, and the
+    /// status bar names it because both read the same cache.
+    #[test]
+    fn a_chosen_grammar_replaces_the_detected_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_over_file(dir.path(), "one\ntwo\n");
+        app.active_mut().unwrap().sync_highlight(10);
+        assert_eq!(app.active().unwrap().highlights.language(), "Plain Text");
+
+        execute_command(&mut app, Command::SetLanguage("Rust".into()));
+        assert_eq!(app.active().unwrap().highlights.language(), "Rust");
+
+        // And it survives the next frame, which is what would re-detect it.
+        app.active_mut().unwrap().sync_highlight(10);
+        assert_eq!(app.active().unwrap().highlights.language(), "Rust");
+    }
+
+    #[test]
+    fn a_grammar_no_one_has_is_reported_rather_than_applied() {
+        let mut app = app();
+        execute_command(&mut app, Command::SetLanguage("Sindarin".into()));
+        assert_eq!(
+            app.notifications.current().map(|n| n.message.clone()),
+            Some("No grammar named Sindarin".to_string())
+        );
+    }
+
+    /// Hundreds of grammars are unreachable ten rows at a time, so this picker
+    /// is the one with a filter — and the filter is what its typed keys edit.
+    #[test]
+    fn the_syntax_picker_narrows_as_you_type_and_chooses_what_is_left() {
+        let mut app = app();
+        execute_command(&mut app, Command::LanguagePrompt);
+        let all = app.dialog.as_ref().unwrap().rows().count();
+        assert!(all > 20, "the whole syntax set is offered: {all}");
+
+        for ch in "rust".chars() {
+            execute_command(&mut app, Command::DialogInputChar(ch));
+        }
+        let dialog = app.dialog.as_ref().expect("still open");
+        let rows: Vec<&str> = dialog.rows().map(|item| item.label.as_str()).collect();
+        assert_eq!(rows, vec!["Rust"]);
+
+        execute_command(&mut app, Command::DialogActivate);
+        assert!(app.dialog.is_none());
+        assert_eq!(app.active().unwrap().highlights.language(), "Rust");
+    }
+
+    /// The branch on the status bar is the one readout whose dialog is not
+    /// about the file, and the picker is the only thing a branch name could
+    /// sensibly open (ADR-058).
+    #[test]
+    fn the_branch_on_the_status_bar_opens_the_switch_picker() {
+        let repo = crate::git::testing::TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+        repo.run(&["branch", "topic"]);
+        let mut app = App::fixture_in(repo.path());
+        execute_command(&mut app, Command::GitRefresh);
+
+        let rects = crate::ui::layout::compute(ratatui::layout::Rect::new(0, 0, 100, 24), &app);
+        let (_, branch) = rects
+            .status_zones
+            .iter()
+            .find(|(zone, _)| *zone == crate::ui::statusbar::StatusZone::Branch)
+            .expect("the branch is a zone");
+        assert_eq!(
+            crate::event::mouse::hit_test(
+                &app,
+                &rects,
+                crossterm::event::MouseEvent {
+                    kind: crossterm::event::MouseEventKind::Down(
+                        crossterm::event::MouseButton::Left
+                    ),
+                    column: branch.x,
+                    row: branch.y,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                }
+            ),
+            Some(Command::GitBranchPrompt)
+        );
+
+        execute_command(&mut app, Command::GitBranchPrompt);
+        let dialog = app.dialog.as_ref().expect("a picker");
+        assert_eq!(dialog.title, "Switch Branch");
+        let labels: Vec<&str> = dialog.rows().map(|item| item.label.as_str()).collect();
+        assert_eq!(labels, vec!["main", "topic"]);
+    }
+
+    /// Outside a repository there is nothing to switch to, and the click says
+    /// so rather than opening an empty box.
+    #[test]
+    fn the_branch_readout_outside_a_repository_only_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::fixture_in(dir.path());
+        execute_command(&mut app, Command::GitRefresh);
+        execute_command(&mut app, Command::GitBranchPrompt);
+
+        assert!(app.dialog.is_none());
+        assert_eq!(
+            app.notifications.current().map(|n| n.message.clone()),
+            Some("Not a Git repository".to_string())
         );
     }
 

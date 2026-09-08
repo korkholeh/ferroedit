@@ -11,6 +11,7 @@ use crate::app::dialog::{DialogButton, DialogState};
 use crate::app::App;
 use crate::commands::MENUS;
 use crate::event::keyboard::shortcut_for;
+use crate::ui::statusbar::{self, StatusZone};
 
 /// Below this, the five zones cannot be drawn legibly and a notice is shown
 /// instead. The phase acceptance size (60x20) is comfortably above it.
@@ -124,6 +125,10 @@ pub struct LayoutRects {
     /// The find/replace bar under the editor, when it is open.
     pub search: Option<SearchRects>,
     pub status_bar: Rect,
+    /// Where each clickable piece of the status readout landed (ADR-058).
+    /// Computed by `ui::statusbar` itself, from the same pieces it draws, so a
+    /// click cannot land on something other than what it looked like it hit.
+    pub status_zones: Vec<(StatusZone, Rect)>,
     pub dialog: Option<Rect>,
     /// One rect per dialog button, in button order.
     pub dialog_buttons: Vec<Rect>,
@@ -203,14 +208,22 @@ pub fn compute(area: Rect, app: &App) -> LayoutRects {
     };
     // The browser's rows live inside a frame of their own; the picker's sit
     // straight on the dialog, as they always have.
-    let framed = app.dialog.as_ref().is_some_and(|d| d.browser().is_some());
+    // A field pushes the rows one row down, and is also what says the rows are
+    // a pane worth framing: every list with a filter over it is one long enough
+    // to scroll (ADR-051, ADR-058).
+    let framed = app.dialog.as_ref().is_some_and(DialogState::field_filters);
+    let has_field = app.dialog.as_ref().is_some_and(|d| d.field().is_some());
     let dialog_list_frame = match (dialog, app.dialog.as_ref()) {
-        (Some(rect), Some(state)) if state.has_list_body() && framed => Some(list_rect(rect, true)),
+        (Some(rect), Some(state)) if state.has_list_body() && framed => {
+            Some(list_rect(rect, has_field))
+        }
         _ => None,
     };
     let dialog_list = match (dialog_list_frame, dialog, app.dialog.as_ref()) {
         (Some(frame), _, _) => Some(inset(frame)),
-        (None, Some(rect), Some(state)) if state.has_list_body() => Some(list_rect(rect, false)),
+        (None, Some(rect), Some(state)) if state.has_list_body() => {
+            Some(list_rect(rect, has_field))
+        }
         _ => None,
     };
 
@@ -232,6 +245,7 @@ pub fn compute(area: Rect, app: &App) -> LayoutRects {
         diff: app.diff().map(|_| pane),
         search,
         status_bar,
+        status_zones: statusbar::zones(app, status_bar),
         dialog,
         dialog_buttons,
         dialog_list,

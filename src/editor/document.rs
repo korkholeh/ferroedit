@@ -9,6 +9,7 @@ use std::time::SystemTime;
 use ropey::{Rope, RopeSlice};
 use thiserror::Error;
 
+use crate::editor::charset::Charset;
 use crate::editor::coords::{self, ByteIdx, CharIdx, GraphemeIdx, VisualCol, DEFAULT_TAB_WIDTH};
 use crate::editor::cursor::{Cursor, Motion};
 use crate::editor::history::{EditOperation, History};
@@ -43,6 +44,16 @@ impl LineEnding {
         }
     }
 
+    /// Where each one is the convention, for a picker row: `LF` and `CRLF` are
+    /// the names of the bytes, and the answer to "which do I want?" is the
+    /// platform the file is going to.
+    pub fn platforms(self) -> &'static str {
+        match self {
+            Self::Lf => "Unix, macOS",
+            Self::Crlf => "Windows",
+        }
+    }
+
     /// Decided by the *first* terminator in the file. A mixed file is written
     /// back with whichever it opened with, rather than being silently
     /// normalised — rewriting untouched lines would swamp any real diff.
@@ -64,8 +75,19 @@ pub enum DocumentError {
         #[source]
         source: io::Error,
     },
-    #[error("{path}: not valid UTF-8")]
-    NotUtf8 { path: String },
+    /// A file with a NUL byte in it, which is the one thing no text file has
+    /// (ADR-059). It is refused rather than opened as mojibake: every legacy
+    /// charset decodes every byte, so without this guard a JPEG would open as
+    /// six hundred kilobytes of line noise.
+    #[error("{path}: not a text file")]
+    Binary { path: String },
+    /// A character the file's charset cannot hold, found before anything was
+    /// written. The buffer and the file are both untouched.
+    #[error("{charset} cannot hold {character:?} — save as UTF-8, or convert")]
+    Unmappable {
+        charset: &'static str,
+        character: char,
+    },
     #[error("no file name")]
     NoPath,
 }
@@ -145,6 +167,10 @@ pub struct Document {
     path: Option<PathBuf>,
     rope: Rope,
     line_ending: LineEnding,
+    /// How the file's bytes become this text and back (ADR-059). Sniffed from
+    /// the file's own byte order mark when it has one, chosen by the user
+    /// otherwise, and written back unchanged by every save.
+    charset: Charset,
     cursor: Cursor,
     anchor: Option<Position>,
     dirty: bool,
@@ -183,6 +209,7 @@ impl Document {
             path,
             rope,
             line_ending,
+            charset: Charset::default(),
             cursor: Cursor::default(),
             anchor: None,
             dirty: false,
@@ -196,27 +223,37 @@ impl Document {
         }
     }
 
-    /// Reads a file as UTF-8 (SPEC §17: UTF-8 is the only encoding in the MVP).
+    /// Reads a file, decoding it with the charset its own bytes announce
+    /// (SPEC §17, ADR-059).
     ///
     /// Reading the bytes and converting explicitly, rather than
-    /// `fs::read_to_string`, is what lets a binary or Latin-1 file be reported
-    /// as such instead of arriving as a lossy mess the user might then save.
+    /// `fs::read_to_string`, is what lets a binary file be reported as such and
+    /// a Latin-1 one be opened at all.
     pub fn open(path: &Path) -> Result<Self, DocumentError> {
+        Self::open_as(path, None)
+    }
+
+    /// The same read with the charset named rather than sniffed — Reopen with
+    /// Encoding, for the file whose bytes carry no mark and are not UTF-8.
+    pub fn open_as(path: &Path, charset: Option<Charset>) -> Result<Self, DocumentError> {
         // The stamp is taken *before* the read, not after: a writer that
         // finishes between the two would otherwise be recorded as the state the
         // buffer holds, and the change would never be noticed. Taken first, the
         // worst case is a change reported that has already been read, which
         // costs a reload of text that is already right.
         let disk = DiskStamp::of(path);
-        let text = read_utf8(path)?;
+        let bytes = std::fs::read(path).map_err(|err| DocumentError::io(path, err))?;
+        let (text, charset) = decode(path, &bytes, charset)?;
         let mut document = Self::from_text(&text, Some(path.to_path_buf()));
+        document.charset = charset;
         document.disk = disk;
         log::info!(
-            "opened {} ({} bytes, {} lines, {})",
+            "opened {} ({} bytes, {} lines, {}, {})",
             path.display(),
             document.len_bytes(),
             document.line_count(),
-            document.line_ending.label()
+            document.line_ending.label(),
+            charset.label
         );
         Ok(document)
     }
@@ -226,7 +263,7 @@ impl Document {
     /// Naming a file that does not exist is how a file gets created: the buffer
     /// is empty and clean, and nothing is written until the user saves, so a
     /// mistyped name costs nothing. Every other failure — a directory, a
-    /// permission error, invalid UTF-8 — is still reported rather than
+    /// permission error, a binary file — is still reported rather than
     /// swallowed into a blank screen.
     pub fn open_or_create(path: &Path) -> Result<Self, DocumentError> {
         match Self::open(path) {
@@ -238,14 +275,25 @@ impl Document {
         }
     }
 
-    /// Writes the buffer back with the line ending it was opened with.
+    /// Writes the buffer back with the line ending and the charset it was
+    /// opened with.
+    ///
+    /// A legacy charset is encoded in *full* before the file is opened
+    /// (ADR-059): it holds a few hundred characters and the buffer may hold
+    /// anything, and a character it cannot take must leave the file on disk
+    /// untouched rather than truncated at the byte the encoder gave up on. The
+    /// Unicode charsets hold everything, so they keep the streaming path SPEC
+    /// §44 asks for — which is every file the editor opens by default.
     pub fn save(&mut self) -> Result<(), DocumentError> {
         let path = self.path.clone().ok_or(DocumentError::NoPath)?;
+        let prepared = self.encode_all()?;
         let file = File::create(&path).map_err(|err| DocumentError::io(&path, err))?;
         let mut writer = BufWriter::new(file);
-        self.write_to(&mut writer)
-            .and_then(|()| writer.flush())
-            .map_err(|err| DocumentError::io(&path, err))?;
+        match prepared {
+            Some(bytes) => writer.write_all(&bytes),
+            None => self.write_all(&mut writer).and_then(|()| writer.flush()),
+        }
+        .map_err(|err| DocumentError::io(&path, err))?;
         self.dirty = false;
         self.history.mark_saved();
         // What is on disk is now what is in the buffer, so the watcher's report
@@ -295,9 +343,27 @@ impl Document {
     /// has — the same rule an undo restores a cursor by, and for the same
     /// reason: a position that no longer exists must not be a panic.
     pub fn reload(&mut self) -> Result<(), DocumentError> {
+        self.reread(None)
+    }
+
+    /// A reload that decodes with a charset the user named — Reopen with
+    /// Encoding (ADR-059).
+    ///
+    /// The same undoable step a reload is, and for a stronger reason: this is
+    /// the command whose whole purpose is to be tried again when the answer
+    /// looks wrong, so getting back must never mean re-opening the file.
+    pub fn reopen_as(&mut self, charset: Charset) -> Result<(), DocumentError> {
+        self.reread(Some(charset))
+    }
+
+    fn reread(&mut self, charset: Option<Charset>) -> Result<(), DocumentError> {
         let path = self.path.clone().ok_or(DocumentError::NoPath)?;
         let disk = DiskStamp::of(&path);
-        let text = read_utf8(&path)?;
+        let bytes = std::fs::read(&path).map_err(|err| DocumentError::io(&path, err))?;
+        // A plain reload keeps the charset the buffer already has: it may have
+        // been chosen by hand, and re-sniffing would quietly undo that choice
+        // on every `F5`.
+        let (text, charset) = decode(&path, &bytes, charset.or(Some(self.charset)))?;
         let line_ending = LineEnding::detect(&text);
         let normalised: Cow<'_, str> = match line_ending {
             LineEnding::Lf => Cow::Borrowed(text.as_str()),
@@ -323,6 +389,7 @@ impl Document {
         self.history.seal();
 
         self.line_ending = line_ending;
+        self.charset = charset;
         self.disk = disk;
         self.restore_cursor(cursor);
         // The buffer is what is on disk again, so this is the save point —
@@ -330,34 +397,78 @@ impl Document {
         self.dirty = false;
         self.history.mark_saved();
         log::info!(
-            "reloaded {} ({} bytes, {} lines, {})",
+            "reloaded {} ({} bytes, {} lines, {}, {})",
             path.display(),
             self.len_bytes(),
             self.line_count(),
-            line_ending.label()
+            line_ending.label(),
+            charset.label
         );
         Ok(())
     }
 
-    /// Streams the rope out chunk by chunk — never `to_string()`, which would
+    /// The whole file as bytes, for a charset that can refuse a character —
+    /// and `None` for the Unicode ones, which cannot, and are streamed instead.
+    fn encode_all(&self) -> Result<Option<Vec<u8>>, DocumentError> {
+        if self.charset.is_unicode() {
+            return Ok(None);
+        }
+        let mut bytes = self.charset.bom_bytes().to_vec();
+        let mut unmappable = false;
+        self.for_each_piece(|text| unmappable |= self.charset.encode(text, &mut bytes));
+        if unmappable {
+            // Only now, once the fast answer has already said there is one.
+            let mut found = None;
+            self.for_each_piece(|text| {
+                found = found.or_else(|| self.charset.first_unmappable(text));
+            });
+            return Err(DocumentError::Unmappable {
+                charset: self.charset.label,
+                character: found.unwrap_or('\u{fffd}'),
+            });
+        }
+        Ok(Some(bytes))
+    }
+
+    /// Streams the rope out piece by piece — never `to_string()`, which would
     /// be an allocation the size of the file on every save (SPEC §44).
-    fn write_to(&self, writer: &mut impl Write) -> io::Result<()> {
+    fn write_all(&self, writer: &mut impl Write) -> io::Result<()> {
+        writer.write_all(self.charset.bom_bytes())?;
+        let mut scratch = Vec::new();
+        let mut outcome = Ok(());
+        self.for_each_piece(|text| {
+            if outcome.is_err() {
+                return;
+            }
+            scratch.clear();
+            self.charset.encode(text, &mut scratch);
+            outcome = writer.write_all(&scratch);
+        });
+        outcome
+    }
+
+    /// Hands the text of the file to `piece` a chunk at a time, with the line
+    /// terminators the file is written with rather than the `\n` the rope
+    /// holds.
+    ///
+    /// One walk for both the streaming and the buffered write, so an LF file
+    /// and a CRLF one cannot come out of the two paths differently.
+    fn for_each_piece(&self, mut piece: impl FnMut(&str)) {
         if self.line_ending == LineEnding::Lf {
             for chunk in self.rope.chunks() {
-                writer.write_all(chunk.as_bytes())?;
+                piece(chunk);
             }
-            return Ok(());
+            return;
         }
         for line in self.rope.lines() {
             let (text, terminated) = split_terminator(line);
             for chunk in text.chunks() {
-                writer.write_all(chunk.as_bytes())?;
+                piece(chunk);
             }
             if terminated {
-                writer.write_all(self.line_ending.as_str().as_bytes())?;
+                piece(self.line_ending.as_str());
             }
         }
-        Ok(())
     }
 
     // --- properties --------------------------------------------------------
@@ -423,6 +534,52 @@ impl Document {
 
     pub fn line_ending(&self) -> LineEnding {
         self.line_ending
+    }
+
+    /// Changes what the file's lines will be separated by on disk (ADR-058).
+    ///
+    /// Nothing in the rope moves: it holds `\n` alone whatever the file used, so
+    /// the ending is a property of the *write* and not of the text. The buffer
+    /// is marked dirty because what would now be written differs from what is
+    /// on disk — which is exactly what "unsaved changes" means, even though no
+    /// character of the document changed.
+    ///
+    /// How the file's bytes are read and written (ADR-059).
+    pub fn charset(&self) -> Charset {
+        self.charset
+    }
+
+    /// Changes what the file will be written as.
+    ///
+    /// Like `set_line_ending`, and for the same reasons: nothing in the rope
+    /// moves — the charset is a property of the *bytes* — and the buffer is
+    /// marked dirty because what would be written now differs from what is on
+    /// disk. It is not an undo step; the way back is the other row of the same
+    /// picker. Unlike the line ending it can make a save *fail*, on a character
+    /// the new charset cannot hold, which `save` finds before it opens the file.
+    pub fn set_charset(&mut self, charset: Charset) {
+        if self.charset == charset {
+            return;
+        }
+        log::info!("{} will be written as {}", self.title(), charset.label);
+        self.charset = charset;
+        self.dirty = true;
+    }
+
+    /// It is deliberately not an undo step. History records edits to the rope,
+    /// and there is none here; the way back is to choose the other ending,
+    /// which is one gesture away in the same dialog.
+    pub fn set_line_ending(&mut self, ending: LineEnding) {
+        if self.line_ending == ending {
+            return;
+        }
+        log::info!(
+            "{} will be written with {} endings",
+            self.title(),
+            ending.label()
+        );
+        self.line_ending = ending;
+        self.dirty = true;
     }
 
     pub fn tab_width(&self) -> usize {
@@ -1070,13 +1227,44 @@ impl Document {
     }
 }
 
-/// Reads a file as UTF-8, reporting a binary or Latin-1 one as such rather than
-/// letting it arrive as a lossy mess the user might then save (SPEC §17).
-fn read_utf8(path: &Path) -> Result<String, DocumentError> {
-    let bytes = std::fs::read(path).map_err(|err| DocumentError::io(path, err))?;
-    String::from_utf8(bytes).map_err(|_| DocumentError::NotUtf8 {
-        path: path.display().to_string(),
-    })
+/// How many bytes of a file are looked at to decide whether it is text.
+///
+/// A NUL in the first eight kilobytes is what every tool that has to make this
+/// decision uses, and reading further buys almost nothing: a file whose first
+/// 8 KB are text and whose middle is not is a file the user meant to open.
+const BINARY_SNIFF: usize = 8 * 1024;
+
+/// Turns a file's bytes into text, and says what charset it took to do it
+/// (ADR-059).
+///
+/// `wanted` is the charset the user named, and `None` means "work it out": the
+/// file's own byte order mark when it has one, UTF-8 when the bytes are valid
+/// UTF-8, and `Charset::FALLBACK` otherwise. That last guess is safe where
+/// guessing between two Cyrillic charsets would not be — every byte of it
+/// round-trips — and the caller says so on the status bar rather than leaving
+/// the user to notice.
+fn decode(
+    path: &Path,
+    bytes: &[u8],
+    wanted: Option<Charset>,
+) -> Result<(String, Charset), DocumentError> {
+    let sniffed = Charset::sniff(bytes);
+    let charset = match (wanted, sniffed) {
+        (Some(charset), _) => charset,
+        (None, Some(charset)) => charset,
+        (None, None) if std::str::from_utf8(bytes).is_ok() => Charset::UTF8,
+        (None, None) => Charset::FALLBACK,
+    };
+    // The guard runs against *decoded* text and not against the file, because
+    // UTF-16 text is half NUL bytes and is still text. Only the head is decoded
+    // for it, so deciding that a gigabyte is binary costs eight kilobytes.
+    let head = &bytes[..bytes.len().min(BINARY_SNIFF)];
+    if charset.decode(head).contains('\0') {
+        return Err(DocumentError::Binary {
+            path: path.display().to_string(),
+        });
+    }
+    Ok((charset.decode(bytes), charset))
 }
 
 /// Splits a rope line into its text and whether it was newline-terminated.
@@ -1649,15 +1837,97 @@ next
         assert!(Document::open_or_create(dir.path()).is_err());
     }
 
+    /// A file with no mark and bytes that are not UTF-8 opens rather than being
+    /// refused (ADR-059): every byte of the fallback round-trips, so the user
+    /// can look at it and name the charset it really is.
     #[test]
-    fn open_refuses_a_file_that_is_not_utf8() {
+    fn a_file_that_is_not_utf8_opens_in_the_fallback_charset() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("latin1.txt");
-        std::fs::write(&path, [0xff, 0xfe, 0x41]).unwrap();
+        // `Café` in Windows-1252, which is not valid UTF-8.
+        std::fs::write(&path, [b'C', b'a', b'f', 0xE9]).unwrap();
+
+        let document = Document::open(&path).unwrap();
+        assert_eq!(document.charset(), Charset::FALLBACK);
+        assert_eq!(document.line(0), "Café");
+    }
+
+    /// The one thing no text file has. Without the guard a JPEG would open as
+    /// a megabyte of line noise, since every legacy charset decodes every byte.
+    #[test]
+    fn open_refuses_a_binary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("thing.bin");
+        std::fs::write(&path, [0x89, b'P', b'N', b'G', 0x00, 0x1a]).unwrap();
         assert!(matches!(
             Document::open(&path).unwrap_err(),
-            DocumentError::NotUtf8 { .. }
+            DocumentError::Binary { .. }
         ));
+    }
+
+    /// A mark is what a file is recognised by, and it is not part of the text —
+    /// but it is written back, so the file is still the file it was.
+    #[test]
+    fn a_marked_file_round_trips_its_mark() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("win.txt");
+        let mut bytes = vec![0xFF, 0xFE];
+        bytes.extend("hi\n".encode_utf16().flat_map(u16::to_le_bytes));
+        std::fs::write(&path, &bytes).unwrap();
+
+        let mut document = Document::open(&path).unwrap();
+        assert_eq!(document.charset().label, "UTF-16 LE");
+        assert_eq!(document.line(0), "hi");
+        document.save().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+
+    /// A save that would write `&#1071;` where the user typed `Я` is corruption,
+    /// so it is refused — and refused before the file is opened, so what is on
+    /// disk is still what was there.
+    #[test]
+    fn saving_a_character_the_charset_cannot_hold_is_refused_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("latin.txt");
+        std::fs::write(&path, "hello\n").unwrap();
+
+        let mut document = Document::open(&path).unwrap();
+        document.set_charset(Charset::by_label("Windows-1252").unwrap());
+        document.insert_text("Я");
+        let err = document.save().unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DocumentError::Unmappable {
+                    character: 'Я', ..
+                }
+            ),
+            "{err}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello\n");
+    }
+
+    /// Reopening is how a file the fallback guessed wrong about is put right,
+    /// and it is undoable — it is the command whose point is to be tried again.
+    #[test]
+    fn reopening_with_a_charset_decodes_the_same_bytes_differently() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("koi8.txt");
+        let charset = Charset::by_label("KOI8-U").unwrap();
+        let mut bytes = Vec::new();
+        charset.encode("Привіт\n", &mut bytes);
+        std::fs::write(&path, &bytes).unwrap();
+
+        let mut document = Document::open(&path).unwrap();
+        assert_eq!(document.charset(), Charset::FALLBACK, "guessed, and wrong");
+        assert_ne!(document.line(0), "Привіт");
+
+        document.reopen_as(charset).unwrap();
+        assert_eq!(document.line(0), "Привіт");
+        assert!(!document.is_dirty());
+
+        document.undo();
+        assert_ne!(document.line(0), "Привіт", "the reopen is undoable");
     }
 
     #[test]

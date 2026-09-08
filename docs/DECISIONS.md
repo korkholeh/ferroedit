@@ -1840,3 +1840,141 @@ separately is how the wrapped and unwrapped answers drift apart. Rows are produc
 not the forty thousand below them. Turning wrapping on pulls every tab back to the left
 edge: a pane that wraps has no sideways axis, and a tab returned to later must not still
 be drawn from column 40.
+
+---
+
+## ADR-058: The status bar's readout is a row of controls, not a row of labels
+
+**Context.** SPEC §38 lists what the bar reports: the file, the cursor, the encoding, the
+grammar, the branch, the dirty state. Four of those are properties of the file the editor
+already knows how to change — and each was, until now, reachable only through a route that
+had nothing to do with the place the answer was printed. Go to Line was `Ctrl+G` and a
+Search menu entry. The grammar could not be changed at all: detection chose it and that was
+the end of it, so a `.txt` file full of shell script stayed grey. The line ending could not
+be changed either, and the bar only mentioned it when it was CRLF. The encoding could not be
+asked about, which left "what is this file?" answerable only by reading the source.
+
+**Decision.** The pieces of the readout that describe the file are clickable, and each one
+opens the dialog that changes what it reports: the cursor position opens Go to Line, `UTF-8`
+the encoding picker, `LF`/`CRLF` the line-ending picker, and the grammar's name the syntax
+picker. The line ending is now always shown, not only when it is the surprising one — a
+label you can ask about has to be there to be asked.
+
+The rects come from `ui::statusbar::zones`, which runs the same two functions `render` does
+against the same area. `ui::layout` stores what it returns and the mouse hit-tests against
+it. The bar trims itself to the width it is given (ADR-039), so a piece that was dropped has
+no rect and cannot be clicked — which is the property that made computing the rects anywhere
+else the wrong answer. The three remaining pieces — the branch, the focus label, the
+selection count — stay inert: they report something the user changes elsewhere, and a click
+that guessed where would be worse than one that did nothing.
+
+Each dialog is also a View menu entry (ADR-008's rule: nothing reachable only through a
+modifier, and now nothing reachable only through a mouse — terminals that do not report
+mouse events exist, and a feature those users do not have is a feature that is not there).
+
+**Converting the line endings is confirmed, and the conversion is a save.** The rope holds
+`\n` alone whatever the file used (SPEC §17), so the ending is a property of the *write* and
+not of the text: changing it changes nothing in the buffer and everything on disk. That is
+exactly the shape of change that must not happen on one click of a label somebody was only
+reading, so the picker's rows open a confirmation rather than converting, and Cancel is its
+default. The confirmation says the save takes the rest of the buffer with it, because it
+does — there is no way to rewrite the endings of a file without writing the file. A buffer
+with no path keeps the choice without a save: there is nothing to rewrite yet, and the first
+Save As writes it.
+
+It is deliberately not an undo step. `History` records edits to the rope and there is no
+edit here; the way back is the other row of the same dialog, one gesture away.
+
+**Choosing a grammar needs no confirmation, and outranks detection until the path changes.**
+Nothing on disk moves — this is what the file *looks* like. `HighlightCache` re-detects only
+when the path it detected for is no longer the document's, so a chosen grammar survives every
+edit, save and reload without a flag saying so, and is dropped by a rename, where "what is
+this file?" has a new answer anyway.
+
+**The picker grew a filter.** There are 77 grammars in the set. Stepping through them ten
+rows at a time is a list nobody reaches the end of, so `DialogBody::List` became `Picker` —
+the browser's `items`/`visible` split and its filter field, for the same reasons (ADR-051): a
+filter that is cleared must not have lost anything, and a field over a list is what makes a
+long one answerable. A dialog with a field takes the input keymap, so `Left` moves a caret
+there and a button selection in the pickers without one (ADR-019). The branch pickers do not
+take the filter: their lists are counted in handfuls, and a field would only be one more
+thing between the user and the answer.
+
+**Consequence.** `LayoutRects` carries `status_zones`. `ui::statusbar` gained a public
+`zones` and, with it, the rule that its trimming runs once and feeds both the drawing and the
+hit test. The encoding picker began as one row saying UTF-8 was the only encoding there was;
+ADR-059 filled it in, which is what the dialog was for.
+
+*Amended:* the branch is a zone too. It was left out here as "something the user changes
+elsewhere", which was wrong — a branch name has exactly one dialog behind it, and the git
+panel it was reachable from is a pane the user may not have open. The focus label and the
+selection count stay inert, because for those the objection still holds.
+
+
+---
+
+## ADR-059: A file remembers the charset it arrived in, and a save can be refused
+
+**Context.** SPEC §17 makes UTF-8 the default and says legacy encodings are not required for
+the MVP. `Document::open` therefore read bytes, ran `String::from_utf8`, and reported anything
+else as "not valid UTF-8" — which meant a Windows-1251 note or a UTF-16 file exported by some
+Windows tool could not be opened at all. ADR-058 then turned the status bar's `UTF-8` into a
+question whose picker had one row in it, which is not a question.
+
+**Decision.** A document carries a `Charset`: an `encoding_rs` decoder *and* whether the file
+has a byte order mark. The two are one value because `UTF-8` and `UTF-8 with BOM` are the same
+decoder and two different files, and which one a file is has to survive a round trip — the
+mark is stripped before the text and written back before it. `Charset::ALL` is the picker,
+curated to twenty-five rows: the Encoding Standard defines a couple of hundred labels, most of
+them aliases, and a list nobody can read is not a list.
+
+**What a file is read as.** Its own mark, if it has one. Otherwise UTF-8 when the bytes are
+valid UTF-8, and `Windows-1252` when they are not — announced, not silent. That last guess is
+safe in the one way that matters: every byte of Windows-1252 decodes to a character and
+encodes back to the same byte, so a file opened by that guess still saves byte for byte, and
+the user can look at the mojibake and name the charset it really is. Guessing *between* legacy
+charsets is what this deliberately does not do: Windows-1251 and KOI8-U are a coin flip no
+heuristic wins, and a wrong guess acted on silently is a file the user then saves back mangled.
+
+**A binary file is still refused.** Losing the UTF-8 check lost the accidental guard that came
+with it — every legacy charset decodes every byte, so a JPEG would now open as a megabyte of
+line noise. `DocumentError::NotUtf8` became `Binary`: a NUL in the first 8 KB, tested against
+the *decoded* head rather than the raw bytes, because UTF-16 text is half NUL bytes and is
+still text. Decoding only the head is what keeps deciding that a gigabyte is binary cheap.
+
+**A save that cannot hold the text fails, and writes nothing.** The Encoding Standard says an
+encoder replaces an unmappable character with `&#1071;`. That is right for a web form and is
+silent corruption in an editor. So a legacy charset is encoded *in full* before the file is
+opened: if anything is unmappable the save returns `Unmappable` naming the character, and what
+is on disk is untouched — a file truncated at the byte the encoder gave up on would be worse
+than no save at all. The Unicode charsets cannot fail, so they keep the streaming write SPEC
+§44 asks for, which is every file the editor opens by default. Converting to a charset that
+then refuses puts the tab back on the charset it can still be written in; a tab left claiming
+an encoding it cannot be saved in would fail again on the next `Ctrl+S`, for a reason the user
+has forgotten by then.
+
+**Choosing an encoding asks what it means.** There are two answers and neither is obvious:
+*Reopen* re-reads the bytes on disk and decodes them again — the answer for a file that came
+out as mojibake, and the reason the picker cannot simply act — and *Convert and Save* keeps the
+text and writes it out in the new charset. Cancel is the default, as for the line endings
+(ADR-058), and Reopen is undoable like every other reload (ADR-043), which matters more here
+than anywhere: this is the command whose whole purpose is to be tried again when the answer
+looks wrong. A plain `F5` keeps the charset the buffer has rather than re-sniffing, or it would
+quietly undo the user's choice on every reload.
+
+**UTF-16 is encoded by hand.** `Encoding::new_encoder()` on UTF-16 yields a UTF-8 encoder,
+because the standard has no UTF-16 output encoding. Writing UTF-8 bytes into a file labelled
+UTF-16 LE is a file that lies about itself, so `Charset::encode` special-cases the two: it is
+`encode_utf16()` and `to_le_bytes`, which is less code than the branch that explains it.
+
+**What it costs.** 242 KB of release binary — 3 816 704 bytes before, 4 064 592 after, on
+macOS arm64 — which is the decode and encode tables. Taken without `simd-accel` (nightly) and
+without any `fast-*-encode` table (~150 KB each, buying encode speed on files an editor writes
+a few kilobytes of at a time). It is pure Rust, so ADR-003's static musl builds are
+unaffected.
+
+**Consequence.** The status bar's encoding readout is the file's own charset rather than the
+constant `UTF-8`, and the picker it opens is filtered and framed like the syntax picker —
+twenty-five rows is past what ten visible ones can be stepped through. `Document::save` can now
+fail for a reason that is not the filesystem, which is why `save_tab`'s error path was already
+the right shape for it.

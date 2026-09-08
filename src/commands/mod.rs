@@ -12,6 +12,7 @@ use crate::app::focus::FocusTarget;
 use crate::app::search::SearchField;
 use crate::config::ThemeKind;
 use crate::editor::cursor::Motion;
+use crate::editor::document::LineEnding;
 use crate::filesystem::watcher::FsChange;
 use crate::git::JobOutcome;
 
@@ -253,6 +254,33 @@ pub enum Command {
     /// can type anything into one.
     GotoLine(String),
 
+    /// Asks what the active file's lines should be separated by (SPEC §17,
+    /// ADR-058). The status bar's `LF` / `CRLF` is what opens it.
+    LineEndingPrompt,
+    /// Asks whether to rewrite the file with a chosen ending. The picker's rows
+    /// carry this rather than the conversion itself: rewriting every line of a
+    /// file is not something a click on a readout may do unasked.
+    ConvertLineEndingPrompt(LineEnding),
+    /// Sets the ending and saves, which is what the confirmation approved.
+    ConvertLineEnding(LineEnding),
+    /// Asks which encoding the file is read and written as (SPEC §17,
+    /// ADR-059).
+    EncodingPrompt,
+    /// Asks what a chosen encoding should mean: re-read the file with it, or
+    /// write the buffer out in it. The picker's rows carry this — there are two
+    /// answers and neither is obvious enough to take without asking.
+    EncodingChoice(String),
+    /// Re-reads the file from disk, decoding it with the named encoding. The
+    /// answer for a file that came out as mojibake; undoable, like a reload.
+    ReopenWithEncoding(String),
+    /// Writes the buffer out in the named encoding, keeping the text.
+    ConvertEncoding(String),
+    /// Asks which grammar highlights the active tab (SPEC §21, ADR-058).
+    LanguagePrompt,
+    /// Highlights the active tab with the named grammar, overriding what the
+    /// file's name and first line suggested.
+    SetLanguage(String),
+
     MoveCursor(Motion),
     /// The same motions with the anchor left where it is — Shift+navigation.
     ExtendSelection(Motion),
@@ -490,6 +518,23 @@ impl Command {
             Self::SubmitGotoLine => "Go to the line that was typed".into(),
             Self::GotoLine(_) => "Go to a line by number".into(),
 
+            Self::LineEndingPrompt => "Choose how lines are separated on disk".into(),
+            Self::ConvertLineEndingPrompt(ending) => {
+                format!(
+                    "Ask before rewriting the file with {} endings",
+                    ending.label()
+                )
+            }
+            Self::ConvertLineEnding(ending) => {
+                format!("Rewrite the file with {} endings and save", ending.label())
+            }
+            Self::EncodingPrompt => "Choose the file's encoding".into(),
+            Self::EncodingChoice(name) => format!("Ask what to do with {name}"),
+            Self::ReopenWithEncoding(name) => format!("Re-read this file as {name}"),
+            Self::ConvertEncoding(name) => format!("Write this file as {name}"),
+            Self::LanguagePrompt => "Choose the grammar that highlights this file".into(),
+            Self::SetLanguage(name) => format!("Highlight this file as {name}"),
+
             Self::MoveCursor(motion) => format!("Move the cursor {}", motion_name(*motion)),
             Self::ExtendSelection(motion) => {
                 format!("Extend the selection {}", motion_name(*motion))
@@ -725,6 +770,14 @@ pub static MENUS: &[MenuDef] = &[
             item("Refresh Explorer", Command::ExplorerRefresh),
             item("Show Hidden Files", Command::ToggleHiddenFiles),
             item("Word Wrap", Command::ToggleWordWrap),
+            SEP,
+            // The three readouts on the status bar that are now questions
+            // (ADR-058). They are here as well as there because a feature that
+            // can only be reached with a mouse is a feature a terminal user
+            // does not have.
+            item("Syntax Mode…", Command::LanguagePrompt),
+            item("Line Endings…", Command::LineEndingPrompt),
+            item("Encoding…", Command::EncodingPrompt),
             SEP,
             // The sideways window needs entries of its own for the same reason
             // Word Wrap does: `Alt` is a modifier several terminals never

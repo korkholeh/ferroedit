@@ -40,36 +40,42 @@ pub fn render(frame: &mut Frame, app: &App, rects: &LayoutRects, theme: &Theme) 
 
     render_message(frame, dialog, area, theme);
     if let Some(field) = dialog.field() {
-        // The browser's field needs saying what it is: a box you can type into
-        // that is not asking for a name is a box nobody types into.
-        let label = dialog.browser().map(|_| "Filter: ");
+        // A field that narrows a list needs saying what it is: a box you can
+        // type into that is not asking for a name is a box nobody types into.
+        let label = dialog.field_filters().then_some("Filter: ");
         render_field(frame, field, label, area, theme);
     }
     if let Some(list) = rects.dialog_list {
+        if let Some(outline) = rects.dialog_list_frame {
+            let (len, scroll) = dialog.list_extent();
+            render_list_frame(frame, outline, list, len, scroll, theme);
+        }
         match dialog.browser() {
-            Some(browser) => {
-                if let Some(outline) = rects.dialog_list_frame {
-                    render_browser_frame(frame, browser, outline, list, theme);
-                }
-                render_browser(frame, browser, list, theme);
-            }
+            Some(browser) => render_browser(frame, browser, list, theme),
             None => render_list(frame, dialog, list, theme),
         }
     }
     render_buttons(frame, dialog, rects, theme);
 }
 
-/// The box around the browser's rows, and the scrollbar down its right edge.
+/// The box around a scrolling list's rows, and the scrollbar down its right
+/// edge.
 ///
 /// The frame is what says the rows are a pane and not three lines of the
 /// dialog; the scrollbar is what says there is more of it. The bar is drawn
 /// only when there *is* more — a full-height thumb on a five-entry folder is a
 /// control that lies about having something to do.
-fn render_browser_frame(
+///
+/// It was the browser's alone (ADR-051) until the syntax picker, whose seventy
+/// rows needed to look like seventy (ADR-058); `len` and `scroll` are passed in
+/// rather than a body, so the two lists share it without either knowing about
+/// the other.
+fn render_list_frame(
     frame: &mut Frame,
-    browser: &Browser,
     outline: Rect,
     rows: Rect,
+    len: usize,
+    scroll: usize,
     theme: &Theme,
 ) {
     if outline.width < 2 || outline.height < 2 {
@@ -83,11 +89,11 @@ fn render_browser_frame(
         outline,
     );
     let height = rows.height as usize;
-    if height == 0 || browser.len() <= height {
+    if height == 0 || len <= height {
         return;
     }
-    let mut state = ScrollbarState::new(browser.len().saturating_sub(height))
-        .position(browser.scroll())
+    let mut state = ScrollbarState::new(len.saturating_sub(height))
+        .position(scroll)
         .viewport_content_length(height);
     // Down the right border, between the corners: the bar replaces the border
     // it sits on, and a frame missing its corners looks broken rather than
@@ -157,8 +163,7 @@ fn render_list(frame: &mut Frame, dialog: &DialogState, area: Rect, theme: &Them
     }
     let (selected, scroll) = dialog.list_view();
     let rows: Vec<Line> = dialog
-        .items()
-        .iter()
+        .rows()
         .enumerate()
         .skip(scroll)
         .take(area.height as usize)

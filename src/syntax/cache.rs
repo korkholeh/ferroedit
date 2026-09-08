@@ -167,6 +167,35 @@ impl HighlightCache {
     ///
     /// The checkpoint whose slot `line` falls in survives: it is the state
     /// *before* the first line of that slot, which the edit is at or after.
+    /// Highlights with a grammar the user chose by hand (ADR-058).
+    ///
+    /// It outranks detection until the tab's path changes, and it needs no flag
+    /// to do so: `sync` re-detects only when the path it detected for is no
+    /// longer the document's, so a chosen grammar survives every edit, save and
+    /// reload, and is dropped by a rename — where "what is this file?" has a
+    /// new answer anyway.
+    ///
+    /// A grammar that failed on this text is given a fresh start, because the
+    /// user has just named a different one. The size limit is the file's and
+    /// not the grammar's, so it is re-applied.
+    pub fn set_syntax(
+        &mut self,
+        syntax: &'static syntect::parsing::SyntaxReference,
+        document: &Document,
+    ) {
+        self.detected_for = document.path().map(Path::to_path_buf);
+        self.syntax = Some(syntax);
+        self.checkpoints.clear();
+        self.window.clear();
+        self.fresh = false;
+        self.disabled = (document.len_bytes().0 > MAX_BYTES).then_some(Disabled::TooLarge);
+        log::debug!(
+            "highlighting {} as {} — chosen",
+            document.title(),
+            syntax.name
+        );
+    }
+
     fn invalidate(&mut self, line: usize) {
         self.checkpoints.truncate(line / CHECKPOINT_INTERVAL + 1);
         self.fresh = false;
