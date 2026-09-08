@@ -1616,3 +1616,40 @@ eagerly on every step, unlike `FileTree`'s lazy expansion — one `read_dir` per
 is not a cost worth a cache, and a listing that is a syscall old is a listing that is
 right.
 
+## ADR-052: Every scrolling pane draws a scrollbar, and only when it scrolls
+
+**Decision.** The explorer, the git panel and the editor each draw a vertical scrollbar,
+rendered by one shared `ui::scrollbar::render` rather than three copies of the same
+`ScrollbarState` arithmetic. The bar appears only when the pane has more rows than it can
+show: a full-height thumb is a control that lies about having something to do, and it is
+the same rule ADR-051 already applies to the file browser.
+
+**Where the column comes from.** The two sidebar panels put the bar on the border they
+already draw down their right edge, so a long tree costs no width — a sidebar is sixteen
+cells at its narrowest, and a file name is what it is there to show. The track is the
+border's own `│`, so a pane that fits keeps an unbroken edge instead of growing a second
+vertical line.
+
+The editor has no border to borrow, so the layout reserves it one: `LayoutRects` gains an
+`editor_scrollbar` column beside `editor`, and `MIN_EDITOR_WIDTH` now means twenty columns
+of *text* with the bar on top of it. The column is reserved whether or not a bar is drawn
+in it. The alternative — taking the column only when the document outgrows the pane —
+reflows every line on screen at the moment the user is typing past the bottom of the
+window, which is the least welcome moment there is. It is taken from the text rather than
+from the gutter because the gutter's width is what `gutter_width` tells the mouse, and a
+click landing a column off the character under it is the bug the shared function exists to
+prevent.
+
+**Consequence.** The diff viewer keeps the whole pane — `rects.diff` is the pane and not
+the narrowed `editor` — because it covers the editor rather than sharing it, and a viewer
+one column short of its own pane reads as a drawing bug. For the mouse the reserved column
+belongs to the editor: a wheel over it scrolls the document, and a click focuses the pane
+rather than falling through. The thumb is not draggable, which is what the browser's bar
+already does — there is no cell of it that means a document position, and the wheel and
+the keyboard both already scroll.
+
+The editor's thumb is positioned from `viewport.top_line` against the document's line
+count, which is exact because the editor does not wrap: one line is one row. An editor
+scrolled past its last page — it may scroll until only the last line is left — pins the
+thumb at the bottom rather than running off it, since "you are at the end" is what that
+state means.

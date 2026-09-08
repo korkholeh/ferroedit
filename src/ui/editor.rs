@@ -18,6 +18,7 @@ use crate::editor::search::Match;
 use crate::editor::selection::Selection;
 use crate::editor::viewport::gutter_width;
 use crate::syntax::highlighter::{self, StyleKind, Token};
+use crate::ui::scrollbar;
 use crate::ui::theme::Theme;
 
 pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
@@ -79,6 +80,27 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             frame.set_cursor_position((area.x + (gutter + cell) as u16, area.y + row as u16));
         }
     }
+}
+
+/// The editor's scrollbar, in the column `ui::layout` keeps beside the text
+/// (ADR-052).
+///
+/// Measured in document lines rather than in wrapped rows because the editor
+/// does not wrap: one line is one row, so the thumb's position is the viewport's
+/// `top_line` with nothing to convert.
+pub fn render_scrollbar(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
+    let Some(tab) = app.active() else {
+        return;
+    };
+    scrollbar::render(
+        frame,
+        area,
+        theme,
+        app.focus == FocusTarget::Editor,
+        tab.document.line_count(),
+        area.height as usize,
+        tab.viewport.top_line,
+    );
 }
 
 /// The display columns of `line` covered by the selection, if any.

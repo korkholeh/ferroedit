@@ -9,6 +9,7 @@ pub mod git;
 pub mod help;
 pub mod layout;
 pub mod menu;
+pub mod scrollbar;
 pub mod search;
 pub mod statusbar;
 pub mod tabs;
@@ -47,6 +48,7 @@ pub fn render(frame: &mut Frame, app: &App, rects: &LayoutRects, theme: &Theme) 
     git::render(frame, app, rects.git_panel, theme);
     tabs::render(frame, app, rects, theme);
     editor::render(frame, app, rects.editor, theme);
+    editor::render_scrollbar(frame, app, rects.editor_scrollbar, theme);
     // Over the editor, because that is the pane it replaces while it is open.
     if let Some(area) = rects.diff {
         diff::render(frame, app, area, theme);
@@ -111,6 +113,99 @@ mod tests {
             rows[19].contains("Ln 1, Col 1"),
             "status bar missing: {:?}",
             rows[19]
+        );
+    }
+
+    /// One column of the buffer as a string, `.` for a blank cell.
+    fn column(app: &App, width: u16, height: u16, x: u16, rows: std::ops::Range<u16>) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let theme = Theme::default();
+        terminal
+            .draw(|frame| render(frame, app, &layout::compute(frame.area(), app), &theme))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        rows.map(|y| match buffer[(x, y)].symbol() {
+            " " => ".".to_string(),
+            symbol => symbol.to_string(),
+        })
+        .collect()
+    }
+
+    /// A document taller than the pane puts a thumb in the column the layout
+    /// keeps for it, and scrolling moves it (ADR-052).
+    #[test]
+    fn the_editor_gets_a_scrollbar_once_the_file_is_taller_than_the_pane() {
+        let mut app = app();
+        let long: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        app.tabs[0] = crate::app::tabs::Tab::scratch("long.rs", &long);
+        app.active_tab = Some(0);
+
+        let rects = layout::compute(Rect::new(0, 0, 80, 24), &app);
+        let bar = rects.editor_scrollbar;
+        let rows = bar.y..bar.bottom();
+
+        let top = column(&app, 80, 24, bar.x, rows.clone());
+        assert!(top.starts_with('█'), "the thumb starts at the top: {top:?}");
+        assert!(top.contains('│'), "and the track runs under it: {top:?}");
+
+        app.tabs[0].viewport.top_line = 199;
+        let bottom = column(&app, 80, 24, bar.x, rows);
+        assert!(
+            bottom.ends_with('█'),
+            "scrolled to the end it reaches the bottom: {bottom:?}"
+        );
+    }
+
+    /// And a file that fits leaves the column empty rather than drawing a
+    /// full-height thumb.
+    #[test]
+    fn a_file_that_fits_draws_no_scrollbar_but_keeps_its_column() {
+        let app = app();
+        let rects = layout::compute(Rect::new(0, 0, 80, 24), &app);
+        let bar = rects.editor_scrollbar;
+        assert_eq!(bar.width, 1, "the column is reserved either way");
+        let drawn = column(&app, 80, 24, bar.x, bar.y..bar.bottom());
+        assert!(
+            drawn.chars().all(|c| c == '.'),
+            "three lines need no bar: {drawn:?}"
+        );
+    }
+
+    /// The sidebar's two panels draw theirs down the border they already have,
+    /// so a tree longer than the pane costs no width (ADR-052).
+    #[test]
+    fn the_explorer_gets_a_scrollbar_once_the_tree_is_longer_than_the_pane() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..40 {
+            std::fs::write(dir.path().join(format!("file{i:02}.rs")), "").unwrap();
+        }
+        let app = App::fixture_in(dir.path());
+
+        let rects = layout::compute(Rect::new(0, 0, 80, 24), &app);
+        let explorer = rects.explorer;
+        // The title row is not part of the list, so nor is it part of the bar.
+        let drawn = column(
+            &app,
+            80,
+            24,
+            explorer.right() - 1,
+            explorer.y + 1..explorer.bottom(),
+        );
+        assert!(drawn.starts_with('█'), "a thumb on the border: {drawn:?}");
+        assert!(drawn.contains('│'), "the border is its track: {drawn:?}");
+    }
+
+    #[test]
+    fn the_git_panel_gets_a_scrollbar_once_it_has_more_changes_than_rows() {
+        // Four changed files in a panel the layout gives three rows.
+        let app = app();
+        let rects = layout::compute(Rect::new(0, 0, 60, 14), &app);
+        let panel = rects.git_panel;
+        let drawn = column(&app, 60, 14, panel.right() - 1, panel.y + 1..panel.bottom());
+        assert!(
+            drawn.contains('█'),
+            "four changes do not fit {} rows: {drawn:?}",
+            panel.height - 1
         );
     }
 

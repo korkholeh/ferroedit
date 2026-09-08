@@ -173,6 +173,12 @@ fn left_click(app: &App, rects: &LayoutRects, at: Position) -> Option<Command> {
     if rects.editor.contains(at) {
         return Some(editor_click(app, rects.editor, at));
     }
+    // The bar is not draggable — there is no cell of it that means a document
+    // position — so a click on it does the one thing a click on a pane always
+    // does.
+    if rects.editor_scrollbar.contains(at) {
+        return Some(Command::FocusPane(FocusTarget::Editor));
+    }
     if rects.explorer.contains(at) {
         return Some(explorer_click(app, rects.explorer, at));
     }
@@ -313,7 +319,12 @@ fn scroll(rects: &LayoutRects, at: Position, delta: i16) -> Option<Command> {
     if rects.diff.is_some_and(|diff| diff.contains(at)) {
         return Some(Command::DiffScroll(delta));
     }
-    if rects.editor.contains(at) || rects.tab_bar.contains(at) {
+    // The scrollbar column counts as the editor: a wheel on the bar is a wheel
+    // on the thing it scrolls, the same way the browser's frame works.
+    if rects.editor.contains(at)
+        || rects.editor_scrollbar.contains(at)
+        || rects.tab_bar.contains(at)
+    {
         return Some(Command::ScrollEditor(delta));
     }
     if rects.explorer.contains(at) || rects.git_panel.contains(at) {
@@ -339,6 +350,30 @@ mod tests {
 
     fn app() -> App {
         App::fixture()
+    }
+
+    /// The scrollbar column is part of the editor as far as the mouse is
+    /// concerned (ADR-052): a wheel over it scrolls the document, and a click
+    /// focuses the pane instead of falling through to the panel beside it.
+    #[test]
+    fn the_editor_scrollbar_column_belongs_to_the_editor() {
+        let app = app();
+        let r = rects(&app);
+        let bar = r.editor_scrollbar;
+        assert_eq!(bar.width, 1);
+        assert_eq!(bar.x, r.editor.right(), "it sits against the text");
+        assert_eq!(
+            hit_test(
+                &app,
+                &r,
+                wheel(MouseEventKind::ScrollDown, bar.x, bar.y + 1)
+            ),
+            Some(Command::ScrollEditor(WHEEL_STEP))
+        );
+        assert_eq!(
+            hit_test(&app, &r, click(bar.x, bar.y + 1)),
+            Some(Command::FocusPane(FocusTarget::Editor))
+        );
     }
 
     fn rects(app: &App) -> LayoutRects {

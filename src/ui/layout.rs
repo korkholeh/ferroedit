@@ -17,8 +17,14 @@ use crate::event::keyboard::shortcut_for;
 pub const MIN_WIDTH: u16 = 40;
 pub const MIN_HEIGHT: u16 = 8;
 
-/// Narrowest usable editor column count; the sidebar yields space first.
+/// Narrowest usable editor column count, text only; the sidebar yields space
+/// first.
 const MIN_EDITOR_WIDTH: u16 = 20;
+
+/// The column the editor's scrollbar sits in (ADR-052). It is on top of
+/// `MIN_EDITOR_WIDTH` rather than out of it: the minimum is about how much text
+/// is readable, and the bar is not text.
+const EDITOR_SCROLLBAR_WIDTH: u16 = 1;
 
 /// What a dialog costs besides its body: two border rows and the button row.
 ///
@@ -101,14 +107,19 @@ pub struct LayoutRects {
     pub tab_overflow_left: Option<Rect>,
     pub tab_overflow_right: Option<Rect>,
     pub editor: Rect,
+    /// The one-cell column at the editor's right edge that its scrollbar lives
+    /// in (ADR-052). Reserved whether or not a bar is drawn in it, so opening a
+    /// longer file does not shift every line of the one already on screen.
+    pub editor_scrollbar: Rect,
     /// The help screen, when one is open (SPEC §6). The whole body — the
     /// sidebar as well as the editor — because it is a screen and not a pane,
     /// and a key table squeezed into a 40-column editor is not readable
     /// (ADR-038). Everything under it must be hit-tested after it.
     pub help: Option<Rect>,
-    /// The diff viewer, when one is open (SPEC §36). It *is* the editor rect:
-    /// the viewer covers the pane rather than splitting it, so a hit test that
-    /// finds it must be made before the editor's own (ADR-037).
+    /// The diff viewer, when one is open (SPEC §36). It is the whole editor
+    /// pane — the editor rect and the scrollbar column beside it: the viewer
+    /// covers the pane rather than splitting it, so a hit test that finds it
+    /// must be made before the editor's own (ADR-037).
     pub diff: Option<Rect>,
     /// The find/replace bar under the editor, when it is open.
     pub search: Option<SearchRects>,
@@ -142,12 +153,13 @@ pub fn compute(area: Rect, app: &App) -> LayoutRects {
 
     // A quarter of the width, bounded so the sidebar is neither a sliver on a
     // wide terminal nor the majority of a narrow one.
-    let sidebar_width = (area.width / 4)
-        .clamp(16, 32)
-        .min(area.width.saturating_sub(MIN_EDITOR_WIDTH));
+    let sidebar_width = (area.width / 4).clamp(16, 32).min(
+        area.width
+            .saturating_sub(MIN_EDITOR_WIDTH + EDITOR_SCROLLBAR_WIDTH),
+    );
     let [sidebar, right] = Layout::horizontal([
         Constraint::Length(sidebar_width),
-        Constraint::Min(MIN_EDITOR_WIDTH),
+        Constraint::Min(MIN_EDITOR_WIDTH + EDITOR_SCROLLBAR_WIDTH),
     ])
     .areas(body);
 
@@ -158,12 +170,23 @@ pub fn compute(area: Rect, app: &App) -> LayoutRects {
     // The bar takes its rows out of the editor's, so opening it scrolls the
     // cursor rather than hiding it: `sync_editor_view` sees the smaller pane on
     // the next frame exactly as it sees a resize.
-    let [tab_bar, editor, search_bar] = Layout::vertical([
+    let [tab_bar, pane, search_bar] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
         Constraint::Length(app.search.height()),
     ])
     .areas(right);
+    // The rightmost column of the pane is the editor's scrollbar (ADR-052). It
+    // is taken from the text and not from the gutter, and taken always: a
+    // column that appears the moment a file grows past the window would reflow
+    // every line on screen at the least welcome moment. The diff viewer keeps
+    // the whole pane — it covers the editor rather than sharing it, and a
+    // viewer one column short of its own pane reads as a drawing bug.
+    let [editor, editor_scrollbar] = Layout::horizontal([
+        Constraint::Min(1),
+        Constraint::Length(EDITOR_SCROLLBAR_WIDTH),
+    ])
+    .areas(pane);
     let search = (search_bar.height > 0).then(|| search_rects(search_bar, app.search.replacing));
 
     let menu_titles = menu_title_rects(menu_bar);
@@ -204,8 +227,9 @@ pub fn compute(area: Rect, app: &App) -> LayoutRects {
         tab_overflow_left: bar.overflow_left,
         tab_overflow_right: bar.overflow_right,
         editor,
+        editor_scrollbar,
         help: app.help.as_ref().map(|_| body),
-        diff: app.diff.as_ref().map(|_| editor),
+        diff: app.diff.as_ref().map(|_| pane),
         search,
         status_bar,
         dialog,
@@ -542,6 +566,7 @@ mod tests {
             rects.git_panel,
             rects.tab_bar,
             rects.editor,
+            rects.editor_scrollbar,
             rects.status_bar,
         ] {
             assert!(contains(area, zone), "{zone:?} escapes {area:?}");
@@ -554,6 +579,7 @@ mod tests {
             rects.git_panel,
             rects.tab_bar,
             rects.editor,
+            rects.editor_scrollbar,
             rects.status_bar,
         ];
         for (i, a) in zones.iter().enumerate() {
@@ -564,7 +590,7 @@ mod tests {
         assert_eq!(
             zones.iter().map(|z| z.area()).sum::<u32>(),
             area.area(),
-            "the five zones must cover the frame exactly"
+            "the zones must cover the frame exactly"
         );
     }
 

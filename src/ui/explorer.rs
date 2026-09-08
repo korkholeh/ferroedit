@@ -9,6 +9,7 @@ use ratatui::Frame;
 use crate::app::focus::FocusTarget;
 use crate::app::App;
 use crate::filesystem::tree::EntryKind;
+use crate::ui::scrollbar;
 use crate::ui::theme::Theme;
 
 pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
@@ -27,6 +28,18 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     }
 
     let rows = app.sidebar.rows();
+    // Down the border the pane already draws, so the tree keeps every cell of
+    // its width — a sidebar is sixteen cells at its narrowest, and a name is
+    // what it is there to show (ADR-052).
+    scrollbar::render(
+        frame,
+        Rect::new(area.right() - 1, inner.y, 1, inner.height),
+        theme,
+        focused,
+        rows.len(),
+        inner.height as usize,
+        app.sidebar.scroll,
+    );
     if rows.is_empty() {
         // Short enough for a 16-cell sidebar: the panel is the one place in the
         // layout that gives up width first.

@@ -16,6 +16,7 @@ use crate::app::git::GitAvailability;
 use crate::app::App;
 use crate::git::models::Change;
 use crate::ui::explorer::selection_style;
+use crate::ui::scrollbar;
 use crate::ui::theme::Theme;
 use unicode_width::UnicodeWidthStr;
 
@@ -33,6 +34,17 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     if inner.height == 0 {
         return;
     }
+
+    // On the pane's own right border, like the explorer's above it (ADR-052).
+    scrollbar::render(
+        frame,
+        Rect::new(area.right() - 1, inner.y, 1, inner.height),
+        theme,
+        focused,
+        app.git.entries().len(),
+        inner.height as usize,
+        app.git.scroll,
+    );
 
     if let Some(message) = empty_message(app) {
         // Wrapped, not clipped: the sidebar is sixteen cells wide at its

@@ -737,6 +737,17 @@ the per-file quit walk, the Open browser and green CI done)
     blocked on. `App` holds that handle and a clone of the loop's sender, so switching
     folders ends one watch and starts one — not two threads reporting on two trees.
   - 712 tests (was 690).
+  - **Every scrolling pane has a scrollbar** (ADR-052): the explorer, the git panel and
+    the editor, drawn by one shared `ui::scrollbar::render` and only when the pane has
+    more rows than it can show. The two sidebar panels put theirs on the border they
+    already draw, so a long tree costs no width; the editor has no border to borrow, so
+    the layout reserves it a column of its own (`LayoutRects::editor_scrollbar`) and
+    keeps it reserved whether or not a bar is in it — a column that appears the moment a
+    file outgrows the window would reflow every line on screen while the user is typing.
+    `MIN_EDITOR_WIDTH` now means twenty columns of text with the bar on top. The diff
+    viewer still gets the whole pane, and for the mouse the column belongs to the editor:
+    the wheel over it scrolls the document, a click focuses the pane.
+  - 721 tests (was 712).
 
 ## In progress
 
