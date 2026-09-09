@@ -12,6 +12,24 @@ version, so that heading becomes the new version's on the way out (see
 
 Nothing yet.
 
+## [0.1.5] — 2026-09-09
+
+### Added
+
+- **The line the caret is on is marked on the editor's ground**, the way the CSV
+  grid already marks the record the cursor is in — the whole pane wide, and every
+  row of a wrapped line. A selection and a search hit are drawn over it, so
+  neither is hidden. The two simplified ANSI themes have no tone for it and keep
+  the bold line number alone (ADR-067).
+
+### Changed
+
+- **Menu entries that carry a state now show it.** A `✓` marks *View ▸ Word Wrap*,
+  *Hidden and Ignored Files*, *Table View*, *Search ▸ Match Case* and
+  *Help ▸ Check on Start* while they are on, and the theme in use among the five
+  in the View menu. The mark is a column of its own, so the labels of a menu
+  stay on one left edge and nothing moves when a state flips (ADR-066).
+
 ## [0.1.4] — 2026-09-09
 
 ### Added
@@ -83,7 +101,8 @@ The first release: the editor through Phase 14.
   the help screen, and a quit that asks about each unsaved file in turn.
 - Releases are GitHub Releases, built for four targets.
 
-[Unreleased]: https://github.com/korkholeh/ferroedit/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/korkholeh/ferroedit/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/korkholeh/ferroedit/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/korkholeh/ferroedit/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/korkholeh/ferroedit/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/korkholeh/ferroedit/compare/v0.1.1...v0.1.2

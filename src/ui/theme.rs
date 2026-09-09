@@ -74,6 +74,13 @@ pub struct Palette {
     pub on_field: Color,
     /// The editor's selection. A background only — the syntax colours stay.
     pub selection: Color,
+    /// The ground of the line the caret is on, when the palette has a tone
+    /// close enough to `background` to mark a whole line without shouting.
+    ///
+    /// `None` is an honest answer: the sixteen ANSI colours have nothing
+    /// between black and grey, and a line drawn on the grey of the bars is a
+    /// selection bar rather than a hint about where the caret is (ADR-067).
+    pub current_line: Option<Color>,
     /// Every search hit that is not the current one.
     pub match_bg: Color,
     pub directory: Color,
@@ -156,6 +163,10 @@ pub struct Theme {
     /// Selected text in the editor. Only the background is set, so the
     /// foreground stays whatever the syntax highlighter chose in Phase 7.
     pub editor_selection: Style,
+    /// The ground of the line the caret is on, on the themes that have one.
+    /// A background only, for the same reason: the syntax colours, the
+    /// selection and the search hits are all drawn over it (ADR-067).
+    pub current_line: Option<Style>,
     pub status_bar: Style,
 
     pub git_modified: Color,
@@ -247,6 +258,7 @@ impl Theme {
 
             line_number: p.line_number,
             editor_selection: Style::new().bg(p.selection),
+            current_line: p.current_line.map(|bg| Style::new().bg(bg)),
             status_bar: Style::new().bg(p.chrome).fg(p.on_chrome),
 
             git_modified: p.modified,
@@ -296,6 +308,9 @@ fn dark() -> Palette {
         field: Color::Indexed(235),
         on_field: Color::Indexed(252),
         selection: Color::Indexed(24),
+        // Two steps off the 235 ground: enough to find the caret's line at a
+        // glance, not enough to read as a selection.
+        current_line: Some(Color::Indexed(237)),
         match_bg: Color::Indexed(58),
         directory: Color::Indexed(110),
         line_number: Color::Indexed(242),
@@ -350,6 +365,7 @@ fn light() -> Palette {
         field: Color::Indexed(231),
         on_field: Color::Indexed(236),
         selection: Color::Indexed(153),
+        current_line: Some(Color::Indexed(253)),
         match_bg: Color::Indexed(222),
         directory: Color::Indexed(25),
         line_number: Color::Indexed(246),
@@ -411,6 +427,10 @@ fn dark_simple() -> Palette {
         field: Color::Gray,
         on_field: Color::Black,
         selection: Color::Blue,
+        // Nothing sits between black and `DarkGray`, and the grey is the
+        // ground of the bars: this scheme marks the caret's line with the bold
+        // number in the gutter and nothing else (ADR-067).
+        current_line: None,
         match_bg: Color::Magenta,
         // Cyan rather than blue: a directory is read on the black ground and
         // again on the grey of a selected row the sidebar does not have focus
@@ -468,6 +488,7 @@ fn light_simple() -> Palette {
         field: Color::White,
         on_field: Color::Black,
         selection: Color::LightBlue,
+        current_line: None,
         match_bg: Color::LightYellow,
         directory: Color::Blue,
         line_number: Color::DarkGray,
@@ -535,6 +556,9 @@ fn retro() -> Palette {
         field: Color::Indexed(18),
         on_field: Color::Indexed(228),
         selection: Color::Indexed(31),
+        // A blue one shade off the ground's, which is what the hardware
+        // palette had between 18 and the cyan.
+        current_line: Some(Color::Indexed(19)),
         match_bg: Color::Indexed(90),
         directory: Color::Indexed(51),
         line_number: Color::Indexed(245),
@@ -713,6 +737,36 @@ mod tests {
         }
     }
 
+    /// A ground that is the ground under it marks nothing, and one the text
+    /// cannot be read on marks too much: the line the caret is on has to be a
+    /// tone of its own that the foreground and the syntax colours survive
+    /// (ADR-067).
+    #[test]
+    fn the_caret_line_ground_is_neither_the_background_nor_the_text() {
+        for kind in ThemeKind::ALL.iter().copied() {
+            let p = palette(kind);
+            let Some(ground) = p.current_line else {
+                continue;
+            };
+            assert_ne!(ground, p.background, "{}: an invisible mark", kind.label());
+            for (colour, what) in [
+                (p.foreground, "the text"),
+                (p.syntax.comment, "a comment"),
+                (p.syntax.string, "a string"),
+                (p.line_number, "the line number"),
+                (p.selection, "the selection"),
+                (p.match_bg, "a search hit"),
+            ] {
+                assert_ne!(
+                    colour,
+                    ground,
+                    "{}: {what} is lost on the caret's line",
+                    kind.label()
+                );
+            }
+        }
+    }
+
     /// The simplified palettes are the sixteen ANSI colours, so that the
     /// terminal's own scheme is what the editor is drawn in.
     #[test]
@@ -739,6 +793,9 @@ mod tests {
                     kind.label()
                 );
             }
+            // These palettes have no tone between the ground and the grey of
+            // the bars, so they mark the caret's line in the gutter only.
+            assert!(theme.current_line.is_none(), "{}", kind.label());
         }
     }
 }

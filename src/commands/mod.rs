@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 use crate::app::focus::FocusTarget;
 use crate::app::search::SearchField;
+use crate::app::App;
 use crate::config::ThemeKind;
 use crate::editor::cursor::Motion;
 use crate::editor::document::LineEnding;
@@ -954,6 +955,31 @@ pub static MENUS: &[MenuDef] = &[
         ],
     },
 ];
+
+/// Which way a menu entry that carries a state is pointing (SPEC §24).
+///
+/// `None` is an entry that does something rather than switching something: the
+/// mark column only exists in a menu that has at least one entry answering
+/// `Some`, and its width does not change as the state flips, so the popup does
+/// not resize under the cursor when a mark appears.
+///
+/// The themes answer here too. They are one choice out of five rather than five
+/// switches, but on screen a mark against the one in use says the same thing,
+/// and a menu that marks Word Wrap and not the live theme reads as if the theme
+/// were not a state at all.
+pub fn menu_state(app: &App, command: &Command) -> Option<bool> {
+    Some(match command {
+        Command::ToggleWordWrap => app.settings.word_wrap,
+        Command::ToggleHiddenFiles => app.sidebar.tree.show_hidden(),
+        // The table is a property of the tab in front, so with no file open
+        // there is nothing to be on: an unmarked entry, not a missing one.
+        Command::ToggleTableView => app.active().is_some_and(|tab| tab.shows_table()),
+        Command::SearchToggleCase => app.search.case_sensitive,
+        Command::ToggleUpdateChecks => app.settings.check_for_updates,
+        Command::SetTheme(kind) => app.settings.theme == *kind,
+        _ => return None,
+    })
+}
 
 const fn item(label: &'static str, command: Command) -> MenuEntry {
     MenuEntry::Item(MenuItem { label, command })

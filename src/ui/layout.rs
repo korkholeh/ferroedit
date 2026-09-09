@@ -203,7 +203,7 @@ pub fn compute(area: Rect, app: &App) -> LayoutRects {
     let menu_popup = app
         .menu
         .open
-        .and_then(|i| menu_titles.get(i).map(|t| popup_rect(area, *t, i)));
+        .and_then(|i| menu_titles.get(i).map(|t| popup_rect(area, *t, i, app)));
 
     let bar = tab_bar_layout(app, tab_bar);
     let dialog = app.dialog.as_ref().map(|d| dialog_rect(area, d));
@@ -599,13 +599,20 @@ fn button_rects(popup: Rect, buttons: &[DialogButton]) -> Vec<Rect> {
 }
 
 /// Drop-down under a menu title, pushed left when it would overflow the frame.
-fn popup_rect(area: Rect, title: Rect, index: usize) -> Rect {
+fn popup_rect(area: Rect, title: Rect, index: usize, app: &App) -> Rect {
     let menu = &MENUS[index];
+    // Two columns for the mark in front of the labels, in the menus that have
+    // an entry carrying a state at all (SPEC §24).
+    let marks = if crate::ui::menu::has_marks(app, menu.items) {
+        2
+    } else {
+        0
+    };
     // Separators have no label, so they never widen a popup: the box is as
     // wide as its widest entry, rule or no rule.
     let width = menu
         .entries()
-        .map(|i| i.label.width() + shortcut_for(&i.command).unwrap_or("").width() + 4)
+        .map(|i| i.label.width() + shortcut_for(&i.command).unwrap_or("").width() + 4 + marks)
         .max()
         .unwrap_or(10) as u16
         + 2;

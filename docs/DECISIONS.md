@@ -2259,3 +2259,68 @@ not exactly `major.minor.patch` is reported as a check that failed rather than g
 GitHub's "latest" never points at a pre-release, so a suffix means something this build was
 not told about, and guessing which side of `0.2.0` an `rc.1` falls on is how an editor
 recommends a downgrade.
+
+---
+
+## ADR-066: A menu entry that carries a state says so in the menu
+
+**Decision.** A drop-down entry that switches something draws a `✓` in a two-column mark
+field in front of its label while it is on: *View ▸ Word Wrap*, *Hidden and Ignored Files*,
+*Table View*, *Search ▸ Match Case*, *Help ▸ Check on Start*, and the five themes, which are
+marked on the one in use. The column belongs to the whole drop-down — every entry in a menu
+that has one keeps its label on the same left edge, switch or not — and the popup is sized
+with it whether or not anything is currently on, so nothing moves sideways when a state
+flips. `commands::menu_state` is the single answer to "which way is this pointing"; the
+renderer and the layout both ask it, so a menu can never draw a mark the width was not
+reserved for.
+
+**Why in the menu.** These entries already told the truth — on the status bar, four seconds
+after they were pressed. That is an answer to "what did I just do", not to "what is it
+now", and the second question is the one somebody opening a menu is asking. Without the
+mark, finding out whether wrapping is on costs a press and a press back, and the theme
+entries read as five buttons rather than one choice.
+
+**Why not a submenu for the themes, or a radio glyph.** They are a choice of one, and a
+`✓` against the live one says that in the space already there; a second glyph would be a
+second thing to learn for a distinction the labels already make. A submenu would put the
+current theme one keystroke further away than the switches beside it, for a list of five.
+
+**What is deliberately unmarked.** *Toggle Sidebar* moves the sidebar between the explorer
+and the git panel — it has two states and neither is "on", so a mark would have to pick one
+to mean, and either choice is a coin flip. *Table View* over no open file is unmarked
+rather than absent: the state belongs to the tab in front, and with no tab there is nothing
+to be on.
+
+---
+
+## ADR-067: The caret's line is marked on the ground, not only in the gutter
+
+**Decision.** The editor paints the line the caret is on in a ground of its own — the whole
+pane wide, gutter included, and every row of it when the line is wrapped. The colour is a
+palette role (`current_line`), painted as a rect *under* the text: the spans of a row set a
+foreground, and a selection or a search hit sets a background of its own, so both are drawn
+over the mark instead of being hidden by it. It is the same thing the CSV grid already does
+for the record the cursor is in (SPEC §65).
+
+**Why the gutter was not enough.** The bold line number answers "where am I" only if the eye
+is already in the gutter. In a full pane of highlighted code the caret is one cell that
+blinks the way the terminal decides to blink it — in tmux over ssh, sometimes not at all —
+and the gutter is thirty columns away from where the user is reading. The grid solved this
+for a wide table for exactly this reason, and the argument does not change when the columns
+are characters.
+
+**Why the whole line, wrapped rows and all.** A mark on only the row the caret sits on would
+say a wrapped line is two lines, which is the one thing the gutter is careful never to say by
+not repeating the number on a continuation row.
+
+**Why `Option<Color>` in the palette.** The two simplified themes are the sixteen ANSI
+colours (ADR-007). Between black and `DarkGray` there is nothing, and `DarkGray` is the
+ground the bars are cut from: a line drawn in it reads as a selection bar following the
+caret, which is louder than the thing it is marking. `None` says the palette has no tone for
+this, and those themes keep the bold number alone. That is better than inventing an indexed
+colour for them, which is the one thing the simple themes exist not to do.
+
+**Why not hide it while there is a selection.** Some editors do. Here the selection has its
+own ground and wins wherever it reaches, so the two never compete for a cell — and the part
+of the caret's line that is *not* selected is exactly the part where the user still wants to
+know where the caret is.

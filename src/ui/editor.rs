@@ -8,7 +8,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
 use crate::app::focus::FocusTarget;
@@ -16,7 +16,7 @@ use crate::app::{App, EditorView, TextView};
 use crate::editor::coords::{self, VisualCol};
 use crate::editor::search::Match;
 use crate::editor::selection::Selection;
-use crate::editor::viewport::gutter_width;
+use crate::editor::viewport::{gutter_width, VisibleRow};
 use crate::editor::wrap;
 use crate::syntax::highlighter::{self, StyleKind, Token};
 use crate::ui::scrollbar;
@@ -65,6 +65,9 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let hits = app.search.open.then_some(app.search.matches.as_slice());
     let mut columns = Vec::new();
     let rows = tab.viewport.visible(document, layout);
+    // The ground under the caret's line is marked too, the way the table marks
+    // the record the cursor is in (SPEC §65, ADR-067).
+    let cursor_rows = rows_of(&rows, cursor_line);
     let lines: Vec<Line> = rows
         .iter()
         .map(|visible| {
@@ -101,6 +104,20 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             Line::from(spans)
         })
         .collect();
+    // Painted before the text and not into it: the ground has to reach the
+    // gutter and the empty cells past the end of the line, which the spans of
+    // a row do not cover. The spans set a foreground and — for a selection or
+    // a search hit — a background of their own, and a style with no background
+    // leaves whatever is underneath it, so the text lands on this rather than
+    // wiping it.
+    if let (Some(style), Some((first, last))) = (theme.current_line, cursor_rows) {
+        let top = area.y + first as u16;
+        let height = (last - first + 1) as u16;
+        frame.render_widget(
+            Block::new().style(style),
+            Rect::new(area.x, top, area.width, height.min(area.height)),
+        );
+    }
     frame.render_widget(Paragraph::new(lines), area);
 
     // The terminal's real cursor is the caret: it blinks the way the user's
@@ -136,6 +153,23 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         let x = (gutter + cell).min(area.width.saturating_sub(1) as usize);
         frame.set_cursor_position((area.x + x as u16, area.y + screen_row as u16));
     }
+}
+
+/// The screen rows `line` is drawn on, as the first and the last of them.
+///
+/// A wrapped line is several rows and they are contiguous, so the ground under
+/// it is one rect: a highlight that marked only the row the caret is on would
+/// say a wrapped line is two lines, which is the one thing the gutter is
+/// careful not to say.
+fn rows_of(rows: &[VisibleRow], line: usize) -> Option<(usize, usize)> {
+    let first = rows.iter().position(|row| row.line == line)?;
+    let last = rows[first..]
+        .iter()
+        .take_while(|row| row.line == line)
+        .count()
+        + first
+        - 1;
+    Some((first, last))
 }
 
 /// How many cells of a line one row draws.
@@ -365,7 +399,174 @@ fn visible_slice(line: &str, left: VisualCol, width: usize, tab_width: usize) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ThemeKind;
     use crate::editor::coords::DEFAULT_TAB_WIDTH as TAB;
+    use crate::ui::layout;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::style::Color;
+    use ratatui::Terminal;
+
+    /// The whole frame drawn with `theme`, plus the rect the editor took.
+    fn draw(app: &App, kind: ThemeKind) -> (Buffer, Rect) {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let theme = Theme::new(kind);
+        let mut editor = Rect::default();
+        terminal
+            .draw(|frame| {
+                let rects = layout::compute(frame.area(), app);
+                crate::ui::render(frame, app, &rects, &theme);
+                editor = rects.editor;
+            })
+            .unwrap();
+        (terminal.backend().buffer().clone(), editor)
+    }
+
+    /// The backgrounds of one row of the editor pane, left to right.
+    fn row_grounds(buffer: &Buffer, editor: Rect, row: u16) -> Vec<Color> {
+        (editor.x..editor.right())
+            .map(|x| buffer[(x, editor.y + row)].style().bg.unwrap())
+            .collect()
+    }
+
+    /// An app on the second line of the fixture's first tab.
+    fn on_second_line() -> App {
+        let mut app = App::fixture();
+        app.focus = FocusTarget::Editor;
+        let tab = app.active_mut().expect("the fixture has a tab");
+        tab.document.move_cursor(
+            crate::editor::cursor::Motion::Down,
+            crate::editor::wrap::Layout::plain(24, 80),
+        );
+        app
+    }
+
+    /// The caret's line is marked on its ground as well as in the gutter: a
+    /// caret is one cell and a full pane is a lot of text (ADR-067).
+    #[test]
+    fn the_line_the_caret_is_on_is_drawn_on_its_own_ground() {
+        let app = on_second_line();
+        let theme = Theme::new(ThemeKind::Dark);
+        let ground = theme.current_line.and_then(|s| s.bg).expect("a ground");
+        let (buffer, editor) = draw(&app, ThemeKind::Dark);
+
+        // Every cell of it, from the gutter to the right edge of the pane.
+        assert!(
+            row_grounds(&buffer, editor, 1)
+                .iter()
+                .all(|bg| *bg == ground),
+            "{:?}",
+            row_grounds(&buffer, editor, 1)
+        );
+        // And no other line.
+        for row in [0, 2] {
+            assert!(
+                row_grounds(&buffer, editor, row)
+                    .iter()
+                    .all(|bg| *bg != ground),
+                "row {row} is marked too"
+            );
+        }
+    }
+
+    /// The text is drawn *on* that ground rather than punching holes in it:
+    /// the syntax colours set a foreground and nothing else.
+    #[test]
+    fn the_text_of_the_marked_line_keeps_the_ground_under_it() {
+        let app = on_second_line();
+        let theme = Theme::new(ThemeKind::Dark);
+        let ground = theme.current_line.and_then(|s| s.bg).expect("a ground");
+        let (buffer, editor) = draw(&app, ThemeKind::Dark);
+
+        let row: String = (editor.x..editor.right())
+            .map(|x| buffer[(x, editor.y + 1)].symbol())
+            .collect();
+        assert!(row.contains("println!"), "{row}");
+        let cell = (editor.x..editor.right())
+            .find(|x| buffer[(*x, editor.y + 1)].symbol() == "p")
+            .expect("the text of the line");
+        assert_eq!(buffer[(cell, editor.y + 1)].style().bg, Some(ground));
+    }
+
+    /// A wrapped line is one line: every row it takes is marked, or the
+    /// ground would say the file has more lines in it than it does.
+    #[test]
+    fn every_row_of_a_wrapped_line_is_marked() {
+        let mut app = App::fixture();
+        app.focus = FocusTarget::Editor;
+        app.settings.word_wrap = true;
+        {
+            let tab = app.active_mut().unwrap();
+            let long = "x".repeat(200);
+            tab.document = crate::editor::document::Document::from_text(
+                &format!("first\n{long}\nlast\n"),
+                None,
+            );
+            tab.document.move_cursor(
+                crate::editor::cursor::Motion::Down,
+                crate::editor::wrap::Layout::plain(24, 80),
+            );
+        }
+        let theme = Theme::new(ThemeKind::Dark);
+        let ground = theme.current_line.and_then(|s| s.bg).expect("a ground");
+        let (buffer, editor) = draw(&app, ThemeKind::Dark);
+
+        let marked: Vec<u16> = (0..editor.height)
+            .filter(|row| {
+                row_grounds(&buffer, editor, *row)
+                    .iter()
+                    .all(|bg| *bg == ground)
+            })
+            .collect();
+        // Three rows of two hundred cells in a pane this wide, and they are
+        // the rows under the first line rather than a set scattered down it.
+        assert!(marked.len() > 1, "{marked:?}");
+        assert_eq!(marked[0], 1);
+        assert!(
+            marked.windows(2).all(|pair| pair[1] == pair[0] + 1),
+            "{marked:?}"
+        );
+    }
+
+    /// A selection is a ground of its own and wins where it reaches, so the
+    /// mark can never hide what is selected.
+    #[test]
+    fn a_selection_is_drawn_over_the_mark() {
+        let mut app = on_second_line();
+        {
+            let tab = app.active_mut().unwrap();
+            tab.document.select_all();
+        }
+        let theme = Theme::new(ThemeKind::Dark);
+        let ground = theme.current_line.and_then(|s| s.bg).expect("a ground");
+        let selection = theme.editor_selection.bg.expect("a selection ground");
+        let (buffer, editor) = draw(&app, ThemeKind::Dark);
+
+        // Select All leaves the caret at the end of the document, so the mark
+        // is on the line it ended on.
+        let row = app.active().unwrap().document.cursor().line as u16;
+        let grounds = row_grounds(&buffer, editor, row);
+        assert!(grounds.contains(&selection), "{grounds:?}");
+        // The gutter is not selected text, so it keeps the mark.
+        assert_eq!(grounds[0], ground);
+    }
+
+    /// A theme with no tone close to its ground says so, and the pane is drawn
+    /// without the mark rather than with a grey bar through it (ADR-067).
+    #[test]
+    fn a_theme_without_a_ground_for_it_draws_no_mark() {
+        let app = on_second_line();
+        assert!(Theme::new(ThemeKind::DarkSimple).current_line.is_none());
+        let (buffer, editor) = draw(&app, ThemeKind::DarkSimple);
+        let background = Theme::new(ThemeKind::DarkSimple).background;
+        assert!(
+            row_grounds(&buffer, editor, 1)
+                .iter()
+                .all(|bg| *bg == background),
+            "{:?}",
+            row_grounds(&buffer, editor, 1)
+        );
+    }
 
     #[test]
     fn a_line_shorter_than_the_window_is_drawn_whole() {
