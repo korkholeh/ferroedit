@@ -771,6 +771,18 @@ the per-file quit walk, the Open browser and green CI done)
   Select Row / Select Column all make a rectangle of cells; the status bar counts it as
   `Sel 3×2`. Copy writes the block
   in the file's own dialect, cut empties it as one undo step, `Delete` empties it in place.
+- **The release check** (SPEC §66, ADR-065). At start-up, when the setting allows it and the
+  last one answered over a day ago, a thread asks GitHub for the newest tag and compares it
+  with `CARGO_PKG_VERSION`; the answer comes back on the loop's own channel and becomes a
+  `Command`, like a finished git job. Found news goes on the status bar — not into a dialog,
+  because there is nothing to answer and a modal box would eat the keystroke it interrupted.
+  *Help ▸ Check for Updates* asks now and answers either way, in a box whose title is the
+  news and whose body is the releases address; *Help ▸ Check on Start* switches
+  the automatic one off into `config.json`. The request is `curl` (the redirect on
+  `/releases/latest`, so no API quota) or `wget` (the API, which is all it can do) — the two
+  `install.sh` already needs, so the binary gained no HTTP client and the musl builds are
+  unchanged. `Settings::default` had to be written out: `check-for-updates` is the first
+  setting whose default is not the zero value.
 
 ## Known issues
 

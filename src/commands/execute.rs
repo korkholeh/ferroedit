@@ -28,6 +28,7 @@ use crate::git::diff::DiffSide;
 use crate::git::models::{Change, Operation};
 use crate::git::{GitJob, JobFailure, JobOutcome};
 use crate::syntax::highlighter;
+use crate::update::{self, UpdateCheck, UpdateOutcome};
 
 pub fn execute_command(app: &mut App, command: Command) {
     log::debug!("command {command:?} (focus {:?})", app.focus);
@@ -381,6 +382,10 @@ pub fn execute_command(app: &mut App, command: Command) {
 
         Command::ShowAbout => show_about(app),
 
+        Command::CheckForUpdates => check_for_updates(app),
+        Command::ToggleUpdateChecks => toggle_update_checks(app),
+        Command::UpdateCheckFinished(check) => finish_update_check(app, check),
+
         Command::ShowHelp => show_help(app),
         Command::HelpClose => close_help(app),
         Command::HelpScroll(delta) => scroll_help(app, delta as isize),
@@ -462,14 +467,27 @@ fn set_theme(app: &mut App, kind: ThemeKind) {
 /// choice will not survive the next start rather than reporting a file path
 /// the user did not know existed.
 fn save_settings(app: &mut App, what: &str) {
-    if !app.persist_settings {
-        return;
-    }
-    if let Err(err) = app.settings.save() {
-        log::error!("could not save the settings: {err}");
+    if let Err(err) = write_settings(app) {
         app.notifications
             .warning(format!("{what} not saved: {err}"));
     }
+}
+
+/// The write itself, with the reporting left to the caller.
+///
+/// Split out for the one setting the user did not choose: the timestamp the
+/// update check leaves behind is housekeeping, and a yellow line about a
+/// config file — in place of the answer they were waiting for — would be the
+/// editor complaining about its own bookkeeping.
+fn write_settings(app: &App) -> std::io::Result<()> {
+    if !app.persist_settings {
+        return Ok(());
+    }
+    let written = app.settings.save();
+    if let Err(err) = &written {
+        log::error!("could not save the settings: {err}");
+    }
+    written
 }
 
 /// Opens the help screen on the key tables (SPEC §6).
@@ -2304,6 +2322,89 @@ fn show_about(app: &mut App) {
         app,
         DialogState::about(env!("CARGO_PKG_VERSION"), return_focus),
     );
+}
+
+/// Asks GitHub now, because the user asked (SPEC §66).
+///
+/// It runs whatever the start-up setting says: turning the automatic check off
+/// is a statement about what happens without being asked, not a refusal to
+/// ever look. The throttle is skipped for the same reason — a check the user
+/// pressed for that answered "not yet" would be a menu entry that does
+/// nothing.
+fn check_for_updates(app: &mut App) {
+    // No channel means no run loop: every headless test builds an `App` this
+    // way, and none of them may reach the network.
+    let Some(events) = app.events.clone() else {
+        log::warn!("no event channel, so the update check cannot run");
+        return;
+    };
+    app.notifications.info("Checking for updates…");
+    update::spawn(events, true);
+}
+
+fn toggle_update_checks(app: &mut App) {
+    app.settings.check_for_updates = !app.settings.check_for_updates;
+    save_settings(app, "The update setting");
+    let state = if app.settings.check_for_updates {
+        "on"
+    } else {
+        "off"
+    };
+    app.notifications
+        .info(format!("Update check at start-up {state}"));
+}
+
+/// Reports what a finished check found (ADR-065).
+///
+/// The two kinds of check are told apart by who started them. One the user
+/// asked for owes an answer either way — a menu entry that is silent when
+/// there is nothing to say is one the user presses again. One that ran by
+/// itself speaks only when there is news: an editor that reported its own
+/// failed background request every morning would be an editor whose status bar
+/// is worth ignoring.
+fn finish_update_check(app: &mut App, check: UpdateCheck) {
+    // A check that answered is a check that happened, whichever way it went:
+    // the timestamp is what keeps the start-up check to one a day, and a
+    // machine with no network must not turn it into one per launch. Written
+    // before anything is said, so a failure to write cannot land on top of the
+    // answer.
+    if let Some(now) = update::now_secs() {
+        app.settings.last_update_check = Some(now);
+        let _ = write_settings(app);
+    }
+
+    match check.outcome {
+        UpdateOutcome::Available { latest } => {
+            if check.asked_for {
+                let return_focus = dialog_return_focus(app);
+                open_dialog(app, DialogState::update_available(&latest, return_focus));
+            } else {
+                // A notification and not a dialog: this is news, not a
+                // question, and it arrives seconds after start-up with no
+                // regard for what is being typed. A modal window would eat the
+                // keystroke it landed on to tell the user something that can
+                // wait (ADR-043 makes the same argument the other way round,
+                // where there really is something to answer).
+                app.notifications.info(update::announcement(&latest));
+            }
+        }
+        UpdateOutcome::UpToDate => {
+            if check.asked_for {
+                app.notifications.info(format!(
+                    "FerroEdit {} is the latest release",
+                    update::CURRENT
+                ));
+            }
+        }
+        UpdateOutcome::Failed(reason) => {
+            if check.asked_for {
+                app.notifications
+                    .error(format!("Could not check for updates: {reason}"));
+            } else {
+                log::warn!("the start-up update check failed: {reason}");
+            }
+        }
+    }
 }
 
 fn prompt_rename(app: &mut App) {
@@ -6505,6 +6606,138 @@ five",
         execute_command(&mut app, Command::DialogActivate);
         assert!(app.dialog.is_none());
         assert_eq!(app.focus, FocusTarget::Editor);
+    }
+
+    /// Helper: the answer a check hands back, without the network in it.
+    fn checked(asked_for: bool, outcome: UpdateOutcome) -> Command {
+        Command::UpdateCheckFinished(UpdateCheck { asked_for, outcome })
+    }
+
+    /// A check the user asked for gets a box that stays until it is dismissed,
+    /// with the version and the place to get it in it (ADR-065).
+    #[test]
+    fn an_update_the_user_asked_about_is_a_dialog() {
+        let mut app = app();
+        execute_command(
+            &mut app,
+            checked(
+                true,
+                UpdateOutcome::Available {
+                    latest: "9.9.9".into(),
+                },
+            ),
+        );
+
+        let dialog = app.dialog.as_ref().expect("a dialog");
+        assert!(dialog.title.contains("9.9.9"), "{}", dialog.title);
+        // The address alone in the body, so a narrow terminal cannot cut it in
+        // half: a truncated URL is worse than no URL.
+        assert_eq!(dialog.prompt(), crate::update::RELEASES_URL);
+        assert_eq!(dialog.buttons.len(), 1);
+        assert_eq!(dialog.command_at(0), None, "there is nothing to answer");
+    }
+
+    /// The start-up check arrives seconds in, with no regard for what is being
+    /// typed, so it says its piece on the status bar rather than taking the
+    /// keyboard for a message that has no answer.
+    #[test]
+    fn an_update_found_at_start_up_is_a_notification_and_not_a_dialog() {
+        let mut app = app();
+        execute_command(
+            &mut app,
+            checked(
+                false,
+                UpdateOutcome::Available {
+                    latest: "9.9.9".into(),
+                },
+            ),
+        );
+
+        assert!(app.dialog.is_none(), "nothing modal at start-up");
+        let said = &app.notifications.current().expect("a message").message;
+        assert!(said.contains("9.9.9"), "{said}");
+    }
+
+    /// A menu entry that says nothing when there is nothing to say is one the
+    /// user presses again to find out whether it worked.
+    #[test]
+    fn a_check_the_user_asked_for_answers_even_when_there_is_no_news() {
+        let mut app = app();
+        execute_command(&mut app, checked(true, UpdateOutcome::UpToDate));
+        let said = &app.notifications.current().expect("a message").message;
+        assert!(said.contains(crate::update::CURRENT), "{said}");
+
+        execute_command(
+            &mut app,
+            checked(true, UpdateOutcome::Failed("no network".into())),
+        );
+        let note = app.notifications.current().expect("a message");
+        assert_eq!(
+            note.kind,
+            crate::app::notifications::NotificationKind::Error
+        );
+        assert!(note.message.contains("no network"), "{}", note.message);
+    }
+
+    /// And one that ran by itself keeps quiet: a background request that
+    /// failed is not news, and reporting it every morning is how a status bar
+    /// becomes something to ignore.
+    #[test]
+    fn a_start_up_check_with_nothing_to_report_says_nothing() {
+        for outcome in [UpdateOutcome::UpToDate, UpdateOutcome::Failed("x".into())] {
+            let mut app = app();
+            execute_command(&mut app, checked(false, outcome));
+            assert!(app.notifications.current().is_none());
+            assert!(app.dialog.is_none());
+        }
+    }
+
+    /// The timestamp is what holds the start-up check to one a day, so it is
+    /// written whichever way the check went — a machine with no network must
+    /// not turn it into one per launch.
+    #[test]
+    fn every_answer_records_when_the_check_happened() {
+        for outcome in [
+            UpdateOutcome::UpToDate,
+            UpdateOutcome::Failed("no network".into()),
+            UpdateOutcome::Available {
+                latest: "9.9.9".into(),
+            },
+        ] {
+            let mut app = app();
+            assert_eq!(app.settings.last_update_check, None);
+            execute_command(&mut app, checked(false, outcome));
+            assert!(app.settings.last_update_check.is_some());
+        }
+    }
+
+    #[test]
+    fn the_start_up_check_is_switched_off_and_on_again_from_the_menu() {
+        let mut app = app();
+        assert!(app.settings.check_for_updates, "on out of the box");
+
+        execute_command(&mut app, Command::ToggleUpdateChecks);
+        assert!(!app.settings.check_for_updates);
+        assert_eq!(
+            app.notifications.current().map(|n| n.message.clone()),
+            Some("Update check at start-up off".to_string())
+        );
+
+        execute_command(&mut app, Command::ToggleUpdateChecks);
+        assert!(app.settings.check_for_updates);
+    }
+
+    /// Turning the start-up check off is a statement about what happens
+    /// without being asked, not a refusal to ever look — but a headless `App`
+    /// has no channel to answer on, and must not reach the network to find
+    /// that out.
+    #[test]
+    fn asking_for_a_check_with_nowhere_to_answer_does_nothing() {
+        let mut app = app();
+        assert!(app.events.is_none(), "a fixture spawns no threads");
+        execute_command(&mut app, Command::CheckForUpdates);
+        assert!(app.notifications.current().is_none());
+        assert!(app.dialog.is_none());
     }
 
     /// A stopped rebase is not finished by writing a commit here, so the

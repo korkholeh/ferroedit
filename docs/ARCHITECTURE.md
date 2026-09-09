@@ -18,6 +18,7 @@ filesystem/    → lazy tree, file IO
 git/           → GitService (subprocess), porcelain=v2 parser, worker thread
 syntax/        → syntect wrapper + per-line highlight cache
 config/        → TOML settings, theme
+update/        → the release check: one subprocess, one thread (ADR-065)
 commands/      → Command enum + execute()
 ```
 
@@ -63,6 +64,7 @@ src/
   git/       mod.rs service.rs parser.rs models.rs diff.rs worker.rs
   syntax/    mod.rs highlighter.rs cache.rs
   config/    mod.rs settings.rs
+  update/    mod.rs           # curl/wget → the newest release tag (ADR-065)
 ```
 
 ## 3. Event loop
@@ -73,7 +75,8 @@ workers can push results without polling gymnastics.
 ```
 [input thread]  crossterm::event::read()  ─┐
 [git worker]    command output            ─┼──► mpsc::Receiver<AppEvent> ──► handle_event
-[fs scanner]    directory listings        ─┘                                     │
+[fs scanner]    directory listings        ─┤
+[update check]  the newest release tag    ─┘                                     │
                                                                                  ▼
                                                                           execute_command
                                                                                  │

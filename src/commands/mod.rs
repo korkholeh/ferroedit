@@ -15,6 +15,7 @@ use crate::editor::cursor::Motion;
 use crate::editor::document::LineEnding;
 use crate::filesystem::watcher::FsChange;
 use crate::git::JobOutcome;
+use crate::update::UpdateCheck;
 
 /// An operation that needs a name or a path typed before it can run
 /// (SPEC §20, §40).
@@ -436,6 +437,17 @@ pub enum Command {
     /// The Help menu's About entry: a message dialog with the version in it.
     ShowAbout,
 
+    /// The Help menu's Check for Updates entry: asks GitHub now, and answers
+    /// either way because the user asked (SPEC §66, ADR-065).
+    CheckForUpdates,
+    /// Turns the start-up check on or off, and writes the choice to the
+    /// settings file. A request to a third party that the user did not make is
+    /// one they are entitled to stop.
+    ToggleUpdateChecks,
+    /// A finished check, arriving from its own thread through the same door
+    /// every other producer uses (ARCHITECTURE invariant 3).
+    UpdateCheckFinished(UpdateCheck),
+
     /// The Help menu's Shortcuts entry, and `F1`: the key tables on screen
     /// (SPEC §6). A pager, like the diff viewer, over `docs::sections()`.
     ShowHelp,
@@ -676,6 +688,11 @@ impl Command {
             Self::Save => "Save the active file".into(),
             Self::SetTheme(kind) => format!("Use the {} theme", kind.label()),
             Self::ShowAbout => "About FerroEdit".into(),
+            Self::CheckForUpdates => "Ask GitHub whether there is a newer release".into(),
+            Self::ToggleUpdateChecks => {
+                "Look for a new release at start-up, or stop looking".into()
+            }
+            Self::UpdateCheckFinished(_) => "Report what the update check found".into(),
 
             Self::ShowHelp => "Show the keyboard shortcuts".into(),
             Self::HelpClose => "Close the help screen".into(),
@@ -928,6 +945,12 @@ pub static MENUS: &[MenuDef] = &[
         items: &[
             item("Shortcuts", Command::ShowHelp),
             item("About", Command::ShowAbout),
+            SEP,
+            item("Check for Updates", Command::CheckForUpdates),
+            // A switch rather than a submenu: the entry runs the same command
+            // whichever way it is pointing, and the status bar says which way
+            // it went. The View menu's Word Wrap is the same shape.
+            item("Check on Start", Command::ToggleUpdateChecks),
         ],
     },
 ];
@@ -982,6 +1005,23 @@ mod tests {
                 "{} runs {:?}, which no menu offers",
                 binding.label,
                 binding.command
+            );
+        }
+    }
+
+    /// The update check has no key binding and never will — it is a network
+    /// request, not a keystroke — so the menu is the only way to reach it, and
+    /// the switch that turns it off has to be next to it (ADR-065).
+    #[test]
+    fn the_update_check_and_its_switch_are_both_on_the_help_menu() {
+        let help = MENUS
+            .iter()
+            .find(|menu| menu.title == "Help")
+            .expect("a Help menu");
+        for command in [Command::CheckForUpdates, Command::ToggleUpdateChecks] {
+            assert!(
+                help.entries().any(|item| item.command == command),
+                "no entry runs {command:?}"
             );
         }
     }

@@ -2195,3 +2195,67 @@ document's, which the text view goes back to — and they are deliberately not s
 block of cells has no honest text range, and pretending otherwise is what the first paragraph
 rejects. A parse that shrinks the table clamps the anchor with the cursor, so a selection can
 never outlive the rows it was made over.
+
+---
+
+## ADR-065: The update check shells out to curl, and the user can switch it off
+
+**Decision.** At start-up, when `check-for-updates` is on and the last check answered more
+than a day ago, a thread asks GitHub for the newest release tag and compares it with
+`CARGO_PKG_VERSION`. The answer travels back on the main loop's own `AppEvent` channel and
+becomes a `Command`, like every other background producer. A check the user asked for —
+*Help ▸ Check for Updates* — answers either way; the automatic one speaks only when there is
+a newer release, and then on the status bar rather than in a dialog. *Help ▸ Check on Start*
+turns the automatic one off, and the choice is written to `config.json` (SPEC §66).
+
+**Why no HTTP client.** `ureq` with rustls is the obvious answer and it is the wrong one
+here. It is roughly a megabyte of binary and a tree of crates — a TLS stack, a certificate
+store, an HTTP parser — carried by every build of an editor, to make one request a day whose
+answer is a version number. `install.sh` already requires `curl` or `wget` of the machine
+(ADR-060), so the editor is asking for nothing that was not needed to put it there, and
+shelling out keeps the static musl build exactly as it is (ADR-003). It is the same trade
+ADR-001 made for git: the subprocess is the dependency.
+
+**Why the redirect and not the API.** `github.com/…/releases/latest` answers a `HEAD` with a
+redirect to the tag, which is the whole question. `api.github.com` allows sixty
+unauthenticated calls an hour per address, and a shared NAT or a CI runner can have spent
+them on somebody else — an editor must not report that as its own failure. `wget` cannot
+report a redirect target usefully, so it falls back to the API and pays the quota; both
+halves are what `install.sh` settled on for the same reasons.
+
+**Why a notification and not a dialog at start-up.** The answer lands seconds after the first
+frame, with no regard for what is being typed. ADR-043 argued the *other* way about a file
+that changed on disk — there the editor genuinely has a question, so it asks it, and picks
+the default that cannot lose work. Here there is nothing to answer: the editor cannot install
+the release, so the box would exist only to be dismissed, and dismissing it costs the
+keystroke it interrupted. A check the user pressed for is different — they are waiting for
+it, and a message that expires in four seconds is not an answer to a question they asked.
+
+**Why a whole day, and why the timestamp is written on failure too.** A terminal editor is
+opened dozens of times a day. Checking per launch is dozens of requests for news that changes
+once a month, and it is the shape that runs into somebody else's rate limit. The timestamp is
+written whenever a check *answers* — including when the answer is "no network" — because
+otherwise a machine that is offline turns the daily check back into a per-launch one. It is
+written before anything is said, so a failure to write cannot land on the status bar on top
+of the answer the user was waiting for.
+
+**Why it is a setting at all.** Everything else the editor does happens on the user's own
+machine. This is a request to a third party that the user did not make, and one they are
+entitled to stop; a feature like that with no off switch is one that gets discovered in a
+packet capture. It is on by default because the alternative — a user on 0.1.0 who never finds
+out that 0.2.0 exists — is the problem the feature was added for, and because the request
+carries nothing beyond what any HTTP client sends.
+
+**Consequence.** The news is split across the box rather than written as one sentence: the
+title carries the version and the body carries the address. A message dialog is one line as
+wide as its longest part (ADR-019), and putting both halves in that line cut the URL in half
+on a sixty-column terminal — where the status bar, which has no box to size, carries the
+action instead and no address at all.
+
+`Settings::default` is written out rather than derived: `check_for_updates`
+is the first field whose default is not the zero value, and a derived `false` would have
+shipped the feature switched off for everyone who already has a config file. A tag that is
+not exactly `major.minor.patch` is reported as a check that failed rather than guessed at —
+GitHub's "latest" never points at a pre-release, so a suffix means something this build was
+not told about, and guessing which side of `0.2.0` an `rc.1` falls on is how an editor
+recommends a downgrade.

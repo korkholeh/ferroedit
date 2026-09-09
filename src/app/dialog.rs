@@ -829,6 +829,24 @@ impl DialogState {
         )
     }
 
+    /// Shown when a check the user asked for finds a newer release (ADR-065).
+    ///
+    /// One button, like About, because there is nothing here to answer: the
+    /// editor is a single binary that a script puts in place, and it cannot
+    /// replace itself. What the box owes the reader is the version and the
+    /// place to get it — so the news is the title and the address is the body,
+    /// which is the split that keeps the address whole. A message dialog is
+    /// one line wide enough for its longest part, and putting both in that one
+    /// line is what cut the URL in half on a sixty-column terminal.
+    pub fn update_available(latest: &str, return_focus: FocusTarget) -> Self {
+        Self::confirm(
+            &crate::update::headline(latest),
+            crate::update::RELEASES_URL.to_string(),
+            vec![DialogButton::new("OK", None)],
+            return_focus,
+        )
+    }
+
     fn confirm(
         title: &str,
         message: String,

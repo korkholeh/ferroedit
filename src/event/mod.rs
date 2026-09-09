@@ -11,6 +11,7 @@ use crossterm::event::{self as term, Event, KeyEvent, KeyEventKind, MouseEvent};
 
 use crate::filesystem::watcher::FsChange;
 use crate::git::JobOutcome;
+use crate::update::UpdateCheck;
 
 /// Everything the main loop can be woken by.
 ///
@@ -29,6 +30,10 @@ pub enum AppEvent {
     /// second non-terminal producer, and coalesced before it gets here: one of
     /// these is a burst of filesystem events, not a single write.
     FilesChanged(FsChange),
+    /// A finished update check (ADR-065): the third non-terminal producer, on
+    /// the same terms as the other two. It arrives once per check and may
+    /// never arrive at all, which is why nothing waits for it.
+    UpdateChecked(UpdateCheck),
 }
 
 /// Reads terminal events on a dedicated thread.

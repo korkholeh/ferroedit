@@ -16,6 +16,7 @@ mod git;
 mod syntax;
 mod terminal;
 mod ui;
+mod update;
 
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -122,6 +123,12 @@ fn run(cli: &Cli) -> Result<()> {
         }
     }
 
+    // Last of the three background producers to be started, and the only one
+    // the user can switch off: asking GitHub about a newer release is a
+    // request to a third party, so it is a setting and not a fact of running
+    // the editor (ADR-065). Nothing waits for the answer.
+    start_update_check(&app, &tx);
+
     spawn_input_thread(tx);
 
     let mut rects = LayoutRects::default();
@@ -189,6 +196,29 @@ fn run(cli: &Cli) -> Result<()> {
 
     log::info!("shutting down");
     Ok(())
+}
+
+/// Starts the start-up update check when the settings ask for one and the last
+/// one was long enough ago (ADR-065).
+///
+/// The decision is here rather than in `execute_command` because it is
+/// start-up wiring like the watcher above it: the *answer* goes back through
+/// the command door, which is what keeps the mutation in one place. The
+/// timestamp is written when the check answers, so a check that never returns
+/// leaves the next launch free to try again.
+fn start_update_check(app: &App, tx: &mpsc::Sender<AppEvent>) {
+    if !app.settings.check_for_updates {
+        log::info!("the update check is switched off");
+        return;
+    }
+    let Some(now) = update::now_secs() else {
+        return;
+    };
+    if !update::is_due(app.settings.last_update_check, now) {
+        log::debug!("the update check is not due yet");
+        return;
+    }
+    update::spawn(tx.clone(), false);
 }
 
 /// Mirrors the pane sizes onto `App` and scrolls the cursor back into view when
@@ -348,6 +378,8 @@ fn handle_event(app: &mut App, rects: &LayoutRects, event: AppEvent) {
         AppEvent::GitJob(outcome) => Some(Command::GitJobFinished(outcome)),
         // A coalesced burst of filesystem events, through the same door.
         AppEvent::FilesChanged(change) => Some(Command::ExternalChange(change)),
+        // And the update check's one answer, through it as well.
+        AppEvent::UpdateChecked(check) => Some(Command::UpdateCheckFinished(check)),
     };
 
     if let Some(command) = command {

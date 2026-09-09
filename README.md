@@ -46,6 +46,13 @@ make it writable, or install to your home and move the binary.
 Upgrading is the same line again: the new binary is renamed into place, so it works with
 the editor open. Uninstalling is `rm ~/.local/bin/ferroedit`.
 
+FerroEdit tells you when there is one to run: at start-up, at most once a day, it asks
+GitHub whether there is a newer release and says so on the status bar. *Help ▸ Check for
+Updates* asks now; *Help ▸ Check on Start* turns the automatic check off, and that choice
+lives in `~/.config/ferroedit/config.json` as `check-for-updates`. The request is made by
+the `curl` or `wget` already on the machine — the binary carries no HTTP client — and the
+editor never installs anything itself.
+
 ### Manually
 
 Download a build from [the latest release](https://github.com/korkholeh/ferroedit/releases/latest).
@@ -94,6 +101,8 @@ ferroedit +42 main.rs  # open a file at line 42
 ## Requirements
 
 - A terminal with mouse support (iTerm2, Ghostty, Terminal.app, kitty, tmux, …).
+- `curl` or `wget`, for the release check. Without either, the check says so and nothing
+  else changes.
 - The system `git` binary (2.23 or newer, for `git switch`), for the Git panel.
   FerroEdit ships no Git implementation
   of its own — your existing credentials, SSH config and commit signing keep working.
@@ -108,6 +117,7 @@ ferroedit +42 main.rs  # open a file at line 42
 - Search and replace, and Go to Line
 - Word wrap, or horizontal scrolling when it is off
 - Git: status, stage/unstage, commit, pull, push, branches, merge, diff
+- A release check that can be switched off, and never installs anything itself
 - One static binary, SSH-friendly
 
 ## Keyboard shortcuts

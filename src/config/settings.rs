@@ -73,7 +73,12 @@ impl ThemeKind {
 /// Everything the editor persists. `#[serde(default)]` is what lets the next
 /// field be added without invalidating the files already written — and what
 /// let word wrap join the theme here.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Default` is written out rather than derived from Phase 15 on: the update
+/// check is the first setting whose default is not the zero value, and a
+/// derived `false` there would have shipped the feature switched off for
+/// everybody who has a config file already.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct Settings {
     pub theme: ThemeKind,
@@ -85,6 +90,33 @@ pub struct Settings {
     /// for the file that was not — which is a choice the user makes per
     /// session and the editor then remembers.
     pub word_wrap: bool,
+    /// Whether the editor asks GitHub at start-up whether there is a newer
+    /// release (SPEC §66, ADR-065).
+    ///
+    /// On by default, because a user who installed a single binary with a
+    /// script has no package manager to tell them — and off in one menu entry,
+    /// because a request to a third party that the user did not make is
+    /// something they are entitled to stop. Nothing about the request
+    /// identifies them beyond what any HTTP client sends.
+    pub check_for_updates: bool,
+    /// When the last check answered, in seconds since the epoch, so a start-up
+    /// check happens at most once a day rather than once a launch.
+    ///
+    /// Bookkeeping rather than a preference — it is in this file because this
+    /// is the file the editor already writes, and a second one for a single
+    /// number would be a second path to explain.
+    pub last_update_check: Option<u64>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            theme: ThemeKind::default(),
+            word_wrap: false,
+            check_for_updates: true,
+            last_update_check: None,
+        }
+    }
 }
 
 impl Settings {
@@ -172,11 +204,37 @@ mod tests {
         let settings = Settings {
             theme: ThemeKind::Dark,
             word_wrap: true,
+            ..Settings::default()
         };
         settings.save_to(&path).unwrap();
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.contains("word-wrap"), "{text}");
         assert_eq!(Settings::load_from(&path), settings);
+    }
+
+    /// A file written by 0.1.x has no `check-for-updates` key in it, and the
+    /// derived `Default` would have read that absence as "switched off".
+    #[test]
+    fn the_update_check_is_on_until_the_user_turns_it_off() {
+        assert!(Settings::default().check_for_updates);
+        assert_eq!(Settings::default().last_update_check, None);
+
+        let old: Settings = serde_json::from_str(r#"{"theme": "light"}"#).unwrap();
+        assert!(old.check_for_updates, "an old config keeps the new default");
+        assert_eq!(old.theme, ThemeKind::Light);
+    }
+
+    #[test]
+    fn the_update_check_round_trips_through_the_file_format() {
+        let settings = Settings {
+            check_for_updates: false,
+            last_update_check: Some(1_700_000_000),
+            ..Settings::default()
+        };
+        let text = serde_json::to_string(&settings).unwrap();
+        assert!(text.contains("check-for-updates"), "{text}");
+        assert!(text.contains("last-update-check"), "{text}");
+        assert_eq!(serde_json::from_str::<Settings>(&text).unwrap(), settings);
     }
 
     #[test]

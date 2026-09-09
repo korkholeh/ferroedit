@@ -12,6 +12,21 @@ version, so that heading becomes the new version's on the way out (see
 
 Nothing yet.
 
+## [0.1.4] — 2026-09-09
+
+### Added
+
+- **A check for new releases.** At start-up — at most once a day — FerroEdit asks
+  GitHub whether there is a release newer than the running build, and names it on
+  the status bar. *Help ▸ Check for Updates* asks now and answers either way, in
+  a dialog with the releases address in it; *Help ▸ Check on Start* turns the
+  automatic check off, and the choice is kept in
+  `~/.config/ferroedit/config.json` as `check-for-updates`.
+- The request is made by `curl` or `wget` — the ones `install.sh` already needs —
+  so the binary carries no HTTP client and the static musl builds are unchanged.
+  Nothing beyond an ordinary HTTP request leaves the machine, and the editor
+  never installs anything itself.
+
 ## [0.1.3] — 2026-09-09
 
 ### Added
@@ -68,7 +83,8 @@ The first release: the editor through Phase 14.
   the help screen, and a quit that asks about each unsaved file in turn.
 - Releases are GitHub Releases, built for four targets.
 
-[Unreleased]: https://github.com/korkholeh/ferroedit/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/korkholeh/ferroedit/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/korkholeh/ferroedit/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/korkholeh/ferroedit/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/korkholeh/ferroedit/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/korkholeh/ferroedit/compare/v0.1.0...v0.1.1

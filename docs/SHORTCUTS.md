@@ -295,6 +295,8 @@ Every item is a command, and the *Shortcut* column is the same lookup the menu i
 | Git | Diff | `d` | Git panel |
 | Help | Shortcuts | `F1` | anywhere |
 | Help | About | — | — |
+| Help | Check for Updates | — | — |
+| Help | Check on Start | — | — |
 
 ## Mouse
 
