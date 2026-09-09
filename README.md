@@ -127,6 +127,11 @@ cargo test --all-features
 
 ### Cutting a release
 
+Before the bump, close the **Unreleased** section of [CHANGELOG.md](CHANGELOG.md): retitle
+it as the version being cut with the date, add the compare link at the foot, and open a
+fresh empty **Unreleased** above it. The changelog is what a user reads to decide whether
+to upgrade, so a version that ships without its entry ships blind.
+
 `scripts/release.sh` bumps the version in `Cargo.toml`, refreshes `Cargo.lock`, runs the
 three commands above and then commits and tags. It pushes nothing: everything it does is
 undoable with `git reset` and `git tag -d`, and the push is the first step that is not.
@@ -141,7 +146,7 @@ Pushing the tag starts [`release.yml`](.github/workflows/release.yml), which dra
 GitHub Release, builds the four targets, attaches a tarball and a checksum for each, and
 publishes only once all four are in.
 
-Docs: [ARCHITECTURE](docs/ARCHITECTURE.md) · [PLAN](docs/PLAN.md) ·
+Docs: [CHANGELOG](CHANGELOG.md) · [ARCHITECTURE](docs/ARCHITECTURE.md) · [PLAN](docs/PLAN.md) ·
 [ROADMAP](docs/ROADMAP.md) · [PROGRESS](docs/PROGRESS.md) ·
 [DECISIONS](docs/DECISIONS.md)
 
