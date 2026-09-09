@@ -96,14 +96,27 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             if active == Some(row.path.as_path()) {
                 name_style = name_style.add_modifier(Modifier::BOLD);
             }
+            let selected = index == app.sidebar.selected;
+            let selection = selection_style(theme, focused);
+            if selected {
+                // A span's own foreground wins over the line's, so a row drawn
+                // on the selection has to be *told* the selection's text
+                // colour: the light theme paints directories in the same blue
+                // it highlights with, and the name vanished into its own
+                // background. A selection with no colour of its own — the
+                // unfocused one — leaves the name the colour it had.
+                if let Some(fg) = selection.fg {
+                    name_style = name_style.fg(fg);
+                }
+            }
             let line = Line::from(vec![
                 // One column of padding, then two per nesting level.
                 Span::raw(" ".repeat(1 + row.depth as usize * 2)),
-                Span::raw(marker),
+                Span::styled(marker, name_style),
                 Span::styled(row.name.clone(), name_style),
             ]);
-            if index == app.sidebar.selected {
-                line.style(selection_style(theme, focused))
+            if selected {
+                line.style(selection)
             } else {
                 line
             }
@@ -132,6 +145,59 @@ mod tests {
     fn the_title_names_the_pane_and_the_folder() {
         let app = App::fixture();
         assert_eq!(title(&app, 40), " Files — ferroedit-test ");
+    }
+
+    /// A selected row's name is drawn in the selection's own text colour, not
+    /// in the colour it wears on the ground.
+    ///
+    /// The light theme highlights in the same blue it paints directories in,
+    /// and a span's foreground wins over the line's: the selected folder was
+    /// its own background, and all that was left of the row was the ▼.
+    #[test]
+    fn a_selected_row_is_not_drawn_in_the_colour_under_it() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        let mut app = App::fixture_in(dir.path());
+        app.focus = FocusTarget::Explorer;
+        app.sidebar.selected = app
+            .sidebar
+            .rows()
+            .iter()
+            .position(|row| row.name == "src")
+            .expect("the folder is in the tree");
+
+        for kind in crate::config::ThemeKind::ALL.iter().copied() {
+            let theme = Theme::new(kind);
+            let mut terminal = Terminal::new(TestBackend::new(30, 10)).unwrap();
+            terminal
+                .draw(|frame| render(frame, &app, frame.area(), &theme))
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            let row = (0..10)
+                .find(|y| {
+                    (0..30)
+                        .map(|x| buffer[(x, *y)].symbol())
+                        .collect::<String>()
+                        .contains("src")
+                })
+                .expect("the selected folder is on screen");
+            for x in 0..30 {
+                let cell = &buffer[(x, row)];
+                if cell.symbol().trim().is_empty() {
+                    continue;
+                }
+                assert_ne!(
+                    cell.fg,
+                    cell.bg,
+                    "{}: {:?} at {x} is invisible on the selection",
+                    kind.label(),
+                    cell.symbol()
+                );
+            }
+        }
     }
 
     /// A sidebar too narrow for both keeps "Files" and cuts the folder name

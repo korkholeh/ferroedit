@@ -180,8 +180,11 @@ rows (ADR-020), the confirm button is right there and choosing a branch by accid
 checkout. The Open browser is the exception: a click on the row that is *already* \
 selected walks into it, so browsing costs one click a step, and the wheel over its rows \
 moves the selection through them (ADR-051). Clicking in the editor places the cursor, dragging selects, and a double-click selects \
-the word under the pointer. The wheel scrolls the pane under the pointer without moving \
-the cursor. Clicking a tab switches to it; clicking its `×`, or middle-clicking it, \
+the word under the pointer. Over a table (SPEC §65) a click selects the cell instead, dragging selects a block of \
+cells, a click on a column's name takes the whole column and one on a record's number \
+takes the whole record; clicking away from a cell being typed into saves it, and the \
+wheel scrolls the grid while `Shift`+wheel moves it sideways. The wheel scrolls the pane \
+under the pointer without moving the cursor. Clicking a tab switches to it; clicking its `×`, or middle-clicking it, \
 closes it. When there are more tabs than fit, the wheel over the tab strip scrolls it \
 sideways and its `‹` and `›` arrows step it one tab at a time. Clicking a row in the explorer opens the file or folds the directory in one \
 click (ADR-020). Clicking a row of the find bar puts the caret in that row's field, and \
@@ -189,7 +192,8 @@ its `[Aa]`, `[Replace]` and `[All]` are clickable — the fallback for terminals
 swallow `Alt`. On the status bar, most of the right-hand readout is questions \
 (ADR-058): `Ln 12, Col 8` opens Go to Line, the charset name the encoding picker \
 (ADR-059), `LF` / `CRLF` the line-ending picker, the grammar's name the syntax picker, \
-and the branch name the branch picker. Each is a menu entry too, so none of them needs a \
+the branch name the branch picker, and — while a table is showing — `Delim` and `Quote` \
+the two pickers that say how the file is split into columns. Each is a menu entry too, so none of them needs a \
 mouse. What is left — the notification, the focus label, the selection count — reports \
 where you already are and stays inert.
 ";

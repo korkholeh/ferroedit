@@ -49,7 +49,7 @@ fn render_find_row(
     let count_style = if app.search.matches.is_empty() && !app.search.query.value.is_empty() {
         theme.search_bar.fg(theme.warning)
     } else {
-        theme.search_bar.fg(theme.dim)
+        theme.search_bar.fg(theme.chrome_dim)
     };
     if rects.count.width > 0 {
         frame.render_widget(

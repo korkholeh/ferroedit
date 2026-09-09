@@ -10,13 +10,17 @@ use crate::app::git::NotStarted;
 use crate::app::help::HelpState;
 use crate::app::input_field::InputField;
 use crate::app::search::SearchField;
+use crate::app::table::{CellEditor, CellStep, TableView};
 use crate::app::tabs::{active_after_close, Stale, TabItem};
 use crate::app::{App, LastClick, SidebarMode};
 use crate::commands::{Command, FileOp, MenuEntry, MENUS};
 use crate::config::ThemeKind;
 use crate::editor::charset::Charset;
-use crate::editor::coords::VisualCol;
+use crate::editor::coords::{CharIdx, VisualCol};
+use crate::editor::csv::{Dialect, Record, WriteError};
+use crate::editor::cursor::Motion;
 use crate::editor::document::{DiskState, Document, LineEnding};
+use crate::editor::search::Match;
 use crate::editor::wrap;
 use crate::filesystem;
 use crate::filesystem::watcher::FsChange;
@@ -174,6 +178,9 @@ pub fn execute_command(app: &mut App, command: Command) {
         }
         Command::KeepBuffer(index) => keep_buffer(app, index),
 
+        Command::ScrollEditor(delta) if showing_table(app) => {
+            execute_command(app, Command::ScrollTable(delta));
+        }
         Command::ScrollEditor(delta) => scroll_editor(app, delta),
         Command::ToggleWordWrap => toggle_word_wrap(app),
         Command::GotoLinePrompt => prompt_goto_line(app),
@@ -191,8 +198,66 @@ pub fn execute_command(app: &mut App, command: Command) {
         Command::ConvertEncoding(name) => convert_encoding(app, &name),
         Command::LanguagePrompt => prompt_language(app),
         Command::SetLanguage(name) => set_language(app, &name),
+
+        Command::ToggleTableView => toggle_table_view(app),
+        Command::CsvDelimiterPrompt => prompt_csv(app, true),
+        Command::CsvQuotePrompt => prompt_csv(app, false),
+        Command::SetCsvDelimiter(delimiter) => {
+            set_dialect(app, |dialect| Dialect {
+                delimiter,
+                ..dialect
+            });
+        }
+        Command::SetCsvQuote(quote) => set_dialect(app, |dialect| Dialect { quote, ..dialect }),
+        Command::ScrollTable(delta) => {
+            let height = table_rows(app);
+            if let Some(view) = table_mut(app) {
+                view.scroll_by(delta as isize, height);
+            }
+        }
+        Command::ScrollTableHorizontal(delta) => {
+            if let Some(view) = table_mut(app) {
+                view.scroll_columns(delta as isize);
+            }
+        }
+        Command::SelectCell { row, column } => select_cell(app, row, column),
+        Command::ExtendCellTo { row, column } => extend_to_cell(app, row, column),
+        Command::SelectRowAt { row } => {
+            select_cell(app, row, 0);
+            select_in_table(app, true);
+        }
+        Command::SelectColumnAt { column } => {
+            select_cell(app, None, column);
+            select_in_table(app, false);
+        }
+        Command::SelectRow => select_in_table(app, true),
+        Command::SelectColumn => select_in_table(app, false),
+        Command::EditCell => begin_cell_edit(app, None),
+        Command::InsertRecord => insert_record(app),
+        Command::DeleteRecord => delete_record(app),
         Command::ScrollEditorHorizontal(delta) => scroll_editor_columns(app, delta),
 
+        // Everything a grid does with a key the text view uses for the same
+        // thing, routed here rather than refused: the pane is a table, so the
+        // keys are the table's (SPEC §65, ADR-063).
+        Command::MoveCursor(motion) if showing_table(app) => move_in_table(app, motion),
+        Command::ExtendSelection(motion) if showing_table(app) => extend_in_table(app, motion),
+        Command::SelectAll if showing_table(app) => {
+            if let Some(view) = table_mut(app) {
+                view.select_all();
+            }
+        }
+        Command::InsertChar(ch) if showing_table(app) => type_in_cell(app, ch),
+        Command::InsertText(text) if showing_table(app) => paste_in_cell(app, &text),
+        Command::InsertNewline if showing_table(app) => edit_or_commit(app),
+        Command::Backspace if showing_table(app) => backspace_in_cell(app),
+        Command::Delete if showing_table(app) => delete_in_cell(app),
+        Command::DeleteLine if showing_table(app) => delete_record(app),
+        Command::Copy if showing_table(app) => copy_cell(app, false),
+        Command::Cut if showing_table(app) => copy_cell(app, true),
+        // `Esc` closes the find bar in the editor, and a cell being typed into
+        // is the nearer of the two things it could be closing.
+        Command::SearchClose if editing_cell(app) => cancel_cell(app),
         Command::MoveCursor(motion) => {
             laid_out(app, |document: &mut Document, layout| {
                 document.move_cursor(motion, layout)
@@ -225,6 +290,7 @@ pub fn execute_command(app: &mut App, command: Command) {
         Command::InsertNewline => edit(app, Document::insert_newline),
         Command::Backspace => edit(app, Document::backspace),
         Command::Delete => edit(app, Document::delete),
+        Command::DeleteLine => edit(app, Document::delete_line),
 
         Command::DialogListMove(delta) => {
             let height = list_height(app);
@@ -473,6 +539,9 @@ fn step_tab(app: &mut App, delta: i16) {
 /// visible after acting on it" is one rule in one place rather than a line
 /// repeated in a dozen match arms.
 fn edit(app: &mut App, operation: impl FnOnce(&mut Document)) {
+    if refuse_in_table(app) {
+        return;
+    }
     let view = app.text_view();
     let Some(tab) = app.active_mut() else { return };
     operation(&mut tab.document);
@@ -775,6 +844,635 @@ fn set_language(app: &mut App, name: &str) {
         .info(format!("Highlighting as {}", syntax.name));
 }
 
+// --- the CSV view (SPEC §65, ADR-062) ---------------------------------------
+
+/// The active tab's table, when the pane in front is showing one.
+fn table_mut(app: &mut App) -> Option<&mut TableView> {
+    app.active_mut()?.table.as_mut()
+}
+
+/// Whether the pane in front is a table rather than text.
+///
+/// The one question the editing commands ask: a table is a parse of the buffer
+/// with nowhere in it to put a caret, so everything that moves one or changes
+/// the text is refused while it is showing.
+fn showing_table(app: &App) -> bool {
+    app.active().is_some_and(|tab| tab.shows_table())
+}
+
+/// Whether a cell is being typed into right now.
+fn editing_cell(app: &App) -> bool {
+    app.active()
+        .and_then(|tab| tab.table.as_ref())
+        .is_some_and(TableView::is_editing)
+}
+
+/// Says why a command that works on text did nothing over a grid, and whether
+/// it did.
+///
+/// The commands that have a meaning in a table are routed to it instead (SPEC
+/// §65); what is left here is the handful that act on a *range* of the text —
+/// Select All, Replace — and have nothing to act on while the pane is showing
+/// records. The message is the way out as well as the reason: it names the key
+/// that puts the text back.
+fn refuse_in_table(app: &mut App) -> bool {
+    if !showing_table(app) {
+        return false;
+    }
+    app.notifications
+        .info("That works on the text — F4 shows it");
+    true
+}
+
+/// Data rows the table pane could show in the last drawn frame.
+fn table_rows(app: &App) -> usize {
+    TableView::pane_rows(app.editor_view.height as usize)
+}
+
+/// Cells the table pane has for its columns, once the row numbers have theirs.
+fn table_width(app: &App) -> usize {
+    let gutter = app
+        .active()
+        .and_then(|tab| tab.table.as_ref())
+        .map_or(0, TableView::gutter);
+    (app.editor_view.width as usize).saturating_sub(gutter)
+}
+
+/// Swaps the pane between the text and the table (SPEC §65).
+fn toggle_table_view(app: &mut App) {
+    let Some(tab) = app.active_mut() else {
+        app.notifications.warning("No file open");
+        return;
+    };
+    tab.toggle_table();
+    let showing = tab.shows_table();
+    // The table is parsed on the next frame's `sync_table`, so what is said
+    // here is what the pane is about to be and not what it holds.
+    if showing {
+        app.notifications.info("Table view — F4 shows the text");
+    } else {
+        app.notifications.info("Text view");
+    }
+}
+
+/// Opens the delimiter or the quote picker.
+///
+/// Both refuse over a file that is not being read as a table: the pickers
+/// change how a table is parsed, and the answer to "what separates the columns"
+/// of a file with no columns on screen is not one the user can check.
+fn prompt_csv(app: &mut App, delimiter: bool) {
+    let Some(dialect) = app
+        .active()
+        .and_then(|tab| tab.table.as_ref())
+        .map(|t| t.dialect)
+    else {
+        app.notifications
+            .warning("Not a table — View → Table View shows one");
+        return;
+    };
+    let return_focus = dialog_return_focus(app);
+    let dialog = if delimiter {
+        DialogState::csv_delimiter(dialect, return_focus)
+    } else {
+        DialogState::csv_quote(dialect, return_focus)
+    };
+    open_dialog(app, dialog);
+}
+
+/// Re-reads the table with one part of its dialect changed.
+///
+/// Nothing on disk changes and nothing in the buffer does: this is how the same
+/// bytes are divided, which is why it acts on the chosen row rather than asking
+/// again the way the encoding does (ADR-062).
+fn set_dialect(app: &mut App, change: impl FnOnce(Dialect) -> Dialect) {
+    let Some(view) = table_mut(app) else {
+        app.notifications.warning("Not a table");
+        return;
+    };
+    let dialect = change(view.dialect);
+    view.set_dialect(dialect);
+    // The parse happens on the next frame; what is said is what was chosen.
+    app.notifications.info(format!(
+        "Columns split on {}, quoted with {}",
+        dialect.delimiter_label(),
+        dialect.quote_label()
+    ));
+}
+
+/// Moves the selected cell, and the window with it.
+fn move_cell(app: &mut App, rows: isize, columns: isize) {
+    let height = table_rows(app);
+    let width = table_width(app);
+    let Some(view) = table_mut(app) else { return };
+    if rows != 0 {
+        view.move_row(rows, height);
+    }
+    if columns != 0 {
+        view.move_column(columns, width);
+    }
+}
+
+/// Selects the cell a click landed on: a row of the drawn window, and a column
+/// of the whole table, both worked out by `ui::table` from the frame it drew.
+fn select_cell(app: &mut App, row: Option<usize>, column: usize) {
+    focus_pane(app, FocusTarget::Editor);
+    // Clicking away from a cell that is being typed into saves it, which is
+    // what clicking away from one does in a grid.
+    if editing_cell(app) {
+        commit_cell(app, CellStep::Stay);
+    }
+    if let Some(view) = table_mut(app) {
+        view.clear_selection();
+    }
+    place_cell(app, row, column);
+}
+
+/// The drag that makes a block of cells: the same movement, with the selection
+/// kept open behind it (SPEC §65).
+fn extend_to_cell(app: &mut App, row: Option<usize>, column: usize) {
+    if let Some(view) = table_mut(app) {
+        view.anchor_here();
+    }
+    place_cell(app, row, column);
+}
+
+/// Puts the cursor on a cell of the drawn window, and brings the window with it.
+fn place_cell(app: &mut App, row: Option<usize>, column: usize) {
+    let height = table_rows(app);
+    let width = table_width(app);
+    let Some(view) = table_mut(app) else { return };
+    view.on_header = row.is_none();
+    if let Some(row) = row {
+        view.row = (view.scroll + row).min(view.table.len().saturating_sub(1));
+    }
+    view.column = column.min(view.table.columns().saturating_sub(1));
+    view.follow_row(height);
+    view.follow_column(width);
+}
+
+/// Selects the whole record the cursor is on, or the whole column.
+fn select_in_table(app: &mut App, record: bool) {
+    if table_mut(app).is_none() {
+        app.notifications
+            .warning("Not a table — View → Table View shows one");
+        return;
+    }
+    let height = table_rows(app);
+    let width = table_width(app);
+    let Some(view) = table_mut(app) else { return };
+    if record {
+        view.select_record();
+    } else {
+        view.select_column();
+    }
+    // The far end of a wide row is off screen, so the window follows the cell
+    // the cursor ended on, exactly as it does for a move.
+    view.follow_row(height);
+    view.follow_column(width);
+}
+
+/// The table's answer to a motion key (SPEC §65).
+///
+/// The grid borrows the editor's keys rather than binding its own: `Down` is a
+/// row down whether the pane is showing text or a table, and a second keymap
+/// for the same pane would be a second thing to document and to learn.
+fn move_in_table(app: &mut App, motion: Motion) {
+    // While a cell is being typed into, the keys that move along a line move
+    // along the value; the ones that would leave the cell save it first, which
+    // is what leaving a cell means in a grid.
+    if editing_cell(app) {
+        match motion {
+            Motion::Left | Motion::WordLeft => step_in_cell(app, -1),
+            Motion::Right | Motion::WordRight => step_in_cell(app, 1),
+            Motion::Home => {
+                if let Some(editor) = cell_editor(app) {
+                    editor.field.home();
+                }
+            }
+            Motion::End => {
+                if let Some(editor) = cell_editor(app) {
+                    editor.field.end();
+                }
+            }
+            _ => {
+                commit_cell(app, CellStep::Stay);
+                move_in_table(app, motion);
+            }
+        }
+        return;
+    }
+    if let Some(view) = table_mut(app) {
+        view.clear_selection();
+    }
+    apply_motion(app, motion);
+}
+
+/// A shifted motion key: the same movement with the selection left open, which
+/// is what makes a block of cells (SPEC §65).
+fn extend_in_table(app: &mut App, motion: Motion) {
+    // Inside a cell being typed into there is nothing to select but text, and
+    // the field has no selection of its own: the key moves the caret.
+    if editing_cell(app) {
+        move_in_table(app, motion);
+        return;
+    }
+    if let Some(view) = table_mut(app) {
+        view.anchor_here();
+    }
+    apply_motion(app, motion);
+}
+
+/// Where a motion key takes the cursor in a grid, selection or no selection.
+fn apply_motion(app: &mut App, motion: Motion) {
+    let height = table_rows(app);
+    let page = height.max(1) as isize;
+    match motion {
+        Motion::Left | Motion::WordLeft => move_cell(app, 0, -1),
+        Motion::Right | Motion::WordRight => move_cell(app, 0, 1),
+        Motion::Up => move_cell(app, -1, 0),
+        Motion::Down => move_cell(app, 1, 0),
+        Motion::PageUp => move_cell(app, -page, 0),
+        Motion::PageDown => move_cell(app, page, 0),
+        // `Home` and `End` are the row's ends here, as they are the line's in
+        // the text: the first and the last column.
+        Motion::Home => move_cell(app, 0, -(isize::MAX / 2)),
+        Motion::End => move_cell(app, 0, isize::MAX / 2),
+        Motion::DocumentStart => {
+            if let Some(view) = table_mut(app) {
+                view.home();
+            }
+        }
+        Motion::DocumentEnd => {
+            if let Some(view) = table_mut(app) {
+                view.end(height);
+            }
+        }
+    }
+}
+
+// --- editing a cell (SPEC §65, ADR-063) -------------------------------------
+
+/// The cell being typed into, when one is.
+fn cell_editor(app: &mut App) -> Option<&mut CellEditor> {
+    table_mut(app)?.editor.as_mut()
+}
+
+fn step_in_cell(app: &mut App, delta: i16) {
+    if let Some(editor) = cell_editor(app) {
+        editor.field.step(delta);
+    }
+}
+
+/// Says why a cell could not be written, in the terms the user is looking at.
+fn say_write_error(app: &mut App, error: WriteError) {
+    app.notifications.warning(match error {
+        WriteError::Multiline => "This value runs across lines — F4 edits it as text",
+        WriteError::Unquotable => "A field cannot hold the delimiter while quoting is off",
+        WriteError::NoRecord => "There is no cell here",
+    });
+}
+
+/// Whether the selected cell can take an edit at all.
+///
+/// Asked before the typing rather than after it: a refusal that arrived when
+/// the value was already typed would be the grid taking the work and then
+/// throwing it away.
+fn writable_cell(app: &App) -> Result<(), WriteError> {
+    let view = app
+        .active()
+        .and_then(|tab| tab.table.as_ref())
+        .ok_or(WriteError::NoRecord)?;
+    let value = view.value().to_string();
+    view.table
+        .write(view.dialect, view.record(), view.column, &value)
+        .map(|_| ())
+}
+
+/// Opens the selected cell for typing (SPEC §65).
+///
+/// `seed` is the character that opened it, when a keystroke did: typing over a
+/// cell replaces what is in it, as it does in a spreadsheet, while `Enter` and
+/// `F2` open the value that is there to be corrected.
+fn begin_cell_edit(app: &mut App, seed: Option<char>) {
+    if !showing_table(app) {
+        app.notifications
+            .warning("Not a table — View → Table View shows one");
+        return;
+    }
+    if let Err(error) = writable_cell(app) {
+        say_write_error(app, error);
+        return;
+    }
+    let Some(view) = table_mut(app) else { return };
+    match seed {
+        Some(ch) => {
+            view.begin_edit("");
+            if let Some(editor) = view.editor.as_mut() {
+                editor.field.insert(ch);
+            }
+        }
+        None => {
+            let value = view.value().to_string();
+            view.begin_edit(&value);
+        }
+    }
+}
+
+/// `Enter` over a grid: it opens a cell, and it closes the one it opened.
+fn edit_or_commit(app: &mut App) {
+    if editing_cell(app) {
+        commit_cell(app, CellStep::Down);
+    } else {
+        begin_cell_edit(app, None);
+    }
+}
+
+/// Writes what was typed back into the file, and moves on.
+fn commit_cell(app: &mut App, step: CellStep) {
+    let Some(view) = table_mut(app) else { return };
+    let Some(editor) = view.editor.take() else {
+        return;
+    };
+    write_cell(app, editor.record, editor.column, &editor.field.value);
+    match step {
+        CellStep::Stay => {}
+        CellStep::Down => move_cell(app, 1, 0),
+        CellStep::Right => move_cell(app, 0, 1),
+    }
+}
+
+/// Throws away what was typed, or — when nothing was — closes the find bar,
+/// which is what `Esc` does in the editor otherwise.
+fn cancel_cell(app: &mut App) {
+    let cancelled = table_mut(app).is_some_and(TableView::cancel_edit);
+    if !cancelled {
+        close_search(app);
+    }
+}
+
+/// A printable character over a grid.
+fn type_in_cell(app: &mut App, ch: char) {
+    // `Tab` is the grid's own key — the next column — and there is nothing in a
+    // cell for a literal tab to indent.
+    if ch == '\t' {
+        if editing_cell(app) {
+            commit_cell(app, CellStep::Right);
+        } else {
+            move_cell(app, 0, 1);
+        }
+        return;
+    }
+    if let Some(editor) = cell_editor(app) {
+        editor.field.insert(ch);
+        return;
+    }
+    begin_cell_edit(app, Some(ch));
+}
+
+/// `Backspace` and `Delete`: a character of the cell being typed into, or the
+/// whole value of a cell that is not — which is what those keys do to a
+/// selected cell in a grid.
+fn backspace_in_cell(app: &mut App) {
+    match cell_editor(app) {
+        Some(editor) => editor.field.backspace(),
+        None => clear_cells(app),
+    }
+}
+
+fn delete_in_cell(app: &mut App) {
+    match cell_editor(app) {
+        Some(editor) => editor.field.delete(),
+        None => clear_cells(app),
+    }
+}
+
+/// Empties every selected cell, as one undo step.
+///
+/// One `replace_matches` rather than a write per cell: clearing a block is one
+/// action, and an undo that took it back a cell at a time would be the grid
+/// making the user press `Ctrl+Z` once per column (SPEC §23).
+fn clear_cells(app: &mut App) {
+    let hits = {
+        let Some(view) = app.active().and_then(|tab| tab.table.as_ref()) else {
+            return;
+        };
+        let mut hits = Vec::new();
+        for (record, column) in view.selected_cells() {
+            // A cell a ragged row stops short of is already empty; there is
+            // nothing in the buffer to take out.
+            let Some(span) = view.table.span(record, column) else {
+                continue;
+            };
+            if !span.single_line() {
+                return say_write_error(app, WriteError::Multiline);
+            }
+            if view.table.field(record, column).is_empty() {
+                continue;
+            }
+            hits.push(Match {
+                line: span.start.line,
+                start: CharIdx(span.start.col),
+                end: CharIdx(span.end.col),
+            });
+        }
+        hits
+    };
+    if hits.is_empty() {
+        return;
+    }
+    let Some(tab) = app.active_mut() else { return };
+    tab.document.replace_matches(&hits, "");
+    tab.sync_table();
+}
+
+/// What the selected cells put on the clipboard.
+///
+/// One cell is its value, exactly as it is on screen. A block is written in the
+/// file's own dialect — every value rendered back into a field, joined by the
+/// delimiter and by newlines — so what is copied out of a table pastes back
+/// into a table, into the text view, or into another program as the rows and
+/// columns it was.
+fn selected_text(view: &TableView) -> String {
+    let Some(range) = view.selection().filter(|range| range.is_range()) else {
+        return view.value().to_string();
+    };
+    let delimiter = view.dialect.delimiter.to_string();
+    (range.first_record..=range.last_record)
+        .map(|record| {
+            let record = view.record_at(record);
+            (range.first_column..=range.last_column)
+                .map(|column| {
+                    let value = view.table.field(record, column);
+                    view.dialect
+                        .render_field(value)
+                        .unwrap_or_else(|| value.to_string())
+                })
+                .collect::<Vec<_>>()
+                .join(&delimiter)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A paste over a grid goes into one cell.
+///
+/// Text with a line break in it is refused rather than flattened: the lines of
+/// a pasted block are records, and putting them all in one cell or silently
+/// joining them would both be a guess about which was meant. The text view
+/// takes it whole.
+fn paste_in_cell(app: &mut App, text: &str) {
+    if text.contains(['\n', '\r']) {
+        app.notifications
+            .warning("Paste with line breaks needs the text — F4 shows it");
+        return;
+    }
+    if let Some(editor) = cell_editor(app) {
+        editor.field.insert_str(text);
+        return;
+    }
+    let Some((record, column)) = selected_cell(app) else {
+        return;
+    };
+    write_cell(app, record, column, text);
+}
+
+/// `Ctrl+C` and `Ctrl+X` over a grid act on the cell.
+///
+/// The value, not the raw field: what is on the clipboard is what was on
+/// screen, with the quoting undone — which is what makes it paste into another
+/// cell, or into another program, as the thing the user was looking at.
+fn copy_cell(app: &mut App, cut: bool) {
+    let Some(value) = app
+        .active()
+        .and_then(|tab| tab.table.as_ref())
+        .map(selected_text)
+    else {
+        return;
+    };
+    let outcome = app.clipboard.set(&value);
+    if cut {
+        clear_cells(app);
+    }
+    match outcome {
+        Ok(()) => {
+            let verb = if cut { "Cut" } else { "Copied" };
+            app.notifications
+                .info(format!("{verb} {} characters", value.chars().count()));
+        }
+        Err(err) => {
+            log::warn!("clipboard write failed: {err}");
+            app.notifications
+                .warning(format!("Copied to the internal clipboard only: {err}"));
+        }
+    }
+}
+
+/// Adds a blank record under the selected one, and moves onto it (SPEC §65).
+///
+/// Blank is the delimiters and nothing between them: a row of a four-column
+/// table is three commas, so the new row stands under the header as four empty
+/// cells rather than as one.
+fn insert_record(app: &mut App) {
+    let Some(view) = app.active().and_then(|tab| tab.table.as_ref()) else {
+        app.notifications
+            .warning("Not a table — View → Table View shows one");
+        return;
+    };
+    let blank = view.table.blank_record(view.dialect);
+    // Under the *last* line of the record, which is not its first when a quoted
+    // field carried it across a line break.
+    let after = view.table.lines(view.record()).map(|(_, last)| last);
+    let target = if view.on_header { 0 } else { view.row + 1 };
+    let Some(tab) = app.active_mut() else { return };
+    tab.table.as_mut().map(TableView::cancel_edit);
+    let line = after.map_or(tab.document.line_count(), |last| last + 1);
+    insert_line(&mut tab.document, line, &blank);
+    tab.sync_table();
+    let height = table_rows(app);
+    if let Some(view) = table_mut(app) {
+        view.on_header = false;
+        view.row = target.min(view.table.len().saturating_sub(1));
+        view.follow_row(height);
+    }
+}
+
+/// Puts a whole line into the document before `line`, or at the end of it.
+fn insert_line(document: &mut Document, line: usize, text: &str) {
+    if line < document.line_count() {
+        document.place_cursor(line, VisualCol(0));
+        document.insert_text(&format!("{text}\n"));
+    } else {
+        // Past the end: the file has no trailing newline, so the new line takes
+        // one of its own with it rather than leaving the last two joined.
+        let last = document.line_count().saturating_sub(1);
+        document.place_cursor(last, VisualCol(usize::MAX));
+        document.insert_text(&format!("\n{text}"));
+    }
+}
+
+/// Removes the selected record from the file (SPEC §65).
+///
+/// Whole lines through `Document::delete_line`, so a record that runs across
+/// lines goes in one piece and the last line of a buffer is handled the one way
+/// the editor already handles it — and so it is one undo step.
+fn delete_record(app: &mut App) {
+    let Some(view) = app.active().and_then(|tab| tab.table.as_ref()) else {
+        app.notifications
+            .warning("Not a table — View → Table View shows one");
+        return;
+    };
+    let Some((first, last)) = view.table.lines(view.record()) else {
+        app.notifications.warning("There is no row here");
+        return;
+    };
+    let Some(tab) = app.active_mut() else { return };
+    tab.table.as_mut().map(TableView::cancel_edit);
+    tab.document.place_cursor(first, VisualCol(0));
+    tab.document.extend_to(last, VisualCol(0));
+    tab.document.delete_line();
+    tab.sync_table();
+}
+
+/// The cell the selection is on, when the pane is showing a table.
+fn selected_cell(app: &App) -> Option<(Record, usize)> {
+    let view = app.active()?.table.as_ref()?;
+    Some((view.record(), view.column))
+}
+
+/// Writes one cell back into the buffer, through the span the parser recorded.
+///
+/// An ordinary document edit: it joins the undo history, marks the tab dirty
+/// and is written by `Ctrl+S`, which is the whole reason the table is a view of
+/// a tab rather than a tab of its own (ADR-062, ADR-063). Only the field's own
+/// characters are touched, so the rest of the record keeps the bytes it had.
+fn write_cell(app: &mut App, record: Record, column: usize, value: &str) {
+    let plan = {
+        let Some(view) = app.active().and_then(|tab| tab.table.as_ref()) else {
+            return;
+        };
+        // A value that came back unchanged is not written: opening a cell and
+        // closing it again must not dirty the file.
+        if view.table.has(record) && view.table.field(record, column) == value {
+            return;
+        }
+        view.table.write(view.dialect, record, column, value)
+    };
+    let plan = match plan {
+        Ok(plan) => plan,
+        Err(error) => return say_write_error(app, error),
+    };
+    let hit = Match {
+        line: plan.line,
+        start: CharIdx(plan.start),
+        end: CharIdx(plan.end),
+    };
+    let Some(tab) = app.active_mut() else { return };
+    tab.document.replace_matches(&[hit], &plan.text);
+    // The table is a cache over the buffer and the rest of this command reads
+    // it, so it is re-parsed now rather than on the next frame.
+    tab.sync_table();
+}
+
 // --- search ----------------------------------------------------------------
 
 /// Opens the bar, seeded from the selection, with the caret in the query field.
@@ -890,6 +1588,12 @@ fn replace_all(app: &mut App) {
 fn ready_to_replace(app: &mut App) -> bool {
     if app.active().is_none() {
         app.notifications.warning("No file to replace in");
+        return false;
+    }
+    // Replace writes to the buffer, so it is refused by the same rule every
+    // other edit is while the pane is a table (SPEC §65). Find is not: it moves
+    // the document's own cursor, which is where the text view opens.
+    if refuse_in_table(app) {
         return false;
     }
     if app.search.query.value.is_empty() {
@@ -1245,6 +1949,12 @@ fn edit_field(app: &mut App, operation: impl FnOnce(&mut InputField)) {
 /// document's history, and saying so is friendlier than a key that appears to
 /// have missed.
 fn undo_redo(app: &mut App, undo: bool) {
+    // An edit made in a cell is an edit of the document, so undo is the
+    // document's here as well (ADR-063). What it must not do is put the text
+    // back underneath a cell that is still being typed into.
+    if let Some(view) = table_mut(app) {
+        view.cancel_edit();
+    }
     let view = app.text_view();
     let Some(tab) = app.active_mut() else { return };
     let moved = if undo {
@@ -1253,6 +1963,8 @@ fn undo_redo(app: &mut App, undo: bool) {
         tab.document.redo()
     };
     tab.follow_cursor(view);
+    // The table is a cache over the buffer that the rest of this frame reads.
+    tab.sync_table();
     if !moved {
         let what = if undo { "undo" } else { "redo" };
         app.notifications.warning(format!("Nothing to {what}"));
@@ -2443,6 +3155,494 @@ mod tests {
 
     fn app() -> App {
         App::fixture()
+    }
+
+    // --- the CSV table (SPEC §65, ADR-062) --------------------------------
+
+    /// An app with a `.csv` file open, which is what turns the table on.
+    fn app_with_csv(text: &str) -> App {
+        use crate::app::{Tab, TabItem};
+
+        let mut app = app();
+        let path = std::path::PathBuf::from("/dev/null/ferroedit-fixture/people.csv");
+        app.tabs.push(TabItem::editing(Tab::new(Document::from_text(
+            text,
+            Some(path),
+        ))));
+        app.active_tab = Some(app.tabs.len() - 1);
+        app.sync_table();
+        app
+    }
+
+    use crate::app::table::HEADER_ORDINAL;
+
+    fn table(app: &App) -> &crate::app::table::TableView {
+        app.active()
+            .and_then(|tab| tab.table.as_ref())
+            .expect("the tab is showing a table")
+    }
+
+    #[test]
+    fn a_csv_file_opens_as_a_table_and_a_rust_file_does_not() {
+        let app = app_with_csv("name,age\nada,36\n");
+        assert_eq!(table(&app).table.header, vec!["name", "age"]);
+        // The fixture's first tab is `main.rs`.
+        assert!(app.editor_at(0).unwrap().table.is_none());
+    }
+
+    #[test]
+    fn the_toggle_swaps_the_pane_and_keeps_the_chosen_dialect() {
+        let mut app = app_with_csv("a;b\n1;2\n");
+        execute_command(&mut app, Command::SetCsvDelimiter(';'));
+        app.sync_table();
+        assert_eq!(table(&app).table.header, vec!["a", "b"]);
+
+        execute_command(&mut app, Command::ToggleTableView);
+        assert!(app.active().unwrap().table.is_none(), "the text is back");
+        execute_command(&mut app, Command::ToggleTableView);
+        app.sync_table();
+        assert_eq!(
+            table(&app).dialect.delimiter,
+            ';',
+            "the answer the user already gave is not asked again"
+        );
+    }
+
+    /// The line of the buffer a `.csv` fixture's first data row is on.
+    fn line(app: &App, index: usize) -> String {
+        app.active().unwrap().document.line(index).into_owned()
+    }
+
+    fn said(app: &App) -> String {
+        app.notifications.current().unwrap().message.clone()
+    }
+
+    #[test]
+    fn typing_over_a_cell_replaces_it_and_enter_writes_it_back() {
+        let mut app = app_with_csv("name,age\nada,36\n");
+        execute_command(&mut app, Command::InsertChar('e'));
+        execute_command(&mut app, Command::InsertChar('v'));
+        assert_eq!(
+            line(&app, 1),
+            "ada,36",
+            "nothing reaches the buffer while the cell is open"
+        );
+
+        execute_command(&mut app, Command::InsertNewline);
+        assert_eq!(line(&app, 1), "ev,36");
+        assert!(app.active().unwrap().document.is_dirty());
+        assert!(!table(&app).is_editing());
+    }
+
+    #[test]
+    fn the_edit_key_opens_the_value_that_is_there_and_esc_leaves_it_alone() {
+        let mut app = app_with_csv("name,age\nada,36\n");
+        execute_command(&mut app, Command::EditCell);
+        assert_eq!(table(&app).editor.as_ref().unwrap().field.value, "ada");
+
+        execute_command(&mut app, Command::InsertChar('m'));
+        // `Esc` in the editor is the find bar's key, and a cell being typed
+        // into is the nearer of the two things it closes.
+        execute_command(&mut app, Command::SearchClose);
+        assert!(!table(&app).is_editing());
+        assert_eq!(line(&app, 1), "ada,36");
+        assert!(!app.active().unwrap().document.is_dirty());
+    }
+
+    #[test]
+    fn tab_saves_the_cell_and_moves_along_the_row() {
+        let mut app = app_with_csv("name,age\nada,36\n");
+        execute_command(&mut app, Command::InsertChar('x'));
+        execute_command(&mut app, Command::InsertChar('\t'));
+        assert_eq!(line(&app, 1), "x,36");
+        assert_eq!(table(&app).column, 1);
+    }
+
+    #[test]
+    fn a_value_holding_the_delimiter_is_quoted_on_the_way_back() {
+        let mut app = app_with_csv("name,age\nada,36\n");
+        execute_command(&mut app, Command::InsertText("lovelace, ada".into()));
+        assert_eq!(line(&app, 1), "\"lovelace, ada\",36");
+        assert_eq!(
+            table(&app).table.cell(0, 0),
+            "lovelace, ada",
+            "and it reads back as the one field it was written as"
+        );
+        // The neighbour keeps the bytes it had: an edit to one cell is one
+        // field of the diff.
+        assert_eq!(table(&app).table.cell(0, 1), "36");
+    }
+
+    #[test]
+    fn a_file_read_without_quoting_refuses_a_value_that_would_need_it() {
+        let mut app = app_with_csv("a,b\n1,2\n");
+        execute_command(&mut app, Command::SetCsvQuote(None));
+        app.sync_table();
+        execute_command(&mut app, Command::InsertText("x,y".into()));
+        assert_eq!(line(&app, 1), "1,2", "the row is not split behind the user");
+        assert!(said(&app).contains("quoting"), "{}", said(&app));
+    }
+
+    #[test]
+    fn a_value_that_runs_across_lines_is_left_to_the_text_view() {
+        let mut app = app_with_csv("a,b\n\"one\ntwo\",x\n");
+        execute_command(&mut app, Command::EditCell);
+        assert!(!table(&app).is_editing());
+        assert!(said(&app).contains("F4"), "{}", said(&app));
+    }
+
+    #[test]
+    fn a_column_a_row_stops_short_of_is_filled_in_with_the_delimiters_it_needs() {
+        let mut app = app_with_csv("a,b,c\n1\n");
+        execute_command(&mut app, Command::MoveCursor(Motion::End));
+        execute_command(&mut app, Command::InsertChar('z'));
+        execute_command(&mut app, Command::InsertNewline);
+        assert_eq!(line(&app, 1), "1,,z");
+    }
+
+    #[test]
+    fn the_header_is_a_record_the_selection_reaches_and_renames() {
+        let mut app = app_with_csv("name,age\nada,36\n");
+        execute_command(&mut app, Command::MoveCursor(Motion::Up));
+        assert!(table(&app).on_header);
+        assert_eq!(table(&app).position(), "Header · name");
+
+        execute_command(&mut app, Command::InsertChar('w'));
+        execute_command(&mut app, Command::InsertNewline);
+        assert_eq!(line(&app, 0), "w,age");
+        assert!(
+            !table(&app).on_header,
+            "Enter moves down onto the first row"
+        );
+    }
+
+    #[test]
+    fn a_row_is_added_under_the_selected_one_and_deleted_from_it() {
+        let mut app = app_with_csv("a,b\n1,2\n3,4\n");
+        execute_command(&mut app, Command::InsertRecord);
+        assert_eq!(
+            line(&app, 2),
+            ",",
+            "as many empty fields as the table is wide"
+        );
+        assert_eq!(table(&app).row, 1, "the selection follows the new row");
+        assert_eq!(table(&app).table.len(), 3);
+
+        execute_command(&mut app, Command::DeleteRecord);
+        assert_eq!(line(&app, 2), "3,4");
+        assert_eq!(table(&app).table.len(), 2);
+    }
+
+    #[test]
+    fn a_row_added_at_the_end_of_a_file_with_no_trailing_newline_takes_one() {
+        let mut app = app_with_csv("a,b\n1,2");
+        execute_command(&mut app, Command::InsertRecord);
+        assert_eq!(line(&app, 2), ",");
+        assert_eq!(table(&app).table.len(), 2);
+    }
+
+    #[test]
+    fn a_cell_edit_undoes_as_one_step_and_the_grid_shows_the_undone_file() {
+        let mut app = app_with_csv("a,b\n1,2\n");
+        execute_command(&mut app, Command::InsertChar('9'));
+        execute_command(&mut app, Command::InsertNewline);
+        assert_eq!(line(&app, 1), "9,2");
+
+        execute_command(&mut app, Command::Undo);
+        assert_eq!(line(&app, 1), "1,2");
+        assert_eq!(table(&app).table.cell(0, 0), "1");
+    }
+
+    #[test]
+    fn closing_a_cell_on_the_value_it_already_had_leaves_the_file_alone() {
+        let mut app = app_with_csv("a,b\n1,2\n");
+        execute_command(&mut app, Command::EditCell);
+        execute_command(&mut app, Command::InsertNewline);
+        assert!(!app.active().unwrap().document.is_dirty());
+    }
+
+    /// The spans are char offsets and the buffer is char-indexed, so a row with
+    /// multi-byte text in front of the edited cell must still be cut in the
+    /// right place (ARCHITECTURE: cursors are char indices).
+    #[test]
+    fn a_cell_after_multibyte_text_is_written_where_it_belongs() {
+        let mut app = app_with_csv("ім'я,вік\nадам,36\n");
+        execute_command(&mut app, Command::MoveCursor(Motion::Right));
+        execute_command(&mut app, Command::InsertText("40".into()));
+        assert_eq!(line(&app, 1), "адам,40");
+    }
+
+    // --- selecting a block of cells (SPEC §65) -----------------------------
+
+    #[test]
+    fn shift_and_a_motion_key_make_a_block_and_a_plain_one_drops_it() {
+        let mut app = app_with_csv("a,b,c\n1,2,3\n4,5,6\n");
+        execute_command(&mut app, Command::ExtendSelection(Motion::Right));
+        execute_command(&mut app, Command::ExtendSelection(Motion::Down));
+        let range = table(&app).selection().expect("a block is selected");
+        assert_eq!((range.records(), range.columns()), (2, 2));
+
+        execute_command(&mut app, Command::MoveCursor(Motion::Left));
+        assert!(
+            table(&app).selection().is_none(),
+            "a plain move drops it, as it does in the text"
+        );
+    }
+
+    #[test]
+    fn a_block_reaches_up_onto_the_header() {
+        let mut app = app_with_csv("a,b\n1,2\n");
+        execute_command(&mut app, Command::ExtendSelection(Motion::Up));
+        let range = table(&app).selection().unwrap();
+        assert_eq!(range.first_record, HEADER_ORDINAL);
+        assert_eq!(range.records(), 2, "the header and the row under it");
+    }
+
+    #[test]
+    fn a_row_a_column_and_the_whole_table_are_one_command_each() {
+        let mut app = app_with_csv("a,b,c\n1,2,3\n4,5,6\n");
+        execute_command(&mut app, Command::SelectRow);
+        let range = table(&app).selection().unwrap();
+        assert_eq!((range.records(), range.columns()), (1, 3));
+
+        execute_command(&mut app, Command::SelectColumn);
+        let range = table(&app).selection().unwrap();
+        assert_eq!(
+            (range.records(), range.columns()),
+            (3, 1),
+            "the header and both rows"
+        );
+
+        execute_command(&mut app, Command::SelectAll);
+        let range = table(&app).selection().unwrap();
+        assert_eq!((range.records(), range.columns()), (3, 3));
+    }
+
+    #[test]
+    fn copying_a_block_writes_it_back_in_the_files_own_dialect() {
+        let mut app = app_with_csv("name,age\nada,36\ngrace,45\n");
+        execute_command(&mut app, Command::SelectAll);
+        execute_command(&mut app, Command::Copy);
+        assert_eq!(app.clipboard.get().unwrap(), "name,age\nada,36\ngrace,45");
+        assert_eq!(line(&app, 1), "ada,36", "copying changes nothing");
+    }
+
+    #[test]
+    fn a_copied_block_quotes_the_values_that_need_it() {
+        let mut app = app_with_csv("a,b\n\"x,y\",2\n");
+        execute_command(&mut app, Command::SelectRow);
+        execute_command(&mut app, Command::Copy);
+        assert_eq!(app.clipboard.get().unwrap(), "\"x,y\",2");
+    }
+
+    #[test]
+    fn cutting_a_block_empties_every_cell_of_it_as_one_undo_step() {
+        let mut app = app_with_csv("a,b,c\n1,2,3\n4,5,6\n");
+        execute_command(&mut app, Command::ExtendSelection(Motion::Right));
+        execute_command(&mut app, Command::ExtendSelection(Motion::Down));
+        execute_command(&mut app, Command::Cut);
+        assert_eq!(app.clipboard.get().unwrap(), "1,2\n4,5");
+        assert_eq!(line(&app, 1), ",,3");
+        assert_eq!(line(&app, 2), ",,6");
+
+        execute_command(&mut app, Command::Undo);
+        assert_eq!(line(&app, 1), "1,2,3");
+        assert_eq!(line(&app, 2), "4,5,6");
+    }
+
+    #[test]
+    fn delete_over_a_block_empties_it_and_leaves_the_columns_beside_it() {
+        let mut app = app_with_csv("a,b\n1,2\n3,4\n");
+        execute_command(&mut app, Command::SelectColumn);
+        execute_command(&mut app, Command::Delete);
+        assert_eq!(line(&app, 0), ",b", "the header is in the column too");
+        assert_eq!(line(&app, 1), ",2");
+        assert_eq!(line(&app, 2), ",4");
+    }
+
+    #[test]
+    fn a_click_drops_the_block_and_a_drag_makes_one() {
+        let mut app = app_with_csv("a,b,c\n1,2,3\n4,5,6\n");
+        execute_command(&mut app, Command::SelectAll);
+        execute_command(
+            &mut app,
+            Command::SelectCell {
+                row: Some(0),
+                column: 0,
+            },
+        );
+        assert!(table(&app).selection().is_none());
+
+        execute_command(
+            &mut app,
+            Command::ExtendCellTo {
+                row: Some(1),
+                column: 2,
+            },
+        );
+        let range = table(&app).selection().unwrap();
+        assert_eq!((range.records(), range.columns()), (2, 3));
+
+        // And the gutter takes a whole record in one click.
+        execute_command(&mut app, Command::SelectRowAt { row: Some(1) });
+        let range = table(&app).selection().unwrap();
+        assert_eq!((range.records(), range.columns()), (1, 3));
+        assert_eq!(range.first_record, 1);
+    }
+
+    #[test]
+    fn clicking_a_column_name_takes_the_column_and_still_renames_it() {
+        let mut app = app_with_csv("name,age\nada,36\ngrace,45\n");
+        execute_command(&mut app, Command::SelectColumnAt { column: 0 });
+        let range = table(&app).selection().expect("a column is selected");
+        assert_eq!(
+            (range.first_record, range.records(), range.columns()),
+            (HEADER_ORDINAL, 3, 1),
+            "the name and both values under it"
+        );
+        assert!(
+            table(&app).on_header,
+            "the cursor stays on the name, so F2 renames the column"
+        );
+
+        execute_command(&mut app, Command::Copy);
+        assert_eq!(app.clipboard.get().unwrap(), "name\nada\ngrace");
+
+        execute_command(&mut app, Command::EditCell);
+        assert_eq!(table(&app).editor.as_ref().unwrap().field.value, "name");
+    }
+
+    #[test]
+    fn a_column_of_a_file_with_no_records_is_the_name_alone() {
+        let mut app = app_with_csv("name,age\n");
+        execute_command(&mut app, Command::SelectColumnAt { column: 1 });
+        let range = table(&app).selection().unwrap();
+        assert_eq!((range.records(), range.columns()), (1, 1));
+        execute_command(&mut app, Command::Copy);
+        assert_eq!(app.clipboard.get().unwrap(), "age");
+    }
+
+    #[test]
+    fn copy_takes_the_cells_value_and_delete_empties_it() {
+        let mut app = app_with_csv("a,b\n\"x,y\",2\n");
+        execute_command(&mut app, Command::Copy);
+        assert_eq!(
+            app.clipboard.get().unwrap(),
+            "x,y",
+            "the value that is on screen, not the raw field"
+        );
+        execute_command(&mut app, Command::Delete);
+        assert_eq!(line(&app, 1), ",2");
+    }
+
+    #[test]
+    fn the_motion_keys_move_the_selected_cell_instead_of_a_cursor() {
+        let mut app = app_with_csv("a,b,c\n1,2,3\n4,5,6\n");
+        execute_command(&mut app, Command::MoveCursor(Motion::Down));
+        execute_command(&mut app, Command::MoveCursor(Motion::Right));
+        assert_eq!((table(&app).row, table(&app).column), (1, 1));
+        assert_eq!(
+            app.active().unwrap().document.cursor().line,
+            0,
+            "the document's own cursor stays where it was"
+        );
+
+        execute_command(&mut app, Command::MoveCursor(Motion::End));
+        assert_eq!(table(&app).column, 2, "End is the last column of the row");
+        execute_command(&mut app, Command::MoveCursor(Motion::Home));
+        assert_eq!(table(&app).column, 0);
+    }
+
+    #[test]
+    fn the_delimiter_picker_opens_on_the_one_in_use_and_choosing_reparses() {
+        let mut app = app_with_csv("a,b\n1,2\n");
+        execute_command(&mut app, Command::CsvDelimiterPrompt);
+        let dialog = app.dialog.as_ref().expect("the picker is open");
+        assert_eq!(dialog.title, "Column Delimiter");
+        assert!(
+            dialog.selected_item().unwrap().current,
+            "it opens on the comma the file is being read with"
+        );
+
+        // The next row down is the semicolon, which this file has none of.
+        execute_command(&mut app, Command::DialogListMove(1));
+        execute_command(&mut app, Command::DialogActivate);
+        app.sync_table();
+        assert!(app.dialog.is_none());
+        assert_eq!(table(&app).dialect.delimiter, ';');
+        assert_eq!(table(&app).table.rows, vec![vec!["1,2"]]);
+    }
+
+    #[test]
+    fn the_quote_picker_can_turn_quoting_off_altogether() {
+        let mut app = app_with_csv("a,b\n\"x,y\",z\n");
+        assert_eq!(table(&app).table.rows, vec![vec!["x,y", "z"]]);
+        execute_command(&mut app, Command::SetCsvQuote(None));
+        app.sync_table();
+        assert_eq!(table(&app).table.rows, vec![vec!["\"x", "y\"", "z"]]);
+    }
+
+    #[test]
+    fn the_pickers_refuse_over_a_file_that_is_not_a_table() {
+        let mut app = app();
+        execute_command(&mut app, Command::CsvDelimiterPrompt);
+        assert!(app.dialog.is_none());
+        let said = app.notifications.current().unwrap().message.clone();
+        assert!(said.contains("Table View"), "{said}");
+    }
+
+    #[test]
+    fn an_edit_made_in_the_text_view_shows_up_in_the_table() {
+        let mut app = app_with_csv("a,b\n1,2\n");
+        execute_command(&mut app, Command::ToggleTableView);
+        execute_command(&mut app, Command::MoveCursor(Motion::DocumentEnd));
+        execute_command(&mut app, Command::InsertText("3,4\n".into()));
+        execute_command(&mut app, Command::ToggleTableView);
+        app.sync_table();
+        assert_eq!(table(&app).table.len(), 2);
+    }
+
+    #[test]
+    fn replace_is_refused_over_a_table_and_find_is_not() {
+        let mut app = app_with_csv("a,b\nfoo,2\n");
+        app.search.open(true, Some("foo".to_string()));
+        app.search.focus_field(SearchField::Replacement);
+        app.search.replacement.insert_str("bar");
+        execute_command(&mut app, Command::ReplaceAll);
+        assert_eq!(
+            app.active().unwrap().document.line(1),
+            "foo,2",
+            "a replace must not rewrite a buffer the user cannot see"
+        );
+
+        execute_command(&mut app, Command::FindNext);
+        assert_eq!(
+            app.active().unwrap().document.cursor().line,
+            1,
+            "finding still moves the cursor the text view will open on"
+        );
+    }
+
+    #[test]
+    fn a_click_selects_the_cell_it_landed_on() {
+        let mut app = app_with_csv("a,b\n1,2\n3,4\n");
+        execute_command(
+            &mut app,
+            Command::SelectCell {
+                row: Some(1),
+                column: 1,
+            },
+        );
+        assert_eq!((table(&app).row, table(&app).column), (1, 1));
+        // A click past the last row lands on the last one rather than nowhere.
+        execute_command(
+            &mut app,
+            Command::SelectCell {
+                row: Some(9),
+                column: 9,
+            },
+        );
+        assert_eq!((table(&app).row, table(&app).column), (1, 1));
     }
 
     // --- git panel (SPEC §28, §30) ----------------------------------------
@@ -5899,12 +7099,12 @@ five",
         assert_eq!(app.settings.theme, ThemeKind::Dark);
         assert!(!app.persist_settings, "a test never writes the real config");
 
-        execute_command(&mut app, Command::SetTheme(ThemeKind::Borland));
-        assert_eq!(app.settings.theme, ThemeKind::Borland);
+        execute_command(&mut app, Command::SetTheme(ThemeKind::Retro));
+        assert_eq!(app.settings.theme, ThemeKind::Retro);
         let said = app.notifications.current().unwrap().message.clone();
-        assert!(said.contains("Borland"), "{said}");
+        assert!(said.contains("Retro"), "{said}");
 
-        execute_command(&mut app, Command::SetTheme(ThemeKind::Borland));
+        execute_command(&mut app, Command::SetTheme(ThemeKind::Retro));
         assert_eq!(
             app.notifications.current().unwrap().message,
             said,

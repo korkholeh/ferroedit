@@ -5,7 +5,8 @@
 //! same ones the mouse hit-tests against, so what is drawn and what is clickable
 //! cannot drift apart.
 
-use ratatui::layout::Rect;
+use ratatui::layout::{Alignment, Rect};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
@@ -31,8 +32,13 @@ pub fn render(frame: &mut Frame, app: &App, rects: &LayoutRects, theme: &Theme) 
     frame.render_widget(
         Block::new()
             .borders(Borders::ALL)
-            .border_style(theme.border_for(true))
+            // The frame of the box, not of a pane: a dialog is drawn on the
+            // popup ground and takes the frame colour that belongs to it.
+            .border_style(Style::new().fg(theme.popup_border))
             .title(format!(" {} ", dialog.title))
+            // Centred: the title of a box that covers the screen names the box
+            // rather than labelling its left edge.
+            .title_alignment(Alignment::Center)
             .title_style(theme.dialog_title)
             .style(theme.dialog),
         area,
@@ -84,7 +90,7 @@ fn render_list_frame(
     frame.render_widget(
         Block::new()
             .borders(Borders::ALL)
-            .border_style(theme.border_for(false))
+            .border_style(Style::new().fg(theme.popup_border))
             .style(theme.dialog),
         outline,
     );
@@ -105,8 +111,10 @@ fn render_list_frame(
             .begin_symbol(None)
             .end_symbol(None)
             .track_symbol(Some("│"))
-            .thumb_style(theme.dialog.fg(theme.border_focused))
-            .track_style(theme.dialog.fg(theme.border)),
+            // The thumb is the highlight and the track is the frame it is
+            // drawn on: both are colours of the box, not of the pane behind it.
+            .thumb_style(theme.dialog.fg(theme.highlight))
+            .track_style(theme.dialog.fg(theme.popup_border)),
         track,
         &mut state,
     );

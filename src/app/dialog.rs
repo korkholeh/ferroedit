@@ -18,6 +18,7 @@ use crate::app::focus::FocusTarget;
 use crate::app::input_field::InputField;
 use crate::commands::{Command, FileOp};
 use crate::editor::charset::Charset;
+use crate::editor::csv::{Dialect, DELIMITERS, QUOTES};
 use crate::editor::document::LineEnding;
 use crate::git::models::Branch;
 
@@ -688,6 +689,71 @@ impl DialogState {
             Some(Command::ConvertEncoding(charset.label.to_string())),
         ));
         Self::confirm("Encoding", message, buttons, return_focus)
+    }
+
+    /// The delimiter picker, opened from the status bar's `Delim` readout and
+    /// from View → Column Delimiter… (SPEC §65, ADR-062).
+    ///
+    /// Choosing a row acts at once, unlike the encoding and the line endings:
+    /// nothing on disk changes, only how the same bytes are divided into
+    /// columns, and a confirmation over a reading is a dialog asking the user
+    /// to approve looking at something.
+    pub fn csv_delimiter(current: Dialect, return_focus: FocusTarget) -> Self {
+        let items: Vec<ListItem> = DELIMITERS
+            .iter()
+            .map(|(ch, name)| ListItem {
+                // The character beside its name, because the name is what a tab
+                // has instead of an appearance and the character is what the
+                // user is looking at in the file.
+                label: match ch {
+                    '\t' | ' ' => (*name).to_string(),
+                    ch => format!("{name}  {ch}"),
+                },
+                command: Command::SetCsvDelimiter(*ch),
+                current: *ch == current.delimiter,
+            })
+            .collect();
+        let selected = items.iter().position(|item| item.current).unwrap_or(0);
+        Self::list(
+            "Column Delimiter",
+            "What separates one column from the next".to_string(),
+            items,
+            selected,
+            false,
+            vec![
+                DialogButton::new("Use", Some(Command::SubmitListChoice)),
+                DialogButton::new("Cancel", None),
+            ],
+            return_focus,
+        )
+    }
+
+    /// The quote picker, the delimiter picker's other half (SPEC §65).
+    pub fn csv_quote(current: Dialect, return_focus: FocusTarget) -> Self {
+        let items: Vec<ListItem> = QUOTES
+            .iter()
+            .map(|(quote, name)| ListItem {
+                label: match quote {
+                    Some(ch) => format!("{name}  {ch}"),
+                    None => (*name).to_string(),
+                },
+                command: Command::SetCsvQuote(*quote),
+                current: *quote == current.quote,
+            })
+            .collect();
+        let selected = items.iter().position(|item| item.current).unwrap_or(0);
+        Self::list(
+            "Quote Character",
+            "What holds a delimiter inside a field".to_string(),
+            items,
+            selected,
+            false,
+            vec![
+                DialogButton::new("Use", Some(Command::SubmitListChoice)),
+                DialogButton::new("Cancel", None),
+            ],
+            return_focus,
+        )
     }
 
     /// The syntax-mode picker, opened from the status bar's grammar name

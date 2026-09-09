@@ -1058,6 +1058,54 @@ impl Document {
         }
     }
 
+    /// Removes the lines the caret is on, or every line a selection touches.
+    ///
+    /// Whole lines, terminator included, so what is below moves up instead of
+    /// leaving a blank row behind. The last line of a buffer has no terminator
+    /// of its own, so the one *above* it goes instead — otherwise deleting it
+    /// would leave the empty line its missing newline implies.
+    ///
+    /// One undo step however many lines went (SPEC §15, §16), and the caret
+    /// lands on the line that moved up into the gap with its column clamped to
+    /// it — the same place every editor with this key puts it.
+    pub fn delete_line(&mut self) {
+        self.history.begin_edit(self.cursor);
+
+        let last_line = self.line_count().saturating_sub(1);
+        let (first, last) = match self.selection() {
+            Some(selection) => (selection.start().line, selection.end().line.min(last_line)),
+            None => (
+                self.cursor.line.min(last_line),
+                self.cursor.line.min(last_line),
+            ),
+        };
+
+        let ends_the_buffer = last >= last_line;
+        let start = self.rope.line_to_char(first);
+        // Take the newline above when there is none below: a range that stopped
+        // at the end of the buffer would leave it behind as an empty last line.
+        let start = if ends_the_buffer && first > 0 {
+            start - 1
+        } else {
+            start
+        };
+        let end = if ends_the_buffer {
+            self.rope.len_chars()
+        } else {
+            self.rope.line_to_char(last + 1)
+        };
+
+        self.clear_selection();
+        self.remove(start..end);
+
+        self.cursor.line = first.min(self.line_count().saturating_sub(1));
+        let len = coords::char_len(&self.cursor_line());
+        self.cursor.column = self.cursor.column.min(len);
+        self.remember_column();
+
+        self.history.end_edit(self.cursor);
+    }
+
     fn remove(&mut self, range: std::ops::Range<usize>) {
         if range.is_empty() {
             return;
@@ -1420,6 +1468,78 @@ mod tests {
         document.delete();
         assert_eq!(text(&document), "abc");
         assert!(!document.is_dirty());
+    }
+
+    #[test]
+    fn delete_line_takes_the_whole_line_and_its_terminator() {
+        let mut document = doc("one\ntwo\nthree");
+        document.move_cursor(Motion::Down, pane(10));
+        document.delete_line();
+        assert_eq!(text(&document), "one\nthree");
+        assert_eq!(document.cursor().line, 1, "the line below moved up into it");
+    }
+
+    #[test]
+    fn delete_line_on_the_last_line_takes_the_newline_above_it() {
+        let mut document = doc("one\ntwo");
+        document.move_cursor(Motion::DocumentEnd, pane(10));
+        document.delete_line();
+        assert_eq!(
+            text(&document),
+            "one",
+            "no empty last line is left where the terminator was"
+        );
+        assert_eq!(document.line_count(), 1);
+        assert_eq!(document.cursor().line, 0);
+    }
+
+    #[test]
+    fn delete_line_on_the_only_line_empties_it() {
+        let mut document = doc("alone");
+        document.delete_line();
+        assert_eq!(text(&document), "");
+        assert_eq!(document.line_count(), 1);
+        assert_eq!(document.cursor().column.0, 0);
+    }
+
+    #[test]
+    fn delete_line_on_an_empty_document_changes_nothing() {
+        let mut document = doc("");
+        document.delete_line();
+        assert_eq!(text(&document), "");
+        assert!(!document.is_dirty());
+    }
+
+    #[test]
+    fn delete_line_takes_every_line_a_selection_touches() {
+        let mut document = doc("one\ntwo\nthree\nfour");
+        document.move_cursor(Motion::Down, pane(10));
+        // Anchored mid-line and ending mid-line: partial lines go whole.
+        document.move_cursor(Motion::Right, pane(10));
+        document.extend_cursor(Motion::Down, pane(10));
+        document.delete_line();
+        assert_eq!(text(&document), "one\nfour");
+        assert_eq!(document.cursor().line, 1);
+        assert!(document.selection().is_none());
+    }
+
+    #[test]
+    fn delete_line_clamps_the_column_to_the_line_that_moves_up() {
+        let mut document = doc("one\nlonger line\nab");
+        document.move_cursor(Motion::Down, pane(10));
+        document.move_cursor(Motion::End, pane(10));
+        document.delete_line();
+        assert_eq!(text(&document), "one\nab");
+        assert_eq!((document.cursor().line, document.cursor().column.0), (1, 2));
+    }
+
+    #[test]
+    fn delete_line_is_one_undo_step() {
+        let mut document = doc("one\ntwo\nthree");
+        document.move_cursor(Motion::Down, pane(10));
+        document.delete_line();
+        assert!(document.undo());
+        assert_eq!(text(&document), "one\ntwo\nthree");
     }
 
     #[test]

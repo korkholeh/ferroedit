@@ -54,7 +54,7 @@ fn render_popup(frame: &mut Frame, app: &App, items: &[MenuEntry], popup: Rect, 
                 // of text that happens to be dashes.
                 return Line::from(Span::styled(
                     "─".repeat(inner_width),
-                    theme.menu_popup.fg(theme.border),
+                    theme.menu_popup.fg(theme.popup_border),
                 ));
             };
             let shortcut = shortcut_for(&item.command).unwrap_or("");
@@ -83,7 +83,7 @@ fn render_popup(frame: &mut Frame, app: &App, items: &[MenuEntry], popup: Rect, 
 
     let block = Block::new()
         .borders(Borders::ALL)
-        .border_style(theme.border_for(true))
+        .border_style(Style::new().fg(theme.popup_border))
         .style(theme.menu_popup);
     frame.render_widget(Paragraph::new(lines).block(block), popup);
 }

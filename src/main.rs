@@ -139,6 +139,7 @@ fn run(cli: &Cli) -> Result<()> {
         // write (ARCHITECTURE §1). It is a no-op unless the viewport moved or
         // the document changed.
         app.sync_highlight();
+        app.sync_table();
         app.sync_search();
 
         if shown_tab != app.active_tab {

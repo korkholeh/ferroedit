@@ -122,6 +122,11 @@ pub struct LayoutRects {
     /// covers the pane rather than splitting it, so a hit test that finds it
     /// must be made before the editor's own (ADR-037).
     pub diff: Option<Rect>,
+    /// The CSV table, when the tab in front is being read as one (SPEC §65).
+    /// The whole editor pane, for the same reason the diff takes it: the view
+    /// covers the pane rather than splitting it, and a hit test that finds it
+    /// must be made before the editor's own.
+    pub table: Option<Rect>,
     /// The find/replace bar under the editor, when it is open.
     pub search: Option<SearchRects>,
     pub status_bar: Rect,
@@ -243,6 +248,7 @@ pub fn compute(area: Rect, app: &App) -> LayoutRects {
         editor_scrollbar,
         help: app.help.as_ref().map(|_| body),
         diff: app.diff().map(|_| pane),
+        table: app.active().filter(|tab| tab.shows_table()).map(|_| pane),
         search,
         status_bar,
         status_zones: statusbar::zones(app, status_bar),

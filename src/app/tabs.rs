@@ -8,7 +8,9 @@
 use std::path::Path;
 
 use crate::app::diff::DiffState;
+use crate::app::table::TableView;
 use crate::app::TextView;
+use crate::editor::csv::Dialect;
 use crate::editor::document::Document;
 use crate::editor::viewport::Viewport;
 use crate::editor::wrap::Layout;
@@ -124,6 +126,18 @@ pub struct Tab {
     /// What happened to the file underneath, when it is something the editor
     /// has not resolved. Drawn in the tab bar and answered by a prompt.
     pub stale: Option<Stale>,
+    /// The dialect of the last table this tab showed, so that turning the view
+    /// off and on again does not re-sniff a file the user has already answered
+    /// for.
+    last_dialect: Option<Dialect>,
+    /// The CSV view, when this tab is showing one (SPEC §65).
+    ///
+    /// `Some` means the pane draws a table instead of the text, which also
+    /// makes the tab read-only for as long as it lasts: the fields on screen
+    /// are a parse of the buffer and there is nowhere in them to put a caret.
+    /// A `.csv` or `.tsv` file opens with one already on, because that is what
+    /// the file is; every other file gets one only when asked.
+    pub table: Option<TableView>,
     /// Whether the user has already been asked about the current `stale`.
     ///
     /// The watcher reports every burst in the workspace, so without this the
@@ -135,12 +149,41 @@ pub struct Tab {
 
 impl Tab {
     pub fn new(document: Document) -> Self {
+        let table = is_delimited(&document).then(|| TableView::new(sniff(&document)));
         Self {
             document,
             viewport: Viewport::default(),
             highlights: HighlightCache::default(),
+            table,
             stale: None,
+            last_dialect: None,
             asked: false,
+        }
+    }
+
+    /// Whether the pane is showing a table rather than the text (SPEC §65).
+    pub fn shows_table(&self) -> bool {
+        self.table.is_some()
+    }
+
+    /// Turns the CSV view on or off, keeping the dialect a tab was opened with:
+    /// switching to the text to fix a row and back must not throw away a
+    /// delimiter the user chose by hand.
+    pub fn toggle_table(&mut self) {
+        match self.table.take() {
+            Some(view) => self.last_dialect = Some(view.dialect),
+            None => {
+                let dialect = self.last_dialect.unwrap_or_else(|| sniff(&self.document));
+                self.table = Some(TableView::new(dialect));
+            }
+        }
+    }
+
+    /// Re-reads the table from the buffer, if the view is on and anything it
+    /// was parsed from has changed.
+    pub fn sync_table(&mut self) {
+        if let Some(view) = self.table.as_mut() {
+            view.sync(&self.document);
         }
     }
 
@@ -186,6 +229,29 @@ impl Tab {
     pub fn is_at(&self, path: &Path) -> bool {
         self.document.path() == Some(path)
     }
+}
+
+/// Whether a document is one the CSV view opens by itself.
+///
+/// The extension and nothing else. Content sniffing would open the table over
+/// any file with commas in it — a log, a shopping list — and being wrong here
+/// costs the user the text of a file they only wanted to read.
+fn is_delimited(document: &Document) -> bool {
+    document
+        .path()
+        .and_then(|path| path.extension())
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("csv") || ext.eq_ignore_ascii_case("tsv"))
+}
+
+/// The dialect a document is read with until the user says otherwise.
+fn sniff(document: &Document) -> Dialect {
+    let extension = document
+        .path()
+        .and_then(|path| path.extension())
+        .and_then(|ext| ext.to_str());
+    let lines = (0..document.line_count()).map(|index| document.line(index));
+    Dialect::sniff(extension, lines)
 }
 
 /// Which tab is active after the one at `closed` is removed.

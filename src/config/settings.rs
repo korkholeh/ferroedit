@@ -34,8 +34,14 @@ pub enum ThemeKind {
     /// spent an afternoon on their own palette and wants the editor to use it.
     DarkSimple,
     LightSimple,
-    /// Blue ground, yellow text, grey chrome: the Turbo Vision look.
-    Borland,
+    /// Blue ground, yellow text, grey chrome and a green highlight: the
+    /// DOS-era full-screen editor.
+    ///
+    /// The alias is the name it shipped under in 0.1.x, so a config written
+    /// then still parses — and a file whose theme did not parse is a file
+    /// whose word wrap is thrown away with it.
+    #[serde(alias = "borland")]
+    Retro,
 }
 
 impl ThemeKind {
@@ -50,7 +56,7 @@ impl ThemeKind {
         Self::Light,
         Self::DarkSimple,
         Self::LightSimple,
-        Self::Borland,
+        Self::Retro,
     ];
 
     pub fn label(self) -> &'static str {
@@ -59,7 +65,7 @@ impl ThemeKind {
             Self::Light => "Light",
             Self::DarkSimple => "Dark Simple",
             Self::LightSimple => "Light Simple",
-            Self::Borland => "Borland",
+            Self::Retro => "Retro",
         }
     }
 }
@@ -210,7 +216,7 @@ mod tests {
         // Under a directory that does not exist yet, like the first run's.
         let path = dir.path().join("ferroedit").join("config.json");
         let settings = Settings {
-            theme: ThemeKind::Borland,
+            theme: ThemeKind::Retro,
             ..Settings::default()
         };
         settings.save_to(&path).unwrap();

@@ -10,6 +10,7 @@ pub mod help;
 pub mod input_field;
 pub mod notifications;
 pub mod search;
+pub mod table;
 pub mod tabs;
 pub mod workspace;
 
@@ -389,6 +390,19 @@ impl App {
             why.reason()
         );
         self.notifications.warning(message);
+    }
+
+    /// Re-reads the active tab's table from its buffer when either has changed
+    /// (SPEC §65).
+    ///
+    /// Next to `sync_highlight` and for the same reasons: the table is a cache
+    /// over the document, only the tab in front is on screen, and doing it here
+    /// means no command that edits, undoes, reloads or changes the dialect has
+    /// to remember to invalidate it.
+    pub fn sync_table(&mut self) {
+        if let Some(tab) = self.active_mut() {
+            tab.sync_table();
+        }
     }
 
     /// Finds the open query's hits again when anything they depend on has

@@ -28,11 +28,25 @@ pub struct Palette {
     /// Text that is present but secondary: panel titles, shortcut hints.
     pub dim: Color,
     pub border: Color,
-    /// The one colour that says "this is the thing you are on" — a focused
-    /// border, a selected row, an open menu title.
+    /// The colour of a frame that has focus, and of a mark on the editor's
+    /// ground that has to catch the eye. Always a line or a glyph, never a
+    /// ground — text on it is `highlight`'s job.
     pub accent: Color,
-    /// Text drawn *on* the accent.
-    pub on_accent: Color,
+    /// The bar that says "this is the row you are on": an open menu's title,
+    /// the item under the cursor in its drop-down, a selected row, the button
+    /// Enter would press, a find option that is on.
+    ///
+    /// Its own role rather than `accent`, because the two are only the same
+    /// colour by coincidence: `accent` is a *line* on the editor's ground and
+    /// this is a *ground* under black text, and a scheme whose highlight is a
+    /// green bar has no use for green frames.
+    pub highlight: Color,
+    /// Text drawn on that bar.
+    pub on_highlight: Color,
+    /// A dialog's title, drawn on `popup`. `accent` for most themes — but a
+    /// theme whose accent is the colour of its frames *on the ground* cannot
+    /// put that colour on a grey box and still be read.
+    pub title: Color,
     /// The ground of the bars: menu, status, tab strip, find bar.
     pub chrome: Color,
     pub on_chrome: Color,
@@ -41,8 +55,23 @@ pub struct Palette {
     /// The ground of a box that floats over the rest: a dialog, a drop-down.
     pub popup: Color,
     pub on_popup: Color,
+    /// The frame of such a box, and the rules drawn inside it. Its own role
+    /// rather than `border`, which is drawn on the editor's ground: a theme
+    /// whose popups are light and whose ground is dark needs the two frames
+    /// to be different colours or one of them disappears.
+    pub popup_border: Color,
+    /// Secondary text on a popup — a menu's shortcut column. Its own role
+    /// rather than `on_chrome_dim`, because a theme is free to make its
+    /// drop-downs darker than its bars and then the two dims differ.
+    pub on_popup_dim: Color,
     /// The ground of a text field, so an empty one reads as a field.
+    ///
+    /// A field is drawn both inside a dialog and on the find bar, so this is
+    /// the one colour that has to stand apart from `popup` and `chrome` both.
     pub field: Color,
+    /// What is typed into a field. `foreground` for most themes, but a theme
+    /// whose only free dark tone is a light grey needs the text on it dark.
+    pub on_field: Color,
     /// The editor's selection. A background only — the syntax colours stay.
     pub selection: Color,
     /// Every search hit that is not the current one.
@@ -80,6 +109,19 @@ pub struct Theme {
     pub menu_popup: Style,
     pub menu_item_selected: Style,
     pub menu_shortcut: Color,
+    /// The frame of a floating box — a drop-down, a dialog — and the rules
+    /// drawn inside it. Not `border`, which is the frame of a pane on the
+    /// editor's ground: a theme whose boxes are light and whose ground is
+    /// dark needs the two to be different colours.
+    pub popup_border: Color,
+    /// The bar under the cursor, as a colour rather than a style: the thumb
+    /// of a dialog's scrollbar is drawn in it.
+    pub highlight: Color,
+    /// Secondary text drawn *on* the chrome — a status-bar readout, the hit
+    /// count in the find bar. Not `dim`, which is the same thing on the
+    /// editor's ground: a theme whose bars are lighter than its ground needs
+    /// the two to be different colours, and the retro theme's are the same grey.
+    pub chrome_dim: Color,
 
     pub tab_active: Style,
     pub tab_inactive: Style,
@@ -162,10 +204,15 @@ impl Theme {
             border_focused: p.accent,
 
             menu_bar: Style::new().bg(p.chrome).fg(p.on_chrome),
-            menu_title_open: Style::new().bg(p.accent).fg(p.on_accent),
+            menu_title_open: Style::new().bg(p.highlight).fg(p.on_highlight),
             menu_popup: Style::new().bg(p.popup).fg(p.on_popup),
-            menu_item_selected: Style::new().bg(p.accent).fg(p.on_accent),
-            menu_shortcut: p.dim,
+            menu_item_selected: Style::new().bg(p.highlight).fg(p.on_highlight),
+            // A shortcut is drawn in the menu's drop-down, so it is dim
+            // against `popup` rather than against the editor's ground.
+            menu_shortcut: p.on_popup_dim,
+            popup_border: p.popup_border,
+            highlight: p.highlight,
+            chrome_dim: p.on_chrome_dim,
 
             tab_active: Style::new()
                 .bg(p.background)
@@ -176,16 +223,16 @@ impl Theme {
             tab_close: p.on_chrome_dim,
 
             dialog: Style::new().bg(p.popup).fg(p.on_popup),
-            dialog_title: Style::new().fg(p.accent).add_modifier(Modifier::BOLD),
-            dialog_input: Style::new().bg(p.field).fg(p.foreground),
+            dialog_title: Style::new().fg(p.title).add_modifier(Modifier::BOLD),
+            dialog_input: Style::new().bg(p.field).fg(p.on_field),
             dialog_button: Style::new().bg(p.popup).fg(p.on_popup),
             dialog_button_selected: Style::new()
-                .bg(p.accent)
-                .fg(p.on_accent)
+                .bg(p.highlight)
+                .fg(p.on_highlight)
                 .add_modifier(Modifier::BOLD),
 
             panel_title: Style::new().fg(p.dim).add_modifier(Modifier::BOLD),
-            selection: Style::new().bg(p.accent).fg(p.on_accent),
+            selection: Style::new().bg(p.highlight).fg(p.on_highlight),
             selection_unfocused: Style::new().bg(p.chrome),
             directory: p.directory,
 
@@ -193,10 +240,10 @@ impl Theme {
 
             search_bar: Style::new().bg(p.chrome).fg(p.on_chrome),
             search_label: p.dim,
-            search_field: Style::new().bg(p.field).fg(p.foreground),
+            search_field: Style::new().bg(p.field).fg(p.on_field),
             search_match: Style::new().bg(p.match_bg),
             search_button: Style::new().bg(p.popup).fg(p.on_popup),
-            search_option_on: Style::new().bg(p.accent).fg(p.on_accent),
+            search_option_on: Style::new().bg(p.highlight).fg(p.on_highlight),
 
             line_number: p.line_number,
             editor_selection: Style::new().bg(p.selection),
@@ -224,7 +271,7 @@ fn palette(kind: ThemeKind) -> Palette {
         ThemeKind::Light => light(),
         ThemeKind::DarkSimple => dark_simple(),
         ThemeKind::LightSimple => light_simple(),
-        ThemeKind::Borland => borland(),
+        ThemeKind::Retro => retro(),
     }
 }
 
@@ -236,13 +283,18 @@ fn dark() -> Palette {
         dim: Color::Indexed(245),
         border: Color::Indexed(240),
         accent: Color::Indexed(75),
-        on_accent: Color::Indexed(235),
+        highlight: Color::Indexed(75),
+        on_highlight: Color::Indexed(235),
+        title: Color::Indexed(75),
         chrome: Color::Indexed(238),
         on_chrome: Color::Indexed(252),
         on_chrome_dim: Color::Indexed(245),
         popup: Color::Indexed(237),
         on_popup: Color::Indexed(252),
+        popup_border: Color::Indexed(240),
+        on_popup_dim: Color::Indexed(245),
         field: Color::Indexed(235),
+        on_field: Color::Indexed(252),
         selection: Color::Indexed(24),
         match_bg: Color::Indexed(58),
         directory: Color::Indexed(110),
@@ -285,13 +337,18 @@ fn light() -> Palette {
         dim: Color::Indexed(243),
         border: Color::Indexed(249),
         accent: Color::Indexed(25),
-        on_accent: Color::Indexed(231),
+        highlight: Color::Indexed(25),
+        on_highlight: Color::Indexed(231),
+        title: Color::Indexed(25),
         chrome: Color::Indexed(252),
         on_chrome: Color::Indexed(236),
         on_chrome_dim: Color::Indexed(243),
         popup: Color::Indexed(253),
         on_popup: Color::Indexed(236),
+        popup_border: Color::Indexed(249),
+        on_popup_dim: Color::Indexed(243),
         field: Color::Indexed(231),
+        on_field: Color::Indexed(236),
         selection: Color::Indexed(153),
         match_bg: Color::Indexed(222),
         directory: Color::Indexed(25),
@@ -330,20 +387,35 @@ fn light() -> Palette {
 fn dark_simple() -> Palette {
     Palette {
         background: Color::Black,
-        foreground: Color::Gray,
-        dim: Color::DarkGray,
+        foreground: Color::White,
+        // Not `DarkGray`: the bars and the dialogs are drawn on it, and dim
+        // text on them has to stay text.
+        dim: Color::Gray,
         border: Color::DarkGray,
         accent: Color::Blue,
-        on_accent: Color::White,
+        highlight: Color::Blue,
+        on_highlight: Color::White,
+        title: Color::Blue,
         chrome: Color::DarkGray,
         on_chrome: Color::White,
         on_chrome_dim: Color::Gray,
-        popup: Color::DarkGray,
+        // Black, not the bars' grey: a drop-down that is the same colour as
+        // the bar it hangs from does not read as a box over it, and the rule
+        // between two groups of a menu — drawn in `border` — disappears.
+        popup: Color::Black,
         on_popup: Color::White,
-        field: Color::Black,
+        popup_border: Color::DarkGray,
+        on_popup_dim: Color::Gray,
+        // The third dark tone, because a field is drawn on the grey of the
+        // find bar and on the black of a dialog and has to be neither.
+        field: Color::Gray,
+        on_field: Color::Black,
         selection: Color::Blue,
         match_bg: Color::Magenta,
-        directory: Color::LightBlue,
+        // Cyan rather than blue: a directory is read on the black ground and
+        // again on the grey of a selected row the sidebar does not have focus
+        // in, and blue is only legible on the first of the two.
+        directory: Color::LightCyan,
         line_number: Color::DarkGray,
         added: Color::Green,
         removed: Color::Red,
@@ -356,7 +428,7 @@ fn dark_simple() -> Palette {
         warning: Color::Yellow,
         error: Color::LightRed,
         syntax: SyntaxTheme {
-            text: Color::Gray,
+            text: Color::White,
             comment: Color::DarkGray,
             string: Color::Green,
             number: Color::Cyan,
@@ -365,7 +437,7 @@ fn dark_simple() -> Palette {
             operator: Color::Gray,
             function: Color::LightBlue,
             type_name: Color::LightCyan,
-            variable: Color::Gray,
+            variable: Color::White,
             tag: Color::LightBlue,
             attribute: Color::Cyan,
             punctuation: Color::Gray,
@@ -383,13 +455,18 @@ fn light_simple() -> Palette {
         dim: Color::DarkGray,
         border: Color::DarkGray,
         accent: Color::Blue,
-        on_accent: Color::White,
+        highlight: Color::Blue,
+        on_highlight: Color::White,
+        title: Color::Blue,
         chrome: Color::Gray,
         on_chrome: Color::Black,
         on_chrome_dim: Color::DarkGray,
         popup: Color::Gray,
         on_popup: Color::Black,
+        popup_border: Color::DarkGray,
+        on_popup_dim: Color::DarkGray,
         field: Color::White,
+        on_field: Color::Black,
         selection: Color::LightBlue,
         match_bg: Color::LightYellow,
         directory: Color::Blue,
@@ -423,22 +500,40 @@ fn light_simple() -> Palette {
     }
 }
 
-/// Turbo Vision: a blue editor, yellow text, cyan accents, and grey boxes with
-/// black on them for everything that floats above it.
-fn borland() -> Palette {
+/// The DOS-era full-screen editor: a blue ground, yellow text, grey boxes with
+/// black on them for everything that floats above it, and the green bar that
+/// marks the menu item under the cursor.
+fn retro() -> Palette {
     Palette {
         background: Color::Indexed(18),
         foreground: Color::Indexed(228),
         dim: Color::Indexed(250),
         border: Color::Indexed(45),
+        // Cyan frames on the blue, as the panes of this scheme always had.
         accent: Color::Indexed(51),
-        on_accent: Color::Indexed(18),
-        chrome: Color::Indexed(250),
+        // Green, and black on it: the bar under the cursor in a menu, on the
+        // button Enter would press and down a list is the one colour of this
+        // scheme nobody who has seen it forgets. It is not the frame colour,
+        // which is why `highlight` is not `accent` here.
+        highlight: Color::Indexed(34),
+        on_highlight: Color::Indexed(16),
+        // Black: a dialog's title is drawn on the grey box, where the cyan
+        // that reads so well on the blue is barely a colour at all.
+        title: Color::Indexed(16),
+        // 248 is the grey the hardware palette actually had, and the bars,
+        // the drop-downs and the dialogs are all cut from it.
+        chrome: Color::Indexed(248),
         on_chrome: Color::Indexed(16),
-        on_chrome_dim: Color::Indexed(240),
-        popup: Color::Indexed(250),
+        on_chrome_dim: Color::Indexed(238),
+        popup: Color::Indexed(248),
         on_popup: Color::Indexed(16),
+        on_popup_dim: Color::Indexed(238),
+        // Black: a drop-down of this scheme is a grey box with a black frame
+        // sitting on the blue, and the cyan `border` — which is what the
+        // frames *on* the blue are — is barely there against the grey.
+        popup_border: Color::Indexed(16),
         field: Color::Indexed(18),
+        on_field: Color::Indexed(228),
         selection: Color::Indexed(31),
         match_bg: Color::Indexed(90),
         directory: Color::Indexed(51),
@@ -570,6 +665,52 @@ mod tests {
             Theme::default().background,
             Theme::new(ThemeKind::Dark).background
         );
+    }
+
+    /// Text has to be a different colour from what it is drawn on.
+    ///
+    /// The pairs are the ones a widget actually puts together, and the check
+    /// exists because `dim` used to be all three of them: it is the colour of
+    /// the status readout, of a menu shortcut and of a panel title, which are
+    /// drawn on the chrome, on a popup and on the editor's ground in turn. A
+    /// theme whose bars are the same grey as its dim text loses the readout
+    /// entirely, and nothing but a check says so before someone runs it.
+    #[test]
+    fn no_theme_draws_text_in_the_colour_underneath_it() {
+        for kind in ThemeKind::ALL.iter().copied() {
+            let p = palette(kind);
+            let t = Theme::new(kind);
+            for (text, ground, what) in [
+                (t.chrome_dim, p.chrome, "the status readout on the chrome"),
+                (t.menu_shortcut, p.popup, "a menu shortcut on a drop-down"),
+                (p.on_popup, p.popup, "a menu item"),
+                // The rule between two groups of a menu is the border colour
+                // drawn on the popup, and a menu whose groups run together is
+                // how this whole check started.
+                (t.popup_border, p.popup, "the rule between two menu groups"),
+                (p.on_highlight, p.highlight, "the row under the cursor"),
+                (p.title, p.popup, "a dialog's title"),
+                (
+                    t.popup_border,
+                    p.background,
+                    "a dialog's frame over the ground",
+                ),
+                (p.on_field, p.field, "text in an input field"),
+                (p.field, p.popup, "a dialog's input field"),
+                (p.field, p.chrome, "the find bar's input field"),
+                (t.dim, p.background, "a panel title on the ground"),
+                (t.directory, p.background, "a directory in the sidebar"),
+                (
+                    t.directory,
+                    p.chrome,
+                    "a directory on an unfocused selection",
+                ),
+                (t.foreground, p.background, "a file name in the sidebar"),
+                (t.line_number, p.background, "a line number"),
+            ] {
+                assert_ne!(text, ground, "{}: {what} is invisible", kind.label());
+            }
+        }
     }
 
     /// The simplified palettes are the sixteen ANSI colours, so that the

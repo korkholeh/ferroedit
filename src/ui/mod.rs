@@ -12,6 +12,7 @@ pub mod menu;
 pub mod scrollbar;
 pub mod search;
 pub mod statusbar;
+pub mod table;
 pub mod tabs;
 pub mod theme;
 
@@ -53,6 +54,10 @@ pub fn render(frame: &mut Frame, app: &App, rects: &LayoutRects, theme: &Theme) 
     if let Some(area) = rects.diff {
         diff::render(frame, app, area, theme);
     }
+    // The same, for a file being read as columns rather than as lines.
+    if let Some(area) = rects.table {
+        table::render(frame, app, area, theme);
+    }
     // Over the whole body, sidebar included: it is a screen, not a pane.
     if let Some(area) = rects.help {
         help::render(frame, app, area, theme);
@@ -68,6 +73,7 @@ pub fn render(frame: &mut Frame, app: &App, rects: &LayoutRects, theme: &Theme) 
 mod tests {
     use super::*;
     use crate::app::focus::FocusTarget;
+    use crate::commands::Command;
     use crate::editor::coords::VisualCol;
     use crate::editor::cursor::Motion;
     use ratatui::backend::TestBackend;
@@ -1223,5 +1229,170 @@ mod tests {
         let app = app_with_diff();
         let screen = draw(&app, 80, 24).join("\n");
         assert!(screen.contains("1/7"), "{screen}");
+    }
+
+    // --- the CSV table (SPEC §65) -----------------------------------------
+
+    /// A tab over a `.csv` file, which is what turns the table view on.
+    fn app_with_csv() -> App {
+        use crate::app::{Tab, TabItem};
+        use crate::editor::document::Document;
+
+        let mut app = app();
+        let path = std::path::PathBuf::from("/dev/null/ferroedit-fixture/people.csv");
+        let document = Document::from_text(
+            "name,country,age\nada,uk,36\ngrace,us,45\n\"van der berg, jan\",nl,51\n",
+            Some(path),
+        );
+        app.tabs.push(TabItem::editing(Tab::new(document)));
+        app.active_tab = Some(app.tabs.len() - 1);
+        app.focus = FocusTarget::Editor;
+        app.sync_table();
+        app
+    }
+
+    #[test]
+    fn a_csv_file_opens_as_a_table_with_its_first_row_as_the_header() {
+        let app = app_with_csv();
+        let rows = draw(&app, 80, 24);
+        let screen = rows.join("\n");
+        assert!(screen.contains("name"), "{screen}");
+        assert!(screen.contains("country"), "{screen}");
+        assert!(screen.contains("ada"), "{screen}");
+        assert!(screen.contains("grace"), "{screen}");
+        assert!(
+            screen.contains("van der berg, jan"),
+            "a quoted comma is one field: {screen}"
+        );
+        assert!(
+            !screen.contains("name,country"),
+            "the raw line must not show through the grid: {screen}"
+        );
+    }
+
+    #[test]
+    fn the_status_bar_offers_the_delimiter_and_the_quote_while_a_table_shows() {
+        let app = app_with_csv();
+        let screen = draw(&app, 100, 24).join("\n");
+        assert!(screen.contains("Row 1/3"), "{screen}");
+        assert!(screen.contains("Delim ,"), "{screen}");
+        assert!(screen.contains("Quote \""), "{screen}");
+        assert!(
+            !screen.contains("Ln 1, Col 1"),
+            "a grid has no caret to report: {screen}"
+        );
+    }
+
+    #[test]
+    fn the_text_view_puts_the_lines_and_the_cursor_readout_back() {
+        let mut app = app_with_csv();
+        crate::commands::execute::execute_command(&mut app, Command::ToggleTableView);
+        app.sync_table();
+        let screen = draw(&app, 100, 24).join("\n");
+        assert!(screen.contains("name,country,age"), "{screen}");
+        assert!(screen.contains("Ln 1, Col 1"), "{screen}");
+        assert!(!screen.contains("Delim"), "{screen}");
+    }
+
+    /// The grid is drawn on the theme's ground like every other pane: `Clear`
+    /// takes the pane back to the *terminal's* default, and a table that kept
+    /// it would be the one pane a light theme could not reach.
+    #[test]
+    fn the_grid_is_painted_in_the_theme_that_is_chosen() {
+        use crate::config::ThemeKind;
+
+        let app = app_with_csv();
+        for kind in [ThemeKind::Light, ThemeKind::Dark] {
+            let theme = Theme::new(kind);
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal
+                .draw(|frame| {
+                    let rects = layout::compute(frame.area(), &app);
+                    render(frame, &app, &rects, &theme);
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            let rects = layout::compute(Rect::new(0, 0, 80, 24), &app);
+            let table = rects.table.expect("the table is showing");
+            let cell = &buffer[(table.x + 2, table.y + 2)];
+            assert_eq!(
+                cell.style().bg,
+                Some(theme.background),
+                "{kind:?}: the grid keeps the terminal's own ground"
+            );
+        }
+    }
+
+    #[test]
+    fn a_selected_block_of_cells_is_marked_and_counted() {
+        let mut app = app_with_csv();
+        crate::commands::execute::execute_command(
+            &mut app,
+            Command::ExtendSelection(crate::editor::cursor::Motion::Down),
+        );
+        let screen = draw(&app, 100, 24).join("\n");
+        assert!(screen.contains("Sel 2×1"), "{screen}");
+
+        let theme = Theme::default();
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal
+            .draw(|frame| {
+                let rects = layout::compute(frame.area(), &app);
+                render(frame, &app, &rects, &theme);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let rects = layout::compute(Rect::new(0, 0, 100, 24), &app);
+        let table = rects.table.unwrap();
+        // The cursor ended on the second row, so the first is the block's other
+        // half: it is drawn the way selected text is, and the cursor's own cell
+        // keeps the selection colour.
+        let gutter = app.active().unwrap().table.as_ref().unwrap().gutter() as u16;
+        let x = table.x + gutter + 1;
+        assert_eq!(
+            buffer[(x, table.y + 2)].style().bg,
+            theme.editor_selection.bg
+        );
+        assert_eq!(buffer[(x, table.y + 3)].style().bg, theme.selection.bg);
+    }
+
+    #[test]
+    fn a_cell_being_typed_into_is_drawn_over_the_grid() {
+        let mut app = app_with_csv();
+        crate::commands::execute::execute_command(&mut app, Command::InsertChar('Z'));
+        crate::commands::execute::execute_command(&mut app, Command::InsertChar('u'));
+        let screen = draw(&app, 80, 24).join("\n");
+        assert!(screen.contains("Zu"), "what is being typed: {screen}");
+        assert!(
+            !screen.contains("ada"),
+            "and not the value it is replacing: {screen}"
+        );
+        assert!(
+            screen.contains("grace"),
+            "the rest of the grid is untouched: {screen}"
+        );
+    }
+
+    #[test]
+    fn the_selected_header_cell_is_marked_like_any_other_selection() {
+        let mut app = app_with_csv();
+        crate::commands::execute::execute_command(
+            &mut app,
+            Command::MoveCursor(crate::editor::cursor::Motion::Up),
+        );
+        let screen = draw(&app, 100, 24).join("\n");
+        assert!(screen.contains("Header · name"), "{screen}");
+    }
+
+    #[test]
+    fn a_different_delimiter_redraws_the_same_file_as_different_columns() {
+        let mut app = app_with_csv();
+        crate::commands::execute::execute_command(&mut app, Command::SetCsvDelimiter(';'));
+        app.sync_table();
+        let screen = draw(&app, 80, 24).join("\n");
+        assert!(
+            screen.contains("name,country,age"),
+            "one column now, so the whole line is one cell: {screen}"
+        );
     }
 }

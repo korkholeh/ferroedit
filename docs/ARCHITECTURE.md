@@ -52,13 +52,13 @@ src/
   terminal.rs             # RAII TerminalGuard + panic hook
   docs.rs                 # renders docs/SHORTCUTS.md from the tables (ADR-028)
   app/       mod.rs focus.rs tabs.rs dialog.rs diff.rs input_field.rs
-             browser.rs notifications.rs search.rs workspace.rs
+             browser.rs notifications.rs search.rs table.rs workspace.rs
   event/     mod.rs keyboard.rs mouse.rs
   commands/  mod.rs execute.rs
   ui/        mod.rs layout.rs menu.rs tabs.rs editor.rs explorer.rs field.rs
-             git.rs search.rs statusbar.rs dialog.rs diff.rs theme.rs
+             git.rs search.rs statusbar.rs dialog.rs diff.rs table.rs theme.rs
   editor/    mod.rs document.rs cursor.rs selection.rs history.rs search.rs
-             coords.rs viewport.rs wrap.rs clipboard.rs
+             coords.rs viewport.rs wrap.rs clipboard.rs charset.rs csv.rs
   filesystem/ mod.rs tree.rs      # file operations; lazy, ignore-aware tree
   git/       mod.rs service.rs parser.rs models.rs diff.rs worker.rs
   syntax/    mod.rs highlighter.rs cache.rs

@@ -15,6 +15,7 @@ use crate::app::App;
 use crate::commands::Command;
 use crate::editor::viewport::gutter_width;
 use crate::ui::layout::LayoutRects;
+use crate::ui::table;
 
 /// Rows the wheel moves per notch, matching the usual terminal convention.
 const WHEEL_STEP: i16 = 3;
@@ -189,6 +190,31 @@ fn left_click(app: &App, rects: &LayoutRects, at: Position) -> Option<Command> {
     if rects.diff.is_some_and(|diff| diff.contains(at)) {
         return Some(Command::FocusPane(FocusTarget::Diff));
     }
+    // The table covers the editor pane the same way, and for the same reason
+    // has to be tested before it: a click on a cell must not put a caret in the
+    // text behind it (SPEC §65).
+    if let Some(area) = rects.table.filter(|table| table.contains(at)) {
+        if let Some((row, column)) = table::cell_at(app, area, at) {
+            // A click on a column's name takes the whole column, which is what
+            // it does in every grid — and leaves the cursor on the name, so
+            // renaming it is still one key away (SPEC §65).
+            return Some(match row {
+                Some(row) => Command::SelectCell {
+                    row: Some(row),
+                    column,
+                },
+                None => Command::SelectColumnAt { column },
+            });
+        }
+        // A click on a record's number takes the whole record, which is the
+        // gesture a grid has for selecting a row (SPEC §65).
+        if let Some(row) = table::record_at(app, area, at) {
+            return Some(Command::SelectRowAt { row });
+        }
+        // What is left is chrome — the rule, and the blank above the numbers —
+        // and a click on it focuses the pane and selects nothing.
+        return Some(Command::FocusPane(FocusTarget::Editor));
+    }
     if rects.editor.contains(at) {
         return Some(editor_click(app, rects.editor, at));
     }
@@ -204,10 +230,10 @@ fn left_click(app: &App, rects: &LayoutRects, at: Position) -> Option<Command> {
     if rects.git_panel.contains(at) {
         return Some(git_click(app, rects.git_panel, at));
     }
-    // The readout on the status bar is four questions and three statements
-    // (ADR-058). A click on one of the questions opens the dialog that answers
-    // it; the rest of the row — the notification, the branch, the focus label —
-    // is not a control and stays inert.
+    // The readout on the status bar is a row of questions and statements
+    // (ADR-058, SPEC §65). A click on one of the questions opens the dialog that
+    // answers it; the rest of the row — the notification, the focus label, a
+    // table's row count — is not a control and stays inert.
     if rects.status_bar.contains(at) {
         return rects
             .status_zones
@@ -277,6 +303,20 @@ fn drag(app: &App, rects: &LayoutRects, at: Position) -> Option<Command> {
     if rects.menu_popup.is_some() || app.focus != FocusTarget::Editor {
         return None;
     }
+    // Over a table the drag makes a block of cells rather than a run of
+    // characters, and it is clamped into the pane for the same reason: a drag
+    // that runs off the edge keeps selecting to the edge (SPEC §65).
+    if let Some(area) = rects.table {
+        if area.width == 0 || area.height == 0 {
+            return None;
+        }
+        let clamped = Position::new(
+            at.x.clamp(area.x, area.right() - 1),
+            at.y.clamp(area.y, area.bottom() - 1),
+        );
+        let (row, column) = table::cell_at(app, area, clamped)?;
+        return Some(Command::ExtendCellTo { row, column });
+    }
     let editor = rects.editor;
     if editor.width == 0 || editor.height == 0 {
         return None;
@@ -345,6 +385,9 @@ fn scroll(rects: &LayoutRects, at: Position, delta: i16) -> Option<Command> {
     if rects.diff.is_some_and(|diff| diff.contains(at)) {
         return Some(Command::DiffScroll(delta));
     }
+    if rects.table.is_some_and(|table| table.contains(at)) {
+        return Some(Command::ScrollTable(delta));
+    }
     // The wheel over the tab strip scrolls the strip, not the document under
     // it: a bar with more tabs on it than fit is the one place where the thing
     // the pointer is over has a sideways axis of its own.
@@ -371,6 +414,9 @@ fn scroll(rects: &LayoutRects, at: Position, delta: i16) -> Option<Command> {
 fn scroll_sideways(rects: &LayoutRects, at: Position, delta: i16) -> Option<Command> {
     if rects.diff.is_some_and(|diff| diff.contains(at)) {
         return Some(Command::DiffScrollHorizontal(delta));
+    }
+    if rects.table.is_some_and(|table| table.contains(at)) {
+        return Some(Command::ScrollTableHorizontal(delta));
     }
     if rects.editor.contains(at) || rects.editor_scrollbar.contains(at) {
         return Some(Command::ScrollEditorHorizontal(delta));
@@ -1093,6 +1139,105 @@ mod tests {
         assert_eq!(
             hit_test(&app, &rects, wheel(MouseEventKind::ScrollUp, x, y)),
             Some(Command::DiffScroll(-3))
+        );
+    }
+
+    /// The table covers the editor the way the viewer does, so a click on a
+    /// cell must not reach the text behind it (SPEC §65).
+    fn app_with_csv() -> App {
+        use crate::app::{Tab, TabItem};
+        use crate::editor::document::Document;
+
+        let mut app = app();
+        let path = std::path::PathBuf::from("/dev/null/ferroedit-fixture/people.csv");
+        let document = Document::from_text("name,country\nada,uk\ngrace,us\n", Some(path));
+        app.tabs.push(TabItem::editing(Tab::new(document)));
+        app.active_tab = Some(app.tabs.len() - 1);
+        app.focus = FocusTarget::Editor;
+        app.sync_table();
+        app
+    }
+
+    #[test]
+    fn clicking_a_cell_selects_it_rather_than_placing_a_cursor() {
+        let app = app_with_csv();
+        let rects = rects(&app);
+        let table = rects.table.expect("the table is showing");
+        // The first data row is under the header and its rule; the first
+        // column starts after the row-number gutter and its separator.
+        let gutter = app.active().unwrap().table.as_ref().unwrap().gutter() as u16;
+        let command = hit_test(&app, &rects, click(table.x + gutter + 1, table.y + 2));
+        assert_eq!(
+            command,
+            Some(Command::SelectCell {
+                row: Some(0),
+                column: 0
+            })
+        );
+    }
+
+    /// A click on a column's name takes the column, as it does in a
+    /// spreadsheet (SPEC §65).
+    #[test]
+    fn clicking_the_header_selects_the_whole_column() {
+        let app = app_with_csv();
+        let rects = rects(&app);
+        let table = rects.table.expect("the table is showing");
+        let gutter = app.active().unwrap().table.as_ref().unwrap().gutter() as u16;
+        assert_eq!(
+            hit_test(&app, &rects, click(table.x + gutter + 1, table.y)),
+            Some(Command::SelectColumnAt { column: 0 })
+        );
+        // The rule under the names is chrome: a click on it selects nothing.
+        assert_eq!(
+            hit_test(&app, &rects, click(table.x + gutter + 1, table.y + 1)),
+            Some(Command::FocusPane(FocusTarget::Editor))
+        );
+    }
+
+    #[test]
+    fn clicking_a_record_number_takes_the_whole_row() {
+        let app = app_with_csv();
+        let rects = rects(&app);
+        let table = rects.table.expect("the table is showing");
+        assert_eq!(
+            hit_test(&app, &rects, click(table.x, table.y + 2)),
+            Some(Command::SelectRowAt { row: Some(0) })
+        );
+        // The gutter above the records is blank chrome and selects nothing.
+        assert_eq!(
+            hit_test(&app, &rects, click(table.x, table.y)),
+            Some(Command::FocusPane(FocusTarget::Editor))
+        );
+    }
+
+    #[test]
+    fn dragging_over_the_grid_makes_a_block_of_cells() {
+        let app = app_with_csv();
+        let rects = rects(&app);
+        let table = rects.table.expect("the table is showing");
+        let gutter = app.active().unwrap().table.as_ref().unwrap().gutter() as u16;
+        assert_eq!(
+            hit_test(&app, &rects, drag_event(table.x + gutter + 1, table.y + 3)),
+            Some(Command::ExtendCellTo {
+                row: Some(1),
+                column: 0
+            })
+        );
+    }
+
+    #[test]
+    fn the_wheel_over_the_table_scrolls_the_grid_and_not_the_text() {
+        let app = app_with_csv();
+        let rects = rects(&app);
+        let (x, y) = centre(rects.table.expect("the table is showing"));
+        assert_eq!(
+            hit_test(&app, &rects, wheel(MouseEventKind::ScrollDown, x, y)),
+            Some(Command::ScrollTable(3))
+        );
+        assert_eq!(
+            hit_test(&app, &rects, wheel(MouseEventKind::ScrollRight, x, y)),
+            Some(Command::ScrollTableHorizontal(1))
         );
     }
 

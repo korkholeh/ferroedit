@@ -3,6 +3,7 @@
 pub mod charset;
 pub mod clipboard;
 pub mod coords;
+pub mod csv;
 pub mod cursor;
 pub mod document;
 pub mod history;

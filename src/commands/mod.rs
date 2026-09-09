@@ -282,6 +282,53 @@ pub enum Command {
     /// file's name and first line suggested.
     SetLanguage(String),
 
+    /// Swaps the active tab between the text and the CSV table (SPEC §65).
+    ToggleTableView,
+    /// Asks what separates the table's columns, and what quotes its fields
+    /// (ADR-062). Both are opened from the status bar as well as the menu.
+    CsvDelimiterPrompt,
+    CsvQuotePrompt,
+    /// Reads the file again with a different delimiter or quote character.
+    /// `None` for the quote is a file with no quoting at all.
+    SetCsvDelimiter(char),
+    SetCsvQuote(Option<char>),
+    /// Moves the table's window without moving the selected cell — the wheel.
+    ScrollTable(i16),
+    ScrollTableHorizontal(i16),
+    /// Selects a cell by where it was clicked: a row of the drawn window —
+    /// `None` for the header, which is a record like any other (SPEC §65) — and
+    /// a column of the whole table.
+    SelectCell {
+        row: Option<usize>,
+        column: usize,
+    },
+    /// Extends the table's selection to the cell under the pointer — the drag
+    /// that makes a block of cells (SPEC §65).
+    ExtendCellTo {
+        row: Option<usize>,
+        column: usize,
+    },
+    /// Selects a whole record by its number in the gutter, and a whole column
+    /// by its name in the header — the two gestures every grid has.
+    SelectRowAt {
+        row: Option<usize>,
+    },
+    SelectColumnAt {
+        column: usize,
+    },
+    /// Selects every cell of the record, or of the column, the cursor is on.
+    SelectRow,
+    SelectColumn,
+    /// Opens the selected cell for typing, over the value it already holds
+    /// (SPEC §65, ADR-063). Saving it and giving it up are not commands of
+    /// their own: they are what `Enter` and `Esc` mean while a cell is open,
+    /// and they are routed there rather than bound to keys the text view needs.
+    EditCell,
+    /// Adds a blank record under the selected one, and moves onto it.
+    InsertRecord,
+    /// Removes the selected record from the file.
+    DeleteRecord,
+
     MoveCursor(Motion),
     /// The same motions with the anchor left where it is — Shift+navigation.
     ExtendSelection(Motion),
@@ -310,6 +357,9 @@ pub enum Command {
     InsertNewline,
     Backspace,
     Delete,
+    /// Removes the caret's whole line, or every line a selection touches, as
+    /// one undo step (SPEC §15).
+    DeleteLine,
 
     /// Moves the dialog's button selection, wrapping at both ends.
     DialogMove(i16),
@@ -536,6 +586,28 @@ impl Command {
             Self::LanguagePrompt => "Choose the grammar that highlights this file".into(),
             Self::SetLanguage(name) => format!("Highlight this file as {name}"),
 
+            Self::ToggleTableView => "Show this file as a table, or as text".into(),
+            Self::CsvDelimiterPrompt => "Choose what separates the table's columns".into(),
+            Self::CsvQuotePrompt => "Choose what quotes the table's fields".into(),
+            Self::SetCsvDelimiter(ch) => format!("Split the columns on {ch:?}"),
+            Self::SetCsvQuote(Some(ch)) => format!("Quote the fields with {ch:?}"),
+            Self::SetCsvQuote(None) => "Read the fields unquoted".into(),
+            Self::ScrollTable(delta) => {
+                step(*delta, "Scroll the table down", "Scroll the table up")
+            }
+            Self::ScrollTableHorizontal(delta) => {
+                step(*delta, "Scroll the table right", "Scroll the table left")
+            }
+            Self::SelectCell { .. } => "Select the cell under the pointer".into(),
+            Self::ExtendCellTo { .. } => "Extend the selection to the pointer".into(),
+            Self::SelectRowAt { .. } => "Select the row under the pointer".into(),
+            Self::SelectColumnAt { .. } => "Select the column under the pointer".into(),
+            Self::SelectRow => "Select this row".into(),
+            Self::SelectColumn => "Select this column".into(),
+            Self::EditCell => "Type into the selected cell".into(),
+            Self::InsertRecord => "Add a row under this one".into(),
+            Self::DeleteRecord => "Delete this row".into(),
+
             Self::MoveCursor(motion) => format!("Move the cursor {}", motion_name(*motion)),
             Self::ExtendSelection(motion) => {
                 format!("Extend the selection {}", motion_name(*motion))
@@ -551,6 +623,7 @@ impl Command {
             Self::InsertNewline => "Insert a newline".into(),
             Self::Backspace => "Delete the cluster before the cursor".into(),
             Self::Delete => "Delete the cluster after the cursor".into(),
+            Self::DeleteLine => "Delete the whole line, or every selected line".into(),
 
             Self::DialogMove(delta) => step(
                 *delta,
@@ -741,11 +814,27 @@ pub static MENUS: &[MenuDef] = &[
             item("Cut", Command::Cut),
             item("Copy", Command::Copy),
             item("Paste", Command::Paste),
+            SEP,
+            item("Delete Line", Command::DeleteLine),
+            // The three the table adds (SPEC §65). They are in the Edit menu
+            // rather than in View because they change the file, and they are
+            // spelled "row" rather than "record" because that is what the grid
+            // on screen calls them.
+            SEP,
+            item("Edit Cell", Command::EditCell),
+            item("Insert Row", Command::InsertRecord),
+            item("Delete Row", Command::DeleteRecord),
         ],
     },
     MenuDef {
         title: "Selection",
-        items: &[item("Select All", Command::SelectAll)],
+        items: &[
+            item("Select All", Command::SelectAll),
+            // The two shapes a grid has and text has not (SPEC §65).
+            SEP,
+            item("Select Row", Command::SelectRow),
+            item("Select Column", Command::SelectColumn),
+        ],
     },
     MenuDef {
         title: "Search",
@@ -780,6 +869,14 @@ pub static MENUS: &[MenuDef] = &[
             item("Line Endings…", Command::LineEndingPrompt),
             item("Encoding…", Command::EncodingPrompt),
             SEP,
+            // The CSV view and the two questions it puts on the status bar
+            // (SPEC §65). Here for the same reason the three above are: the
+            // readouts are only there while the table is showing, and turning
+            // it on has to be reachable from somewhere that always is.
+            item("Table View", Command::ToggleTableView),
+            item("Column Delimiter…", Command::CsvDelimiterPrompt),
+            item("Quote Character…", Command::CsvQuotePrompt),
+            SEP,
             // The sideways window needs entries of its own for the same reason
             // Word Wrap does: `Alt` is a modifier several terminals never
             // deliver, and a command reachable only through one is a command
@@ -801,7 +898,7 @@ pub static MENUS: &[MenuDef] = &[
                 "Theme: Light Simple",
                 Command::SetTheme(ThemeKind::LightSimple),
             ),
-            item("Theme: Borland", Command::SetTheme(ThemeKind::Borland)),
+            item("Theme: Retro", Command::SetTheme(ThemeKind::Retro)),
         ],
     },
     MenuDef {

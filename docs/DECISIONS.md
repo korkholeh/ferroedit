@@ -2060,3 +2060,138 @@ ignored paths (ADR-040), so a file written into `target/` while it is expanded a
 on the next explicit refresh rather than on its own; that keeps a `cargo build` from
 waking the editor twice a second, which is worth more than a live listing of build
 output.
+
+---
+
+## ADR-062: The CSV view is a second reading of the buffer, not a second kind of tab
+
+**Decision.** A `.csv` or `.tsv` tab draws a table instead of the text, and the table is
+`app::table::TableView` hanging off the ordinary editor `Tab` — the same `Document`, the
+same history, the same `Ctrl+S`. It is rebuilt from the buffer by `App::sync_table` on any
+frame where the document's revision or the dialect has changed, and the tab is read-only
+for as long as it is showing. The delimiter and the quote character are a `Dialect` the
+user owns: sniffed on open, shown on the status bar, and changed from there or from the
+View menu (SPEC §65).
+
+**Why.** The obvious shape was the diff viewer's — a `TabItem` variant of its own
+(ADR-053) — and it is wrong here. A diff has no file behind it: nothing to save, nothing to
+undo, nothing the watcher can invalidate. A CSV has all three, and a tab variant would have
+had to re-implement every one of them or refuse to. Making the table a *view* of the tab
+means `Ctrl+S`, reload, the stale-file prompt, Save As and the encoding picker all keep
+working with no change: they act on the document, and the document is still there.
+
+The parse is thrown away and redone rather than patched. A table patched in step with the
+edits is a second model of the file that can disagree with the first one, and the ways it
+can disagree are exactly the ways a CSV is interesting — a quote opened on line 900 changes
+what every line after it means. Reparsing costs one walk of the rope on the frames where
+something changed, which for a file a person is reading is a frame every few seconds.
+
+**Typing goes through the parse, not around it.** A cell is a range of a line, sometimes of
+several lines, and sometimes of neither — a value that was quoted is not the bytes that are
+in the file — so there is nowhere in a cell to put the document's caret. The grid therefore
+opens a one-line field of its own over the cell and writes the value back through the span
+the parse recorded; ADR-063 has the rest of it. What stays read-only is the handful of
+commands that act on a *range* of the text — Select All, Replace — which have nothing to
+act on in a grid.
+
+**The dialect is asked, not guessed twice.** Sniffing is a heuristic and it is wrong on
+real files: a semicolon file whose fields contain commas looks exactly like a comma file
+whose fields contain semicolons. So the guess is made once, on open, from whichever
+candidate splits the first twenty lines into a consistent number of columns — and it is put
+on the status bar as a control rather than a label (ADR-058), so being wrong costs one
+click. Space and colon are in the picker but never guessed: prose splits evenly on spaces
+and timestamps split evenly on colons, so a sniffer offered them reads an ordinary text
+file as a wide table.
+
+**Consequence.** A `.csv` file no longer opens on its text, which is a surprise for anyone
+who opened it to fix a stray quote. `F4` is one key and it is in the View menu. The 100 000-row
+cap means a very large export is a table of its first hundred thousand records and a text file
+for the rest; the view says it was cut. Highlighting is off while the grid is showing — there
+is nothing to highlight in a cell — so the status bar drops the grammar readout rather than
+offering to change something that does not happen.
+
+---
+
+## ADR-063: A cell is edited through the span it was parsed from
+
+**Decision.** The CSV grid is writable, and every edit it makes is an ordinary edit of the
+document. The parser records, for each field, the characters of the buffer it was read from
+(`csv::Span`); writing a cell renders the new value back into the dialect and replaces
+exactly those characters, through the same `Document::replace_matches` a Replace uses. So a
+cell edit joins the undo history, marks the tab modified and is written by `Ctrl+S`, and the
+table is re-parsed from the buffer afterwards like any other change (ADR-062). Typing into a
+cell happens in an `InputField` drawn over it — the one a dialog prompt and the find bar use
+— and only what is committed reaches the buffer (SPEC §65).
+
+**Why a span rather than a re-serialised record.** Rewriting the whole record from the parsed
+fields is one line of code and quietly rewrites the file: a field somebody quoted by hand
+loses its quotes, a `1.0` that was written `1.00` keeps its meaning and loses its text. The
+span touches the field being edited and nothing else, so an edit to one cell is one field of
+the diff — which is what makes the table safe to use on a file that is under review.
+
+**Why quoting is added only where it is needed.** `render_field` quotes a value when leaving
+the quotes out would change the reading — the value holds the delimiter, the quote character
+or a line break — and doubles an inner quote, as RFC 4180 says. A file whose fields were
+never quoted therefore still has none after an edit. Where the dialect has no quote character
+at all and the value needs one, there is no honest answer: dropping the character and
+splitting the row are both silent corruption, so the edit is refused and says why.
+
+**Why the header is a row.** The selection reaches it, one above the first record, and it is
+edited like any other cell. Renaming a column is the second thing anybody does to a
+spreadsheet, and the alternative — a dialog of its own, or a trip through the text view — is
+a second way to do the one thing the grid is for. It is the file's first line either way.
+
+**What is refused, and why not more.** A value carried across a line break by a quoted
+newline is edited in the text view: the grid draws it as one row, the buffer holds it as
+several, and a one-line field over it would be a caret in a value that is not there. A paste
+holding line breaks is refused for the same reason in reverse — the lines of a pasted block
+are records, and guessing which the user meant is worse than saying so.
+
+**Consequence.** A `.csv` tab is now a file people change rather than only read, so the
+grid's mistakes cost data rather than a redraw: hence the write path is one function, the
+value is compared before it is written (opening a cell and closing it must not dirty a
+file), and the refusals are three named errors rather than a bool. Undo is the document's, so
+`Ctrl+Z` in the grid can undo an edit that was made in the text view and vice versa — which
+is right, because there is one file and one history.
+
+---
+
+## ADR-064: The grid's selection is a rectangle of cells, not a range of text
+
+**Decision.** A table has a selection of its own: an anchor cell and the cursor cell, and
+everything in the rectangle between them (`app::table::CellRange`). `Shift` with any motion
+key extends it, a drag makes it, a click on a record's number takes the whole record, and
+*Select All* takes the table; the Selection menu adds Select Row and Select Column. `Ctrl+C`
+copies the block, `Ctrl+X` copies and empties it in one undo step, and `Delete` empties it.
+The document's own selection is untouched while the grid is showing (SPEC §65).
+
+**Why not the document's selection.** The obvious move was to select the text under the
+cells and let the existing copy and cut act on it. It is wrong in both directions: the text
+between the first and the last cell of a block includes every column in between — a
+three-column block of a twenty-column file would copy the seventeen columns nobody selected —
+and a column is not a range of text at all. A rectangle is the shape the user is pointing at,
+and it is only expressible in the grid's own coordinates.
+
+**Why the clipboard writes the file's dialect.** A copied block goes out as fields joined by
+the file's delimiter and rows joined by newlines, quoted where a value needs it, so pasting
+it back into a table, into the text view, or into another program means the same thing each
+time. A single cell stays its bare value — that is what is on screen, and it is what pastes
+into another cell. The asymmetry is deliberate: a block is a piece of a *file*, a cell is a
+*value*.
+
+**Why one `replace_matches` for a cut.** Emptying a block is one action, and a cut undone a
+cell at a time would make the user press `Ctrl+Z` once per column (SPEC §23). The spans of
+every selected cell go to the document in ascending order and come back as one transaction,
+which is the same path Replace All takes.
+
+**Where the cursor lands.** Selecting a column puts the anchor on the last record and the
+cursor on the *header*, not the other way round. A column is selected by clicking its name,
+and the name is also the thing one renames: leaving the cursor there means the same click
+gives both `Ctrl+C` over the column and `F2` over its name, instead of making the user climb
+back up the file for the second one.
+
+**Consequence.** The table now has two selections to keep straight — its own, and the
+document's, which the text view goes back to — and they are deliberately not synchronised: a
+block of cells has no honest text range, and pretending otherwise is what the first paragraph
+rejects. A parse that shrinks the table clamps the anchor with the cursor, so a selection can
+never outlive the rows it was made over.

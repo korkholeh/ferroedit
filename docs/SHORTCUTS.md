@@ -75,8 +75,12 @@ The document pane. Every motion here also has a `Shift` form that extends the se
 | `Enter` | Insert a newline |
 | `Backspace` | Delete the cluster before the cursor |
 | `Delete` | Delete the cluster after the cursor |
+| `Ctrl+D` | Delete the whole line, or every selected line |
 | `Tab` | Insert a tab |
 | `F5` | Re-read the active file from disk |
+| `F4` | Show this file as a table, or as text |
+| `F2` | Type into the selected cell |
+| `Insert` | Add a row under this one |
 
 ## Explorer
 
@@ -241,7 +245,13 @@ Every item is a command, and the *Shortcut* column is the same lookup the menu i
 | Edit | Cut | `Ctrl+X` | Editor |
 | Edit | Copy | `Ctrl+C` | Editor |
 | Edit | Paste | `Ctrl+V` | Editor |
+| Edit | Delete Line | `Ctrl+D` | Editor |
+| Edit | Edit Cell | `F2` | Editor |
+| Edit | Insert Row | `Insert` | Editor |
+| Edit | Delete Row | — | — |
 | Selection | Select All | `Ctrl+A` | Editor |
+| Selection | Select Row | — | — |
+| Selection | Select Column | — | — |
 | Search | Find… | `Ctrl+F` | anywhere |
 | Search | Replace… | `Ctrl+H` | anywhere |
 | Search | Find Next | `F3` | anywhere |
@@ -257,6 +267,9 @@ Every item is a command, and the *Shortcut* column is the same lookup the menu i
 | View | Syntax Mode… | — | — |
 | View | Line Endings… | — | — |
 | View | Encoding… | — | — |
+| View | Table View | `F4` | Editor |
+| View | Column Delimiter… | — | — |
+| View | Quote Character… | — | — |
 | View | Scroll Left | `Alt+Left` | Editor |
 | View | Scroll Right | `Alt+Right` | Editor |
 | View | Focus Explorer | — | — |
@@ -266,7 +279,7 @@ Every item is a command, and the *Shortcut* column is the same lookup the menu i
 | View | Theme: Light | — | — |
 | View | Theme: Dark Simple | — | — |
 | View | Theme: Light Simple | — | — |
-| View | Theme: Borland | — | — |
+| View | Theme: Retro | — | — |
 | Git | Refresh | `F5` | Git panel |
 | Git | Stage | — | — |
 | Git | Unstage | — | — |
@@ -285,7 +298,7 @@ Every item is a command, and the *Shortcut* column is the same lookup the menu i
 
 ## Mouse
 
-Clicking a row of a dialog's list selects it without choosing it — unlike the explorer's rows (ADR-020), the confirm button is right there and choosing a branch by accident is a checkout. The Open browser is the exception: a click on the row that is *already* selected walks into it, so browsing costs one click a step, and the wheel over its rows moves the selection through them (ADR-051). Clicking in the editor places the cursor, dragging selects, and a double-click selects the word under the pointer. The wheel scrolls the pane under the pointer without moving the cursor. Clicking a tab switches to it; clicking its `×`, or middle-clicking it, closes it. When there are more tabs than fit, the wheel over the tab strip scrolls it sideways and its `‹` and `›` arrows step it one tab at a time. Clicking a row in the explorer opens the file or folds the directory in one click (ADR-020). Clicking a row of the find bar puts the caret in that row's field, and its `[Aa]`, `[Replace]` and `[All]` are clickable — the fallback for terminals that swallow `Alt`. On the status bar, most of the right-hand readout is questions (ADR-058): `Ln 12, Col 8` opens Go to Line, the charset name the encoding picker (ADR-059), `LF` / `CRLF` the line-ending picker, the grammar's name the syntax picker, and the branch name the branch picker. Each is a menu entry too, so none of them needs a mouse. What is left — the notification, the focus label, the selection count — reports where you already are and stays inert.
+Clicking a row of a dialog's list selects it without choosing it — unlike the explorer's rows (ADR-020), the confirm button is right there and choosing a branch by accident is a checkout. The Open browser is the exception: a click on the row that is *already* selected walks into it, so browsing costs one click a step, and the wheel over its rows moves the selection through them (ADR-051). Clicking in the editor places the cursor, dragging selects, and a double-click selects the word under the pointer. Over a table (SPEC §65) a click selects the cell instead, dragging selects a block of cells, a click on a column's name takes the whole column and one on a record's number takes the whole record; clicking away from a cell being typed into saves it, and the wheel scrolls the grid while `Shift`+wheel moves it sideways. The wheel scrolls the pane under the pointer without moving the cursor. Clicking a tab switches to it; clicking its `×`, or middle-clicking it, closes it. When there are more tabs than fit, the wheel over the tab strip scrolls it sideways and its `‹` and `›` arrows step it one tab at a time. Clicking a row in the explorer opens the file or folds the directory in one click (ADR-020). Clicking a row of the find bar puts the caret in that row's field, and its `[Aa]`, `[Replace]` and `[All]` are clickable — the fallback for terminals that swallow `Alt`. On the status bar, most of the right-hand readout is questions (ADR-058): `Ln 12, Col 8` opens Go to Line, the charset name the encoding picker (ADR-059), `LF` / `CRLF` the line-ending picker, the grammar's name the syntax picker, the branch name the branch picker, and — while a table is showing — `Delim` and `Quote` the two pickers that say how the file is split into columns. Each is a menu entry too, so none of them needs a mouse. What is left — the notification, the focus label, the selection count — reports where you already are and stays inert.
 
 ## Terminal limits
 

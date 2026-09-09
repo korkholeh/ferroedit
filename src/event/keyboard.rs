@@ -281,11 +281,26 @@ pub static BINDINGS: &[Binding] = &[
     editor(KeyCode::Enter, Command::InsertNewline, "Enter"),
     editor(KeyCode::Backspace, Command::Backspace, "Backspace"),
     editor(KeyCode::Delete, Command::Delete, "Delete"),
+    // Ctrl+D rather than the Ctrl+Shift+K other editors use: a legacy terminal
+    // cannot tell Ctrl+Shift+K from Ctrl+K, and a key that deletes a line in
+    // one terminal and does nothing in another is worse than none (ADR-008).
+    ctrl_editor(KeyCode::Char('d'), Command::DeleteLine, "Ctrl+D"),
     editor(KeyCode::Tab, Command::InsertChar('\t'), "Tab"),
     // `F5` is "show me what is really there" in whichever pane has focus, and
     // in the editor what is really there is the file (ADR-043). It asks first
     // when the buffer holds something the file does not.
     editor(KeyCode::F(5), Command::Reload, "F5"),
+    // `F4` swaps the pane between the text and the table (SPEC §65). A function
+    // key rather than a chord: it is the one command that has to work while the
+    // table has the pane, and every `Ctrl` letter that reads as "table" is
+    // already an editing command the table refuses.
+    editor(KeyCode::F(4), Command::ToggleTableView, "F4"),
+    // The two keys the grid adds. `F2` is the rename key every file manager and
+    // every spreadsheet has, and over the text it says which key shows a table;
+    // `Insert` adds a record, which is a key no terminal spends on anything else
+    // and the only one whose name is already the command (SPEC §65).
+    editor(KeyCode::F(2), Command::EditCell, "F2"),
+    editor(KeyCode::Insert, Command::InsertRecord, "Insert"),
     // --- sidebar ----------------------------------------------------------
     sidebar(
         FocusTarget::Explorer,
@@ -803,7 +818,7 @@ mod tests {
             resolve(key(KeyCode::Char('x'), NONE), FocusTarget::Explorer),
             None
         );
-        assert_eq!(resolve(key(KeyCode::F(4), NONE), FocusTarget::Editor), None);
+        assert_eq!(resolve(key(KeyCode::F(9), NONE), FocusTarget::Editor), None);
     }
 
     #[test]

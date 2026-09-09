@@ -6,11 +6,13 @@
 //! clip the notification; now the pieces nobody is reading — the encoding, the
 //! focus label — leave first and the sentence gets its room back (ADR-039).
 //!
-//! Four of those pieces are also questions (ADR-058): the cursor position, the
+//! Most of those pieces are also questions (ADR-058): the cursor position, the
 //! line ending, the encoding and the grammar each open the dialog that changes
-//! them. That is why `zones` is public — `ui::layout` asks where each piece
-//! landed, and the mouse hit-tests against those rects, so what is drawn and
-//! what is clickable are computed by the same code and cannot drift apart.
+//! them, and a table adds two more of its own — the delimiter and the quote
+//! character (SPEC §65). That is why `zones` is public — `ui::layout` asks where
+//! each piece landed, and the mouse hit-tests against those rects, so what is
+//! drawn and what is clickable are computed by the same code and cannot drift
+//! apart.
 
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
@@ -19,6 +21,7 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::notifications::NotificationKind;
+use crate::app::table::TableView;
 use crate::app::App;
 use crate::commands::Command;
 use crate::editor::charset::Charset;
@@ -27,11 +30,11 @@ use crate::ui::theme::Theme;
 
 /// A piece of the readout that answers a click (ADR-058).
 ///
-/// Every piece whose dialog is unambiguous is here: the four that describe the
+/// Every piece whose dialog is unambiguous is here: the ones that describe the
 /// file, and the branch, whose picker is the one thing a branch name could
 /// sensibly open. The focus label and the selection count are left out — they
 /// report where you already are, and a click that took them somewhere would be
-/// a guess.
+/// a guess, and so is the table's own `Row 3/128`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusZone {
     Cursor,
@@ -39,6 +42,11 @@ pub enum StatusZone {
     LineEnding,
     Language,
     Branch,
+    /// The two the CSV view adds, and the only two that come and go with what
+    /// the pane is showing (SPEC §65): a file read as text has no delimiter to
+    /// ask about.
+    CsvDelimiter,
+    CsvQuote,
 }
 
 impl StatusZone {
@@ -52,6 +60,8 @@ impl StatusZone {
             Self::LineEnding => Command::LineEndingPrompt,
             Self::Language => Command::LanguagePrompt,
             Self::Branch => Command::GitBranchPrompt,
+            Self::CsvDelimiter => Command::CsvDelimiterPrompt,
+            Self::CsvQuote => Command::CsvQuotePrompt,
         }
     }
 }
@@ -76,7 +86,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             text,
-            theme.status_bar.fg(theme.dim),
+            theme.status_bar.fg(theme.chrome_dim),
         )))
         .right_aligned(),
         right_area,
@@ -270,6 +280,7 @@ fn readout(app: &App, width: u16, left: u16) -> Vec<Piece> {
     // or cells, because that is the number a human arrives at (SPEC §38).
     let line = document.map_or(1, |d| d.cursor().line + 1);
     let column = document.map_or(1, |d| d.cursor_display_col().0);
+    let table = app.active().and_then(|tab| tab.table.as_ref());
     // The grammar the highlighter actually chose, not a guess from the
     // extension: it is the one that also reads file names and shebangs, and a
     // status bar that disagreed with the colours would be worse than none.
@@ -284,20 +295,56 @@ fn readout(app: &App, width: u16, left: u16) -> Vec<Piece> {
         None => "",
     };
 
-    let mut pieces = vec![clickable(
-        format!("Ln {line}, Col {column}"),
-        0,
-        StatusZone::Cursor,
-    )];
+    // A table has no caret and no wrapping, so where the user *is* is a cell
+    // and not a position, and the two questions the bar asks about it are the
+    // ones the parse turns on: what splits the columns, and what quotes the
+    // fields (SPEC §65, ADR-062).
+    let mut pieces = match table {
+        Some(view) => vec![
+            // Not clickable: Go to Line has nothing to go to in a grid, and a
+            // readout that opened a dialog about lines would be the bar
+            // answering a question nobody asked of it.
+            piece(view.position(), 0),
+            clickable(
+                format!("Delim {}", view.dialect.delimiter_label()),
+                1,
+                StatusZone::CsvDelimiter,
+            ),
+            clickable(
+                format!("Quote {}", view.dialect.quote_label()),
+                1,
+                StatusZone::CsvQuote,
+            ),
+        ],
+        None => vec![clickable(
+            format!("Ln {line}, Col {column}"),
+            0,
+            StatusZone::Cursor,
+        )],
+    };
     // Shown only while something is selected: an always-present "Sel 0" would
-    // cost three columns of an already crowded bar for no information.
-    if let Some(count) = document.map(|d| d.selected_len()).filter(|n| *n > 0) {
+    // cost three columns of an already crowded bar for no information. A grid
+    // counts it in rows and columns, because that is the shape of what is
+    // selected there (SPEC §65).
+    if let Some(range) = table
+        .and_then(TableView::selection)
+        .filter(|range| range.is_range())
+    {
+        pieces.push(piece(
+            format!("Sel {}×{}", range.records(), range.columns()),
+            1,
+        ));
+    } else if let Some(count) = document
+        .filter(|_| table.is_none())
+        .map(|d| d.selected_len())
+        .filter(|n| *n > 0)
+    {
         pieces.push(piece(format!("Sel {count}"), 1));
     }
     // Shown only while it is on: it says the pane is not in the state it is in
     // by default, and a wrapped file that did not say so reads as a file full
     // of short lines.
-    if app.settings.word_wrap {
+    if app.settings.word_wrap && table.is_none() {
         pieces.push(piece("Wrap".to_string(), 2));
     }
     // The charset the file was decoded with, which since ADR-059 is not always
@@ -319,11 +366,16 @@ fn readout(app: &App, width: u16, left: u16) -> Vec<Piece> {
             StatusZone::LineEnding,
         ));
     }
-    pieces.push(clickable(
-        format!("{language}{plain}"),
-        4,
-        StatusZone::Language,
-    ));
+    // The grammar, unless the pane is a grid: nothing in a table is
+    // highlighted, and a readout offering to change how it is coloured would be
+    // offering something that does not happen.
+    if table.is_none() {
+        pieces.push(clickable(
+            format!("{language}{plain}"),
+            4,
+            StatusZone::Language,
+        ));
+    }
     pieces.push(clickable(
         app.git.branch_label().to_string(),
         3,

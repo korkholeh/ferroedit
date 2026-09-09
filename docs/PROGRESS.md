@@ -755,6 +755,22 @@ the per-file quit walk, the Open browser and green CI done)
   reloading a buffer whose file changed, cancelling a running job, the combined-diff
   parser, the error-message pass, the per-file quit walk and the Open browser have
   landed; the README screenshot has not.
+- **The CSV table view** (SPEC §65, ADR-062). A `.csv` or `.tsv` tab opens as a grid —
+  the first row as the header, one row per record — with the delimiter and the quote
+  character as clickable readouts on the status bar beside the encoding. `F4` swaps the
+  pane between the table and the text, and the grid is reparsed from the buffer whenever
+  the buffer or the dialect changes.
+- **Editing in the table** (SPEC §65, ADR-063). Cells are typed into in place: `F2` or
+  `Enter` opens one, a printable character replaces it, `Enter` and `Tab` save and move on,
+  `Esc` gives up. `Insert` adds a record and `Ctrl+D` removes one; the header is a row the
+  selection reaches, so a column is renamed in the grid. A write replaces only the field's
+  own characters, quoting it where the dialect needs it, and is an ordinary document edit —
+  one undo step, saved by `Ctrl+S`.
+- **Selecting cells in the table** (SPEC §65, ADR-064). `Shift` with a motion key, a drag,
+  a click on a record's number, a click on a column's name, `Ctrl+A` and the Selection menu's
+  Select Row / Select Column all make a rectangle of cells; the status bar counts it as
+  `Sel 3×2`. Copy writes the block
+  in the file's own dialect, cut empties it as one undo step, `Delete` empties it in place.
 
 ## Known issues
 
