@@ -120,6 +120,45 @@ ferroedit +42 main.rs  # open a file at line 42
 - A release check that can be switched off, and never installs anything itself
 - One static binary, SSH-friendly
 
+## Screenshots
+
+Every image is a capture of the running binary, not a mock-up: `ferroedit` runs in a pty
+at 110×32, the ANSI it writes is parsed cell by cell, and the grid is drawn back out with
+the colours it actually painted.
+
+<table>
+  <tr>
+    <td width="50%"><img src="assets/git.png" alt="The git panel beside the editor, with staged, modified and untracked files"></td>
+    <td width="50%"><img src="assets/diff.png" alt="A unified diff open in a tab of its own"></td>
+  </tr>
+  <tr>
+    <td><b>Git, in the sidebar.</b> Status with a mark per file — staged, modified,
+    untracked — and stage, commit, pull, push, branch and merge on single keys.</td>
+    <td><b>The diff.</b> Read-only, in a tab beside the files being edited, over the
+    system <code>git</code> rather than a reimplementation of it.</td>
+  </tr>
+  <tr>
+    <td><img src="assets/search.png" alt="The find and replace bar under the editor, with a match highlighted"></td>
+    <td><img src="assets/menu.png" alt="The View menu open over the editor"></td>
+  </tr>
+  <tr>
+    <td><b>Find and replace.</b> A two-row bar under the document, the hit count on the
+    right, and every other match on the page highlighted behind it.</td>
+    <td><b>Menus that say what they do.</b> The keys are printed beside the commands, the
+    switches carry their state, and the mouse reaches all of it.</td>
+  </tr>
+  <tr>
+    <td><img src="assets/table.png" alt="A CSV file shown as a table with a selected cell"></td>
+    <td><img src="assets/theme-retro.png" alt="The same editor in the retro theme"></td>
+  </tr>
+  <tr>
+    <td><b>CSV as a table.</b> <code>F4</code> switches a delimited file between text and
+    a grid you can walk cell by cell, with the delimiter and quote on the status bar.</td>
+    <td><b>Five themes.</b> Dark, light, two simple ones for terminals with a palette of
+    their own, and the retro blue above.</td>
+  </tr>
+</table>
+
 ## Keyboard shortcuts
 
 `F1` (or Help → Shortcuts) shows them in the editor. The same tables render
