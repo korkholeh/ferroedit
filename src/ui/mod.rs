@@ -375,6 +375,31 @@ mod tests {
     }
 
     #[test]
+    fn the_gutter_marks_the_line_the_cursor_is_on() {
+        let mut app = app();
+        app.tab_mut(0).document.place_cursor(1, VisualCol(0));
+
+        let rects = layout::compute(Rect::new(0, 0, 80, 24), &app);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let theme = Theme::default();
+        terminal
+            .draw(|frame| render(frame, &app, &layout::compute(frame.area(), &app), &theme))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let x = rects.editor.x + 1;
+
+        let on = &buffer[(x, rects.editor.y + 1)];
+        assert_eq!(on.symbol(), "2", "the cursor is on line 2");
+        assert_eq!(on.fg, theme.foreground);
+        assert!(on.modifier.contains(ratatui::style::Modifier::BOLD));
+
+        let off = &buffer[(x, rects.editor.y)];
+        assert_eq!(off.symbol(), "1");
+        assert_eq!(off.fg, theme.line_number, "an idle number stays dim");
+        assert!(!off.modifier.contains(ratatui::style::Modifier::BOLD));
+    }
+
+    #[test]
     fn an_open_menu_paints_its_items_and_bound_shortcuts_over_the_editor() {
         let mut app = app();
         app.menu.open = Some(0);

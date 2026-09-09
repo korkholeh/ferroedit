@@ -6,7 +6,7 @@
 //! already happened in `execute_command`.
 
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
@@ -58,6 +58,10 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let left = tab.viewport.left_col;
 
     let selection = document.selection();
+    // The gutter marks the line the caret is on: the caret itself is one cell
+    // wide and easy to lose in a full pane, and the number is where the eye
+    // goes to answer "where am I".
+    let cursor_line = document.cursor().line;
     let hits = app.search.open.then_some(app.search.matches.as_slice());
     let mut columns = Vec::new();
     let rows = tab.viewport.visible(document, layout);
@@ -69,9 +73,16 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             // the same line, and a gutter that repeated the number would say
             // the file has more lines in it than it does.
             let mut spans = vec![if visible.is_first() {
+                let style = if visible.line == cursor_line {
+                    Style::new()
+                        .fg(theme.foreground)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::new().fg(theme.line_number)
+                };
                 Span::styled(
                     format!("{:>width$}  ", visible.line + 1, width = gutter - 2),
-                    Style::new().fg(theme.line_number),
+                    style,
                 )
             } else {
                 Span::raw(" ".repeat(gutter))
