@@ -364,8 +364,7 @@ impl TableView {
 
     pub fn scroll_columns(&mut self, delta: isize) {
         let last = self.table.columns().saturating_sub(1);
-        self.first_column =
-            (self.first_column as isize + delta).clamp(0, last.max(0) as isize) as usize;
+        self.first_column = (self.first_column as isize + delta).clamp(0, last as isize) as usize;
     }
 
     /// Keeps the selected row inside the window.
