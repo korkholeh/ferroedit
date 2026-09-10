@@ -53,6 +53,13 @@ notify = "7"
 # speed on scripts a text editor writes a few kilobytes of at a time.
 encoding_rs = { version = "0.8.40", default-features = false, features = ["alloc"] }
 
+[target.'cfg(unix)'.dependencies]
+# Both are already in the tree under crossterm, so taking them directly costs
+# nothing to build. They are what lets a killed editor put the terminal back
+# instead of leaving raw mode behind for every run after it (ADR-073).
+signal-hook = "0.3"
+libc = "0.2"
+
 [build-dependencies]
 # Same features as the runtime dependency: the dump `build.rs` writes has to be
 # readable by the parser the binary links against.

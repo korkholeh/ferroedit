@@ -9,7 +9,7 @@ every future change.
 ## 1. Layering
 
 ```
-main.rs        → CLI parse, terminal setup/teardown, panic hook, run loop
+main.rs        → CLI parse, terminal setup/teardown, panic + signal hooks, run loop
 app/           → App state + command dispatch (no rendering, no crossterm calls)
 event/         → terminal events + worker messages → AppEvent → Command
 ui/            → pure render functions: fn(&App, &mut Frame) — never mutates App
@@ -50,7 +50,7 @@ assets/syntaxes/          # the grammars syntect's defaults are missing
 src/
   main.rs
   cli.rs                  # arg parsing, `+42 file.rs`
-  terminal.rs             # RAII TerminalGuard + panic hook
+  terminal.rs             # RAII TerminalGuard + panic hook + signal handler
   docs.rs                 # renders docs/SHORTCUTS.md from the tables (ADR-028)
   app/       mod.rs focus.rs tabs.rs dialog.rs diff.rs log.rs input_field.rs
              browser.rs notifications.rs search.rs table.rs workspace.rs
@@ -236,11 +236,18 @@ an actionable error instead of a frozen worker.
 
 ## 9. Terminal lifecycle
 
-`TerminalGuard` restores the terminal in `Drop`, and `std::panic::set_hook` restores it
-*before* printing the payload. Both paths exist because they cover different failures:
-the guard handles normal returns and unwinding, the hook handles the case where the
-payload would otherwise be printed into a raw-mode screen. Release builds keep
-unwinding enabled for exactly this reason (ADR-006).
+`TerminalGuard` restores the terminal in `Drop`, `std::panic::set_hook` restores it
+*before* printing the payload, and a signal thread restores it before the process is
+allowed to die of `SIGTERM`, `SIGHUP`, `SIGINT` or `SIGQUIT`. Three paths exist because
+they cover three different failures: the guard handles normal returns and unwinding, the
+hook handles the case where the payload would otherwise be printed into a raw-mode
+screen, and the signal handler handles every exit the process does not choose — none of
+which runs `Drop` (ADR-073). Release builds keep unwinding enabled for exactly this
+reason (ADR-006).
+
+`TerminalGuard::new` also mends a terminal it finds already in raw mode, because
+`enable_raw_mode` records what it finds as the mode to put back: without that, one run
+killed before it could restore leaves every later run restoring raw mode too (ADR-073).
 
 ## 10. Testing
 

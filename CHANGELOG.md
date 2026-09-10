@@ -48,6 +48,16 @@ version, so that heading becomes the new version's on the way out (see
 
 ### Fixed
 
+- **Being killed no longer leaves the terminal broken — nor does the run after it.** An
+  editor ended by a signal rather than by `Ctrl+Q` (`kill`, a supervisor, a closed
+  terminal window) ran neither its teardown nor its panic hook, so it left raw mode
+  behind: no echo, no line editing, and every line of output starting where the last one
+  ended instead of at the left margin. Worse, it stuck — the next run saved that broken
+  mode as the one to restore and put it back on a perfectly normal quit, which is why the
+  damage looked intermittent and unrelated to whatever had actually caused it. FerroEdit
+  now restores the terminal on `SIGINT`, `SIGTERM`, `SIGHUP` and `SIGQUIT` before standing
+  down, and mends a terminal it finds already in raw mode when it starts — so opening and
+  quitting the editor now repairs a terminal an earlier run broke (ADR-073).
 - A diff or a history asked for from the editor now finds the file when the workspace was
   opened through a symbolic link — macOS puts its temporary directories behind one, and
   `git rev-parse --show-toplevel` answers with the resolved path.

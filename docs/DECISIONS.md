@@ -2527,3 +2527,59 @@ is drawn there. So the rule costs nothing, and it makes the explorer consistent 
 git panel below it, which has drawn `TOP | RIGHT` all along. Three cells of it are kept
 clear of the title because a title elided to fill the row hides the line it is drawn on.
 
+---
+
+## ADR-073: A signal is a third way out, and a terminal found broken is mended
+
+**Decision.** `terminal.rs` gains two things. A thread registered for `SIGINT`, `SIGTERM`,
+`SIGHUP` and `SIGQUIT` restores the terminal and then re-raises the signal with its default
+disposition, so those exits leave the terminal as `Drop` and the panic hook already do.
+And `TerminalGuard::new` inspects the terminal it is handed *before* `enable_raw_mode`
+reads it: one found without `ICANON`, `ECHO`, `ISIG`, `OPOST` or `ONLCR` is written back to
+what `stty sane` writes. `restore()` is also no longer allowed to skip `disable_raw_mode`
+because an escape sequence failed to write.
+
+**The failure.** Killing the editor — `kill`, a supervisor, a closed terminal window — runs
+neither `Drop` nor the panic hook, so raw mode survives the process. Measured on macOS, the
+mode a killed run leaves behind is `oflag=2 lflag=41`: `ONLCR`, `ICANON` and `ECHO` all
+gone. `ONLCR` is the one that shows: without it a `\n` drops a line without returning the
+carriage, so every line of output starts where the last one ended and the shell walks
+diagonally down the screen.
+
+**Why one lost run breaks all the later ones.** This is what makes it look intermittent
+rather than fatal. `enable_raw_mode` saves the mode it *finds* as the one to put back, and
+`disable_raw_mode` puts exactly that back. Start the editor in a terminal an earlier run
+left raw and it saves raw, runs, and faithfully restores raw on a perfectly normal `Ctrl+Q`.
+Measured: after one `SIGTERM`, a following clean run exits with the terminal still at
+`oflag=2 lflag=41`. So the report is "closing the editor sometimes breaks the terminal",
+and the cause is a kill that may have happened hours earlier.
+
+**Why the mode is set and not merged.** What is in a broken terminal's flags is the
+leftovers of `cfmakeraw`, not a user's preferences, so `sanitize_inherited_mode` writes the
+three flag words outright. `IUTF8` is carried over, because it describes the terminal rather
+than the mode and dropping it would break every non-ASCII character typed afterwards, and
+the control characters are left alone: raw mode never touches them, so a user who has moved
+their erase key keeps it.
+
+**Why the check is narrower than the write.** Only `ICANON`, `ECHO`, `ISIG`, `OPOST` and
+`ONLCR` decide whether to intervene. Every one of them is a flag no shell works without, so
+a terminal missing one is broken by any definition, while a terminal that merely has the
+bell silenced or flow control off is somebody's deliberate setting and is left as it is.
+
+**Why a thread and not a handler.** Almost nothing is safe to call from a signal handler,
+and `restore()` writes to stdout and takes a lock. `signal-hook`'s handler only writes to a
+pipe; the thread on the other end does the work and then calls
+`emulate_default_handler`, so the process still dies *of the signal that was sent* rather
+than of an exit code invented here — which is what a shell reports as `^C` and what a
+supervisor is looking for. Both crates are already in the tree under crossterm.
+
+**Why `disable_raw_mode` is unconditional.** `restore()` ran its escape sequences with `?`
+in front of the mode reset, so a single failed write — a closed stdout, a full pipe — took
+the mode reset with it. The two are not comparable: a lost mouse-capture reset is
+overwritten by the next program to draw, and a lost mode reset outlives the process and
+every run after it.
+
+**What is not covered.** `SIGKILL`, and a crash that is neither a panic nor a signal we can
+catch. Nothing can be, which is the other half of why the mending on start-up exists: it is
+what turns a terminal broken by any of them back into a working one the next time the
+editor is opened.

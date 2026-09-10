@@ -1421,6 +1421,30 @@ UTF-16 to KOI8-U to Shift_JIS.
   file browser has since ADR-051.
 - The branch on the status bar opens the branch picker.
 
+### The terminal survives being killed (ADR-073)
+
+Reported as "closing the editor sometimes breaks the terminal", and the "sometimes" was
+the whole shape of the bug. Measured in a pty on macOS: a normal `Ctrl+Q` is clean —
+identical termios, and the teardown emits `?2004l ?1006l ?1015l ?1003l ?1002l ?1000l
+?1049l ?25h` in reverse order of setup — and so is `--panic-test`. A `SIGTERM` was not:
+`oflag=3 → 2` and `lflag=5cb → 41`, which is `ONLCR`, `ICANON` and `ECHO` gone. And the
+*next* clean run exited leaving exactly the same broken mode, because `enable_raw_mode`
+saves whatever it finds and `disable_raw_mode` restores that. One kill, and every quit
+afterwards looks like the thing that broke the terminal.
+
+- A `signals` thread restores and then re-raises with the default disposition, so the
+  process still dies of the signal that was sent. `SIGINT`, `SIGTERM`, `SIGHUP` and
+  `SIGQUIT` now all end with `oflag=3` and the full escape teardown on the wire; only
+  `PENDIN` differs from a pristine terminal, which is what `stty sane` itself leaves.
+- `TerminalGuard::new` mends a terminal handed to it in raw mode before crossterm reads
+  it. Started under `stty raw -echo` and quit, the editor now leaves the terminal
+  byte-identical to `stty sane` — so opening and quitting it repairs a terminal an
+  earlier run broke, which is the only answer available for `SIGKILL`.
+- `restore()` no longer lets a failed escape write skip `disable_raw_mode`.
+
+`signal-hook` and `libc` were already in the tree under crossterm and are now taken
+directly, under `[target.'cfg(unix)'.dependencies]`.
+
 ## Next
 
 Phase 14 continues. What is left of it, roughly in order of how much it is worth:

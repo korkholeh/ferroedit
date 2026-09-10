@@ -1,8 +1,8 @@
 //! FerroEdit — a modern desktop-like text editor that happens to run in a terminal.
 //!
 //! This file owns exactly four things (`docs/ARCHITECTURE.md` §1): CLI parsing,
-//! terminal setup and teardown, the panic hook, and the run loop. Everything it
-//! does to `App` goes through `execute_command`.
+//! terminal setup and teardown, the panic and signal hooks, and the run loop.
+//! Everything it does to `App` goes through `execute_command`.
 
 mod app;
 mod cli;
@@ -98,9 +98,12 @@ fn run(cli: &Cli) -> Result<()> {
     let root = app.workspace.root().to_path_buf();
     app.git.discover(&root);
 
-    // The hook goes in before the guard so a panic inside `TerminalGuard::new`
-    // is also covered.
+    // Both go in before the guard so a panic — or a signal — during
+    // `TerminalGuard::new` is also covered. The signal handler is the third
+    // restore path: `Drop` and the panic hook between them miss every exit the
+    // process does not choose (ADR-073).
     terminal::install_panic_hook();
+    terminal::install_signal_handler();
     let mut guard = TerminalGuard::new()?;
 
     if cli.panic_test {
