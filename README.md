@@ -118,6 +118,8 @@ ferroedit +42 main.rs  # open a file at line 42
 - Word wrap, or horizontal scrolling when it is off
 - Gzipped files opened on their text, read-only — a `dump.sql.gz` reads as SQL without
   being unpacked first, and *Save As* writes it out
+- PNG and JPEG files opened on the picture: coloured half-blocks, so a terminal cell holds
+  two pixels, with a metadata column, zoom, and panning by keyboard or mouse
 - Git: status, stage/unstage, commit, pull, push, branches, merge, diff
 - Git history: the repository's log with a text search over it, the history of a file,
   the history of the lines you have selected — and any commit in it opened as a diff
@@ -161,6 +163,18 @@ the colours it actually painted.
     a grid you can walk cell by cell, with the delimiter and quote on the status bar.</td>
     <td><b>Five themes.</b> Dark, light, two simple ones for terminals with a palette of
     their own, and the retro blue above.</td>
+  </tr>
+  <tr>
+    <td><img src="assets/log.png" alt="The commit history in a tab, in four columns, with one commit selected"></td>
+    <td><img src="assets/image.png" alt="A PNG open in the editor, drawn in half-block characters beside a column of its metadata"></td>
+  </tr>
+  <tr>
+    <td><b>The history, in columns.</b> The name, the date, the author and the subject,
+    for the repository, one file or the lines you have selected — and <code>Enter</code>
+    opens any commit in it as a diff.</td>
+    <td><b>Pictures, in a terminal.</b> A PNG or a JPEG in coloured half-blocks — two
+    pixels to a cell — with what the file is down the left, and zoom and panning on the
+    keys and the mouse.</td>
   </tr>
 </table>
 
