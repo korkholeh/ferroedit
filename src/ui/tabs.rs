@@ -191,7 +191,7 @@ mod tests {
         use crate::git::diff::{Diff, DiffSide};
 
         let mut app = App::fixture();
-        app.tabs.push(TabItem::Diff(DiffState::new(
+        app.tabs.push(TabItem::viewing(DiffState::new(
             std::path::Path::new("src/main.rs"),
             DiffSide::Worktree,
             Diff::parse("@@ -1 +1 @@\n-a\n+b\n"),

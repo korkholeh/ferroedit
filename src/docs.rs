@@ -21,7 +21,7 @@ use std::fmt::Write as _;
 
 use crate::app::focus::FocusTarget;
 use crate::commands::{Command, MENUS};
-use crate::event::keyboard::{binding_for, Binding, BINDINGS, INPUT_BINDINGS};
+use crate::event::keyboard::{menu_binding, Binding, BINDINGS, INPUT_BINDINGS};
 
 /// The sections, in the order they are rendered: which focus a table is for,
 /// its heading, and the sentence under it.
@@ -59,6 +59,21 @@ const SECTIONS: &[(Option<FocusTarget>, &str, &str)] = &[
         "The read-only unified diff (SPEC §36). It opens in a tab of its own, \
          beside the files being edited, and closes like one — so its keys are a \
          pager's and nothing here types.",
+    ),
+    (
+        Some(FocusTarget::Log),
+        "Log viewer",
+        "A commit history — the repository's, one file's, or one range of lines' \
+         (ADR-068). It opens in a tab of its own beside the diffs, and it is a \
+         *list*: the arrows move a selection, and `Enter` opens the commit it is \
+         on as a diff.",
+    ),
+    (
+        Some(FocusTarget::LogSearch),
+        "Log search field",
+        "The field `/` opens over a history. Typing narrows the commits already \
+         read, which is instant; `Enter` hands the text to `git log --grep`, which \
+         searches the whole message and the whole history.",
     ),
     (
         Some(FocusTarget::Help),
@@ -270,9 +285,12 @@ fn write_table(out: &mut String, rows: &[HelpRow]) {
 
 /// The menu bar, with the key each entry advertises.
 ///
-/// The shortcut column is `shortcut_for`, the same lookup the renderer does, so
-/// this table cannot claim a key the menu does not show. Every entry resolves
-/// to a real command since Phase 14; there is no longer a placeholder to mark.
+/// The shortcut column is `menu_binding`, the same lookup the renderer does, so
+/// this table cannot claim a key the menu does not show — including the bare
+/// letters the menu deliberately keeps quiet about (ADR-071), which the
+/// per-pane tables above still list under the focus they need. Every entry
+/// resolves to a real command since Phase 14; there is no longer a placeholder
+/// to mark.
 fn write_menus(out: &mut String) {
     out.push_str(
         "\n## Menu bar\n\nEvery item is a command, and the *Shortcut* column is the same \
@@ -283,7 +301,7 @@ fn write_menus(out: &mut String) {
     );
     for menu in MENUS {
         for item in menu.entries() {
-            let binding = binding_for(&item.command);
+            let binding = menu_binding(&item.command);
             let shortcut = binding.map_or_else(|| "—".to_string(), |b| format!("`{}`", b.label));
             let scope = match binding {
                 None => "—",

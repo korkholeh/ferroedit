@@ -117,6 +117,9 @@ ferroedit +42 main.rs  # open a file at line 42
 - Search and replace, and Go to Line
 - Word wrap, or horizontal scrolling when it is off
 - Git: status, stage/unstage, commit, pull, push, branches, merge, diff
+- Git history: the repository's log with a text search over it, the history of a file,
+  the history of the lines you have selected — and any commit in it opened as a diff
+- `.git/config` opened as a file, in a tab like any other
 - A release check that can be switched off, and never installs anything itself
 - One static binary, SSH-friendly
 

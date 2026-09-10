@@ -4,11 +4,12 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::app::dialog::{DialogState, ListItem, MAX_LIST_ROWS};
-use crate::app::diff::{DiffState, HORIZONTAL_STEP};
+use crate::app::diff::{DiffSource, DiffState, HORIZONTAL_STEP};
 use crate::app::focus::FocusTarget;
 use crate::app::git::NotStarted;
 use crate::app::help::HelpState;
 use crate::app::input_field::InputField;
+use crate::app::log::LogState;
 use crate::app::search::SearchField;
 use crate::app::table::{CellEditor, CellStep, TableView};
 use crate::app::tabs::{active_after_close, Stale, TabItem};
@@ -26,7 +27,7 @@ use crate::filesystem;
 use crate::filesystem::watcher::FsChange;
 use crate::git::diff::DiffSide;
 use crate::git::models::{Change, Operation};
-use crate::git::{GitJob, JobFailure, JobOutcome};
+use crate::git::{GitJob, JobFailure, JobOutcome, LogScope};
 use crate::syntax::highlighter;
 use crate::update::{self, UpdateCheck, UpdateOutcome};
 
@@ -131,6 +132,57 @@ pub fn execute_command(app: &mut App, command: Command) {
                 viewer.end(height);
             }
         }
+        Command::GitLog => open_log(app, LogScope::Repository),
+        Command::GitFileHistory => open_file_history(app),
+        Command::GitLineHistory => open_line_history(app),
+        Command::LogRefresh => reread_log(app, false),
+        Command::LogClose => close_log(app),
+        Command::LogMove(delta) => move_log(app, delta as isize),
+        Command::LogMovePage(delta) => {
+            let page = (app.log_rows as isize).max(1);
+            move_log(app, delta as isize * page);
+        }
+        Command::LogHome => {
+            let height = app.log_rows as usize;
+            if let Some(log) = app.log_mut() {
+                log.home(height);
+            }
+        }
+        Command::LogEnd => {
+            let height = app.log_rows as usize;
+            if let Some(log) = app.log_mut() {
+                log.end(height);
+            }
+        }
+        Command::LogShowRow(row) => show_log_row(app, row),
+        Command::LogScroll(delta) => move_log(app, delta as isize),
+        Command::LogShowCommit => show_selected_commit(app),
+        Command::LogSearchOpen => open_log_search(app),
+        Command::LogSearchClose => close_log_search(app),
+        Command::LogSearchChar(ch) => edit_log_search(app, |field| field.insert(ch)),
+        Command::LogSearchText(text) => edit_log_search(app, |field| field.insert_str(&text)),
+        Command::LogSearchBackspace => edit_log_search(app, InputField::backspace),
+        Command::LogSearchDelete => edit_log_search(app, InputField::delete),
+        // The caret only; the list underneath does not change, so this is the
+        // one field edit that does not re-filter.
+        Command::LogSearchMove(delta) => {
+            if let Some(log) = app.log_mut() {
+                log.field.step(delta);
+            }
+        }
+        Command::LogSearchHome => {
+            if let Some(log) = app.log_mut() {
+                log.field.home();
+            }
+        }
+        Command::LogSearchEnd => {
+            if let Some(log) = app.log_mut() {
+                log.field.end();
+            }
+        }
+        Command::LogSearchSubmit => search_log(app),
+
+        Command::GitOpenConfig => open_git_config(app),
         Command::GitJobFinished(outcome) => finish_git_job(app, &outcome),
         Command::ToggleHiddenFiles => toggle_hidden_files(app),
 
@@ -2926,6 +2978,13 @@ fn finish_git_job(app: &mut App, outcome: &JobOutcome) {
     // then refused to fast-forward has moved the remote-tracking branch — so
     // the status is re-read either way.
     refresh_git(app);
+    // A commit, a pull and a switch all move `HEAD`, which is what a history is
+    // a list of (ADR-068). Staging does not, and re-reading every open history
+    // after each of three staged files would be subprocesses spent
+    // re-answering a question whose answer cannot have changed.
+    if outcome.job.moves_head() {
+        reread_logs(app);
+    }
 }
 
 // --- diff viewer -----------------------------------------------------------
@@ -2974,17 +3033,17 @@ fn open_diff(app: &mut App) {
 /// not of which tab it is, so re-opening the staged side of a file whose
 /// worktree diff is open turns that tab over rather than adding a third.
 fn show_diff(app: &mut App, diff: DiffState) {
-    let existing = app
-        .tabs
-        .iter()
-        .position(|item| item.diff().is_some_and(|open| open.path == diff.path));
+    let existing = app.tabs.iter().position(|item| {
+        item.diff()
+            .is_some_and(|open| open.source.is_same_target(&diff.source))
+    });
     let index = match existing {
         Some(index) => {
-            app.tabs[index] = TabItem::Diff(diff);
+            app.tabs[index] = TabItem::viewing(diff);
             index
         }
         None => {
-            app.tabs.push(TabItem::Diff(diff));
+            app.tabs.push(TabItem::viewing(diff));
             app.tabs.len() - 1
         }
     };
@@ -3027,9 +3086,19 @@ fn diff_target(app: &mut App, root: &Path) -> Option<PathBuf> {
 
 /// The active tab's path, relative to the repository root, when it has one and
 /// it is inside the repository at all.
+///
+/// The second attempt is what makes this work on a path that reaches the
+/// repository through a symbolic link: `git rev-parse --show-toplevel` answers
+/// with the resolved path — `/private/var/…` where the user typed `/var/…` —
+/// so the root is not a prefix of a file opened the other way. Resolving is a
+/// syscall, so it is only reached when the cheap comparison has already failed.
 fn active_repo_path(app: &App, root: &Path) -> Option<PathBuf> {
     let path = app.active()?.document.path()?;
-    path.strip_prefix(root).ok().map(Path::to_path_buf)
+    if let Ok(relative) = path.strip_prefix(root) {
+        return Some(relative.to_path_buf());
+    }
+    let resolved = path.canonicalize().ok()?;
+    resolved.strip_prefix(root).ok().map(Path::to_path_buf)
 }
 
 /// Which side is worth showing first: what has not been staged when there is
@@ -3076,7 +3145,14 @@ fn toggle_diff_side(app: &mut App) {
     let Some(viewer) = app.diff() else {
         return;
     };
-    let (path, side) = (viewer.path.clone(), viewer.side.other());
+    // A commit has one side and no other: it is what was written, and there is
+    // no index or worktree to compare it against (ADR-069).
+    let (Some(path), Some(side)) = (viewer.path().map(Path::to_path_buf), viewer.side()) else {
+        app.notifications
+            .warning("A commit has only one side to show");
+        return;
+    };
+    let side = side.other();
     let Some(diff) = read_diff(app, &path, side) else {
         return;
     };
@@ -3114,9 +3190,14 @@ fn reread_diff_at(app: &mut App, index: usize, quiet: bool) {
     let Some(viewer) = app.tabs.get(index).and_then(TabItem::diff) else {
         return;
     };
-    let (path, side) = (viewer.path.clone(), viewer.side);
+    let source = viewer.source.clone();
     let Some(repo) = app.git.service().cloned() else {
         remove_tab(app, index);
+        return;
+    };
+    // A commit is a written object: nothing that happens in the worktree can
+    // change it, so its tab is left exactly as it is (ADR-069).
+    let DiffSource::Working { path, side } = source else {
         return;
     };
     match repo.diff(&path, side) {
@@ -3158,6 +3239,352 @@ fn close_diff(app: &mut App) {
     let Some(index) = app.active_tab else { return };
     if app.tabs[index].diff().is_some() {
         remove_tab(app, index);
+    }
+}
+
+// --- log viewer ------------------------------------------------------------
+
+/// Opens one history in a tab of its own (ADR-068).
+///
+/// Read in the foreground, like the status, the branch list and the diff: `git
+/// log` with a cap on it is a local read that finishes in milliseconds, and a
+/// viewer that opened empty and filled in later would be one whose selection
+/// moves under the reader (ADR-030).
+fn open_log(app: &mut App, scope: LogScope) {
+    let Some(repo) = app.git.service().cloned() else {
+        app.notifications.warning(app.git.summary());
+        return;
+    };
+    let commits = match repo.log(&scope, None) {
+        Ok(commits) => commits,
+        Err(err) => {
+            log::error!("could not read the log of {}: {err}", scope.label());
+            app.notifications
+                .error(format!("Log failed: {}", err.reason()));
+            return;
+        }
+    };
+    if commits.is_empty() {
+        // A history with nothing in it is worth saying rather than showing: an
+        // empty pane is indistinguishable from one that failed to draw.
+        app.notifications
+            .warning(format!("No commits for {}", scope.label()));
+        return;
+    }
+    show_log(app, LogState::new(scope, commits, None));
+}
+
+/// Puts a history in front of the user, reusing the tab that already holds it.
+///
+/// The same rule the diff viewer follows, and for the same reason: two tabs of
+/// one file's history are two places to keep in step, and the user asked to see
+/// it rather than to collect it.
+fn show_log(app: &mut App, log: LogState) {
+    let existing = app
+        .tabs
+        .iter()
+        .position(|item| item.log().is_some_and(|open| open.scope == log.scope));
+    let index = match existing {
+        Some(index) => {
+            app.tabs[index] = TabItem::history(log);
+            index
+        }
+        None => {
+            app.tabs.push(TabItem::history(log));
+            app.tabs.len() - 1
+        }
+    };
+    app.active_tab = Some(index);
+    app.focus = FocusTarget::Log;
+}
+
+/// The history of one file (ADR-068).
+///
+/// Which file is the question `open_diff` answers the same way: the git panel's
+/// selection while the panel has focus, and the file being edited anywhere
+/// else. A history asked for from the editor means "this one".
+fn open_file_history(app: &mut App) {
+    let Some(root) = app.git.root().map(Path::to_path_buf) else {
+        app.notifications.warning(app.git.summary());
+        return;
+    };
+    let Some(path) = history_target(app, &root) else {
+        return;
+    };
+    open_log(app, LogScope::File(path));
+}
+
+/// The history of the lines the editor's selection covers (ADR-068).
+///
+/// The caret's own line when there is no selection: "what happened to this
+/// line?" is the question, and a user who has not selected anything is asking
+/// it about where they are.
+fn open_line_history(app: &mut App) {
+    let Some(root) = app.git.root().map(Path::to_path_buf) else {
+        app.notifications.warning(app.git.summary());
+        return;
+    };
+    let Some(tab) = app.active() else {
+        app.notifications
+            .warning("Open a file to see the history of its lines");
+        return;
+    };
+    let document = &tab.document;
+    // One-based and inclusive, as git counts them and as the gutter shows
+    // them. A selection that ends at column zero of a line has not reached
+    // into that line, so its last row is the one above — the rule a user's
+    // eyes already apply to a highlight that stops at a line's start.
+    let (first, last) = match document.selection() {
+        Some(selection) => {
+            let start = selection.start();
+            let end = selection.end();
+            let last = if end.column.0 == 0 && end.line > start.line {
+                end.line - 1
+            } else {
+                end.line
+            };
+            (start.line + 1, last + 1)
+        }
+        None => {
+            let line = document.cursor().line + 1;
+            (line, line)
+        }
+    };
+    let Some(path) = active_repo_path(app, &root) else {
+        app.notifications
+            .warning("The file being edited is not in this repository");
+        return;
+    };
+    open_log(app, LogScope::Lines { path, first, last });
+}
+
+/// The file a history would be of, or `None` after saying why there is not one.
+fn history_target(app: &mut App, root: &Path) -> Option<PathBuf> {
+    if app.focus != FocusTarget::GitPanel {
+        if let Some(path) = active_repo_path(app, root) {
+            return Some(path);
+        }
+    }
+    match app.git.selected_entry() {
+        Some(entry) => Some(entry.path.clone()),
+        None => {
+            app.notifications
+                .warning("No file to show the history of — open one, or select a change");
+            None
+        }
+    }
+}
+
+fn move_log(app: &mut App, delta: isize) {
+    let height = app.log_rows as usize;
+    if let Some(log) = app.log_mut() {
+        log.step(delta, height);
+    }
+}
+
+/// Selects a row of a history and opens its commit — one click (ADR-068).
+///
+/// Selecting and opening are one gesture here, unlike in the git panel, where
+/// the list stays on screen beside the diff it opened. A history *is* the pane
+/// the diff replaces, so a click that only moved the selection would leave the
+/// user to press `Enter` at a row they had already pointed at.
+fn show_log_row(app: &mut App, row: usize) {
+    let height = app.log_rows as usize;
+    if let Some(log) = app.log_mut() {
+        log.select_row(row, height);
+    }
+    show_selected_commit(app);
+}
+
+fn close_log(app: &mut App) {
+    let Some(index) = app.active_tab else { return };
+    if app.tabs[index].log().is_some() {
+        remove_tab(app, index);
+    }
+}
+
+/// Opens the search field, which is a focus of its own while it has the caret.
+fn open_log_search(app: &mut App) {
+    if let Some(log) = app.log_mut() {
+        log.open_search();
+        app.focus = FocusTarget::LogSearch;
+    }
+}
+
+/// Closes it, and with it the narrowing it was doing (ADR-068).
+fn close_log_search(app: &mut App) {
+    let height = app.log_rows as usize;
+    if let Some(log) = app.log_mut() {
+        log.close_search(height);
+        app.focus = FocusTarget::Log;
+    }
+}
+
+/// Edits the field and re-narrows the list under it.
+///
+/// Instant, because it narrows what was already read and asks git nothing;
+/// `search_log` is the other half, and reaches the whole message and the
+/// commits past the cap.
+fn edit_log_search(app: &mut App, operation: impl FnOnce(&mut InputField)) {
+    let height = app.log_rows as usize;
+    if let Some(log) = app.log_mut() {
+        operation(&mut log.field);
+        log.refilter(height);
+    }
+}
+
+/// Hands the field's text to git — `Enter` in the search field (ADR-068).
+///
+/// The answer replaces the list, and the field is closed with it: what is on
+/// screen afterwards is git's answer in full, and a field still narrowing it
+/// would be narrowing it twice.
+fn search_log(app: &mut App) {
+    let Some(log) = app.log() else { return };
+    let pattern = log.field.value.trim().to_string();
+    let scope = log.scope.clone();
+    let Some(repo) = app.git.service().cloned() else {
+        app.notifications.warning(app.git.summary());
+        return;
+    };
+    let query = (!pattern.is_empty()).then(|| pattern.clone());
+    let commits = match repo.log(&scope, query.as_deref()) {
+        Ok(commits) => commits,
+        Err(err) => {
+            log::error!("could not search the log of {}: {err}", scope.label());
+            app.notifications
+                .error(format!("Search failed: {}", err.reason()));
+            return;
+        }
+    };
+    let found = commits.len();
+    let height = app.log_rows as usize;
+    if let Some(log) = app.log_mut() {
+        log.replace(commits, query);
+        log.close_search(height);
+    }
+    app.focus = FocusTarget::Log;
+    app.notifications.info(match (found, &pattern) {
+        (0, pattern) if !pattern.is_empty() => format!("No commit matches \"{pattern}\""),
+        (1, _) => "1 commit".to_string(),
+        (count, _) => format!("{count} commits"),
+    });
+}
+
+/// Re-runs the history the viewer is showing, keeping whatever it was searched
+/// for. `F5` in a log tab.
+fn reread_log(app: &mut App, quiet: bool) {
+    let Some(log) = app.log() else { return };
+    let (scope, query) = (log.scope.clone(), log.query.clone());
+    let Some(repo) = app.git.service().cloned() else {
+        return;
+    };
+    match repo.log(&scope, query.as_deref()) {
+        Ok(commits) => {
+            let height = app.log_rows as usize;
+            let found = commits.len();
+            if let Some(log) = app.log_mut() {
+                log.replace(commits, query);
+                log.follow_selection(height);
+            }
+            if !quiet {
+                app.notifications.info(match found {
+                    1 => "1 commit".to_string(),
+                    count => format!("{count} commits"),
+                });
+            }
+        }
+        Err(err) => {
+            log::error!("could not re-read the log of {}: {err}", scope.label());
+            if !quiet {
+                app.notifications
+                    .error(format!("Log failed: {}", err.reason()));
+            }
+        }
+    }
+}
+
+/// Follows the repository in every open log tab.
+///
+/// A commit is what changes a history, so this runs after a job finished rather
+/// than after every save — and it is quiet, like `reread_diffs`: a refresh
+/// nobody asked for should not talk. A tab whose history has emptied is left
+/// standing, unlike a diff's: a file whose changes were all staged has nothing
+/// left to show, while a history that came back empty is a repository state the
+/// reader will want to see for themselves.
+fn reread_logs(app: &mut App) {
+    let Some(repo) = app.git.service().cloned() else {
+        return;
+    };
+    let height = app.log_rows as usize;
+    for index in 0..app.tabs.len() {
+        let Some(log) = app.tabs[index].log() else {
+            continue;
+        };
+        let (scope, query) = (log.scope.clone(), log.query.clone());
+        let Ok(commits) = repo.log(&scope, query.as_deref()) else {
+            continue;
+        };
+        if let Some(log) = app.tabs[index].log_mut() {
+            log.replace(commits, query);
+            log.follow_selection(height);
+        }
+    }
+}
+
+/// Opens the selected commit as a diff (ADR-069).
+///
+/// Narrowed to the file when the history being read is one file's: a commit
+/// that touched forty files, reached from `src/main.rs`'s own history, is being
+/// asked about `src/main.rs`.
+fn show_selected_commit(app: &mut App) {
+    let Some(log) = app.log() else { return };
+    let Some(commit) = log.selected_commit().cloned() else {
+        app.notifications.warning("No commit selected");
+        return;
+    };
+    let path = log.scope.path().map(Path::to_path_buf);
+    let Some(repo) = app.git.service().cloned() else {
+        app.notifications.warning(app.git.summary());
+        return;
+    };
+    match repo.show(&commit.oid, path.as_deref()) {
+        Ok(diff) if diff.is_empty() => {
+            app.notifications
+                .warning(format!("{} shows nothing", commit.short));
+        }
+        Ok(diff) => show_diff(app, DiffState::for_commit(commit, path, diff)),
+        Err(err) => {
+            log::error!("could not show {}: {err}", commit.oid);
+            app.notifications
+                .error(format!("Show failed: {}", err.reason()));
+        }
+    }
+}
+
+// --- git config ------------------------------------------------------------
+
+/// Opens `.git/config` in a tab of its own (ADR-070).
+///
+/// The file, not a form over it: the editor's job is editing text, and
+/// `.git/config` is text — with git's own documentation, git's own comments and
+/// whatever the user has already put in it. A picker of `key = value` rows
+/// showed less than the file does and could not add a comment to a line.
+///
+/// It comes out of the repository directory `rev-parse` answered with, not out
+/// of `<root>/.git`: in a worktree or a submodule that is a file pointing
+/// elsewhere, and the config a command in this tree reads is the one git named.
+fn open_git_config(app: &mut App) {
+    let Some(repo) = app.git.service() else {
+        app.notifications.warning(app.git.summary());
+        return;
+    };
+    let path = repo.git_dir().join("config");
+    match app.open_path(&path, None) {
+        Ok(()) => app.notifications.info(format!("Opened {}", path.display())),
+        Err(err) => {
+            log::error!("could not open {}: {err}", path.display());
+            app.notifications.error(format!("Failed to open: {err}"));
+        }
     }
 }
 
@@ -7395,8 +7822,8 @@ five",
         execute_command(&mut app, Command::GitDiff);
 
         let viewer = app.diff().expect("a viewer is open");
-        assert_eq!(viewer.path, Path::new("a.txt"));
-        assert_eq!(viewer.side, DiffSide::Worktree);
+        assert_eq!(viewer.path().unwrap(), Path::new("a.txt"));
+        assert_eq!(viewer.side().unwrap(), DiffSide::Worktree);
         assert_eq!(app.focus, FocusTarget::Diff);
         assert!(diff_text(&app).contains("+b"), "{}", diff_text(&app));
         assert!(diff_text(&app).contains("-a"));
@@ -7414,7 +7841,7 @@ five",
         select_row(&mut app, "a.txt");
 
         execute_command(&mut app, Command::GitDiff);
-        assert_eq!(app.diff().unwrap().side, DiffSide::Staged);
+        assert_eq!(app.diff().unwrap().side().unwrap(), DiffSide::Staged);
         assert!(diff_text(&app).contains("+b"));
     }
 
@@ -7432,11 +7859,11 @@ five",
         select_row(&mut app, "a.txt");
 
         execute_command(&mut app, Command::GitDiff);
-        assert_eq!(app.diff().unwrap().side, DiffSide::Worktree);
+        assert_eq!(app.diff().unwrap().side().unwrap(), DiffSide::Worktree);
         assert!(diff_text(&app).contains("+c"));
 
         execute_command(&mut app, Command::GitDiffToggleSide);
-        assert_eq!(app.diff().unwrap().side, DiffSide::Staged);
+        assert_eq!(app.diff().unwrap().side().unwrap(), DiffSide::Staged);
         assert!(diff_text(&app).contains("+b"));
     }
 
@@ -7484,7 +7911,7 @@ five",
         select_row(&mut app, "new.txt");
 
         execute_command(&mut app, Command::GitDiff);
-        assert_eq!(app.diff().unwrap().path, Path::new("a.txt"));
+        assert_eq!(app.diff().unwrap().path().unwrap(), Path::new("a.txt"));
     }
 
     /// A diff is a tab, so focus moving elsewhere leaves it open — and coming
@@ -7557,7 +7984,8 @@ five",
             app.tabs[app.active_tab.unwrap()]
                 .diff()
                 .expect("a diff tab is in front")
-                .path,
+                .path()
+                .unwrap(),
             Path::new("a.txt")
         );
         assert_eq!(app.focus, FocusTarget::GitPanel);
@@ -7627,6 +8055,296 @@ five",
 
         execute_command(&mut app, Command::GitDiff);
         assert!(app.diff().is_none());
+        assert_eq!(
+            app.notifications.current().map(|n| n.message.as_str()),
+            Some("Not a Git repository")
+        );
+    }
+
+    // --- log viewer, file and line history (ADR-068) -----------------------
+
+    /// A repository with three commits: `a.txt` in the first and the third,
+    /// `b.txt` in the second.
+    fn repo_with_history() -> crate::git::testing::TestRepo {
+        let repo = crate::git::testing::TestRepo::new();
+        repo.write("a.txt", "one\ntwo\nthree\n");
+        repo.run(&["add", "."]);
+        repo.commit("first: add a");
+        repo.write("b.txt", "b\n");
+        repo.run(&["add", "."]);
+        repo.commit("second: add b");
+        repo.write("a.txt", "one\nTWO\nthree\n");
+        repo.run(&["add", "."]);
+        repo.commit("third: shout at a");
+        repo
+    }
+
+    fn log_of(app: &App) -> &crate::app::log::LogState {
+        app.log().expect("a log tab is in front")
+    }
+
+    #[test]
+    fn the_repository_log_opens_in_a_tab_of_its_own_and_takes_focus() {
+        let repo = repo_with_history();
+        let (mut app, _rx) = app_over(&repo);
+        app.log_rows = 10;
+
+        execute_command(&mut app, Command::GitLog);
+        assert_eq!(app.focus, FocusTarget::Log);
+        let log = log_of(&app);
+        assert_eq!(log.scope, LogScope::Repository);
+        assert_eq!(log.len(), 3);
+        assert_eq!(
+            log.selected_commit().unwrap().subject,
+            "third: shout at a",
+            "newest first, and the selection starts on it"
+        );
+        assert_eq!(app.tabs[app.active_tab.unwrap()].title(), "Log");
+    }
+
+    /// The same history twice is one tab, for the reason a diff is: two places
+    /// showing one thing are two places to keep in step.
+    #[test]
+    fn asking_for_the_same_history_twice_reuses_its_tab() {
+        let repo = repo_with_history();
+        let (mut app, _rx) = app_over(&repo);
+        execute_command(&mut app, Command::GitLog);
+        let tabs = app.tabs.len();
+        execute_command(&mut app, Command::GitLog);
+        assert_eq!(app.tabs.len(), tabs);
+    }
+
+    #[test]
+    fn a_files_history_lists_only_the_commits_that_touched_it() {
+        let repo = repo_with_history();
+        let (mut app, _rx) = app_over(&repo);
+        app.log_rows = 10;
+        // The panel has focus, so the history is the selected row's — which is
+        // what a git panel with nothing selected has to refuse.
+        assert!(app.git.selected_entry().is_none());
+        execute_command(&mut app, Command::GitFileHistory);
+        assert!(app.log().is_none());
+        assert!(app
+            .notifications
+            .current()
+            .unwrap()
+            .message
+            .contains("No file"));
+
+        // From the editor it is the file being edited.
+        let path = repo.path().join("b.txt");
+        app.tabs.push(TabItem::editing(crate::app::Tab::new(
+            Document::open(&path).unwrap(),
+        )));
+        app.active_tab = Some(app.tabs.len() - 1);
+        app.focus = FocusTarget::Editor;
+        execute_command(&mut app, Command::GitFileHistory);
+
+        let log = log_of(&app);
+        assert_eq!(log.scope, LogScope::File(PathBuf::from("b.txt")));
+        assert_eq!(log.len(), 1);
+        assert_eq!(log.selected_commit().unwrap().subject, "second: add b");
+    }
+
+    /// The lines the selection covers, and the caret's own line when there is
+    /// no selection (ADR-068).
+    #[test]
+    fn a_line_history_follows_the_selection_and_falls_back_to_the_caret() {
+        let repo = repo_with_history();
+        let (mut app, _rx) = app_over(&repo);
+        app.log_rows = 10;
+        let path = repo.path().join("a.txt");
+        app.tabs.push(TabItem::editing(crate::app::Tab::new(
+            Document::open(&path).unwrap(),
+        )));
+        app.active_tab = Some(app.tabs.len() - 1);
+        app.focus = FocusTarget::Editor;
+
+        // The caret is on line 1 and nothing is selected.
+        execute_command(&mut app, Command::GitLineHistory);
+        assert_eq!(
+            log_of(&app).scope,
+            LogScope::Lines {
+                path: PathBuf::from("a.txt"),
+                first: 1,
+                last: 1
+            }
+        );
+        assert_eq!(log_of(&app).len(), 1, "line one was only ever written once");
+
+        // Line two, which the third commit shouted at.
+        let editor = app.tabs.len() - 2;
+        app.active_tab = Some(editor);
+        app.focus = FocusTarget::Editor;
+        let layout = app.text_view().layout(3);
+        app.editor_at_mut(editor)
+            .unwrap()
+            .document
+            .move_cursor(Motion::Down, layout);
+        execute_command(&mut app, Command::GitLineHistory);
+        let log = log_of(&app);
+        assert_eq!(
+            log.scope,
+            LogScope::Lines {
+                path: PathBuf::from("a.txt"),
+                first: 2,
+                last: 2
+            }
+        );
+        assert_eq!(log.len(), 2, "written, then shouted at");
+    }
+
+    #[test]
+    fn a_selected_commit_opens_as_a_diff_narrowed_to_the_file_it_came_from() {
+        let repo = repo_with_history();
+        let (mut app, _rx) = app_over(&repo);
+        app.log_rows = 10;
+        execute_command(&mut app, Command::GitLog);
+        execute_command(&mut app, Command::LogShowCommit);
+
+        assert_eq!(app.focus, FocusTarget::Diff);
+        let viewer = app.diff().expect("a diff tab is in front");
+        let crate::app::diff::DiffSource::Commit { commit, path } = &viewer.source else {
+            panic!("a commit, not a working diff");
+        };
+        assert_eq!(commit.subject, "third: shout at a");
+        assert_eq!(*path, None, "the repository's log is about no one file");
+        assert!(
+            viewer.title().starts_with(" Commit — "),
+            "{}",
+            viewer.title()
+        );
+        // The message is above the patch, and it is not read for changes.
+        assert_eq!((viewer.diff.added, viewer.diff.removed), (1, 1));
+        // A commit has one side, so the toggle refuses rather than emptying it.
+        execute_command(&mut app, Command::GitDiffToggleSide);
+        assert!(app
+            .notifications
+            .current()
+            .unwrap()
+            .message
+            .contains("one side"));
+    }
+
+    #[test]
+    fn typing_in_the_search_field_narrows_the_list_and_enter_asks_git() {
+        let repo = repo_with_history();
+        let (mut app, _rx) = app_over(&repo);
+        app.log_rows = 10;
+        execute_command(&mut app, Command::GitLog);
+
+        execute_command(&mut app, Command::LogSearchOpen);
+        assert_eq!(app.focus, FocusTarget::LogSearch);
+        for ch in "shout".chars() {
+            execute_command(&mut app, Command::LogSearchChar(ch));
+        }
+        assert_eq!(log_of(&app).len(), 1, "narrowed without asking git");
+        assert!(log_of(&app).query.is_none());
+
+        execute_command(&mut app, Command::LogSearchSubmit);
+        let log = log_of(&app);
+        assert_eq!(app.focus, FocusTarget::Log, "the field is done with");
+        assert_eq!(log.query.as_deref(), Some("shout"));
+        assert_eq!(log.len(), 1);
+        assert!(!log.searching);
+        assert!(
+            log.title().contains("matching \"shout\""),
+            "{}",
+            log.title()
+        );
+    }
+
+    /// `Esc` in the field gives up the narrowing with it: a list still filtered
+    /// by text nobody can see has apparently lost half its commits.
+    #[test]
+    fn leaving_the_search_field_puts_the_whole_list_back() {
+        let repo = repo_with_history();
+        let (mut app, _rx) = app_over(&repo);
+        app.log_rows = 10;
+        execute_command(&mut app, Command::GitLog);
+        execute_command(&mut app, Command::LogSearchOpen);
+        for ch in "shout".chars() {
+            execute_command(&mut app, Command::LogSearchChar(ch));
+        }
+        execute_command(&mut app, Command::LogSearchClose);
+        assert_eq!(app.focus, FocusTarget::Log);
+        assert_eq!(log_of(&app).len(), 3);
+    }
+
+    /// A commit is what a history is a list of, so making one moves the list.
+    #[test]
+    fn committing_reaches_the_open_history() {
+        let repo = repo_with_history();
+        let (mut app, rx) = app_over(&repo);
+        app.log_rows = 10;
+        execute_command(&mut app, Command::GitLog);
+        assert_eq!(log_of(&app).len(), 3);
+
+        repo.write("c.txt", "c\n");
+        execute_command(&mut app, Command::GitRefresh);
+        execute_command(&mut app, Command::GitStageAll);
+        settle(&mut app, &rx);
+        execute_command(&mut app, Command::GitCommit("fourth: add c".into()));
+        settle(&mut app, &rx);
+
+        let log = log_of(&app);
+        assert_eq!(log.len(), 4);
+        assert_eq!(log.selected_commit().unwrap().subject, "fourth: add c");
+    }
+
+    #[test]
+    fn closing_a_log_tab_gives_the_pane_behind_it_back() {
+        let repo = repo_with_history();
+        let (mut app, _rx) = app_over(&repo);
+        execute_command(&mut app, Command::GitLog);
+        let tabs = app.tabs.len();
+        execute_command(&mut app, Command::LogClose);
+        assert_eq!(app.tabs.len(), tabs - 1);
+        assert!(app.log().is_none());
+    }
+
+    #[test]
+    fn a_history_outside_a_repository_says_so_and_opens_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::fixture_in(dir.path());
+        execute_command(&mut app, Command::GitRefresh);
+        execute_command(&mut app, Command::GitLog);
+        assert!(app.log().is_none());
+        assert_eq!(
+            app.notifications.current().map(|n| n.message.as_str()),
+            Some("Not a Git repository")
+        );
+    }
+
+    // --- git config (ADR-070) ----------------------------------------------
+
+    #[test]
+    fn the_config_opens_as_a_file_in_a_tab_of_its_own() {
+        let repo = repo_with_history();
+        let (mut app, _rx) = app_over(&repo);
+
+        execute_command(&mut app, Command::GitOpenConfig);
+        let tab = app.active().expect("an editor tab is in front");
+        assert_eq!(tab.document.path().unwrap().file_name().unwrap(), "config");
+        let text: String = (0..tab.document.line_count())
+            .map(|i| tab.document.line(i).into_owned())
+            .collect();
+        assert!(
+            text.contains("[core]"),
+            "the file itself, not a form over it: {text}"
+        );
+        // It is an ordinary buffer: editing and saving are the editor's own.
+        assert!(!tab.document.is_dirty());
+        assert!(app.dialog.is_none(), "no dialog stands in front of it");
+    }
+
+    #[test]
+    fn the_config_of_a_directory_that_is_not_a_repository_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::fixture_in(dir.path());
+        execute_command(&mut app, Command::GitRefresh);
+        execute_command(&mut app, Command::GitOpenConfig);
+        assert!(app.active().is_none());
         assert_eq!(
             app.notifications.current().map(|n| n.message.as_str()),
             Some("Not a Git repository")

@@ -122,6 +122,14 @@ pub struct LayoutRects {
     /// covers the pane rather than splitting it, so a hit test that finds it
     /// must be made before the editor's own (ADR-037).
     pub diff: Option<Rect>,
+    /// The log viewer, when the tab in front is one (ADR-068). The whole editor
+    /// pane, for the reason the diff takes it, and hit-tested before the
+    /// editor's own for the same reason.
+    pub log: Option<Rect>,
+    /// The rows of that viewer: its inside, less the search field's row while
+    /// the field is open. Read back out of the frame the way `dialog_rows` is,
+    /// because how far a list scrolls depends on how much of the pane it got.
+    pub log_rows: Option<Rect>,
     /// The CSV table, when the tab in front is being read as one (SPEC §65).
     /// The whole editor pane, for the same reason the diff takes it: the view
     /// covers the pane rather than splitting it, and a hit test that finds it
@@ -248,6 +256,8 @@ pub fn compute(area: Rect, app: &App) -> LayoutRects {
         editor_scrollbar,
         help: app.help.as_ref().map(|_| body),
         diff: app.diff().map(|_| pane),
+        log: app.log().map(|_| pane),
+        log_rows: app.log().map(|_| log_rows(app, pane)),
         table: app.active().filter(|tab| tab.shows_table()).map(|_| pane),
         search,
         status_bar,
@@ -256,6 +266,20 @@ pub fn compute(area: Rect, app: &App) -> LayoutRects {
         dialog_buttons,
         dialog_list,
         dialog_list_frame,
+    }
+}
+
+/// The rows of the log viewer: inside its border, less the search field's row.
+fn log_rows(app: &App, pane: Rect) -> Rect {
+    let inner = inset(pane);
+    match crate::ui::log::search_row(app, inner) {
+        Some(_) => Rect::new(
+            inner.x,
+            inner.y.saturating_add(1),
+            inner.width,
+            inner.height.saturating_sub(1),
+        ),
+        None => inner,
     }
 }
 
@@ -379,7 +403,7 @@ struct TabBarLayout {
     overflow_right: Option<Rect>,
 }
 
-/// Tabs are laid out as ` main.rs ● × `, left to right, scrolled so the active
+/// Tabs are laid out as ` main.rs ● × │`, left to right, scrolled so the active
 /// one is on screen (SPEC §11).
 ///
 /// The scroll offset is *derived* rather than stored: it is the earliest tab
@@ -516,16 +540,16 @@ fn max_first(widths: &[u16], width: u16) -> usize {
 }
 
 /// Cells between a tab's right edge and its close button: `× ` .
-const CLOSE_FROM_RIGHT: u16 = 2;
+const CLOSE_FROM_RIGHT: u16 = 3;
 
-/// Display width of a tab label, which is ` title ● × `.
+/// Display width of a tab label, which is ` title ● × │`.
 ///
 /// Uses `unicode_width` because file names are arbitrary text: a CJK name is
 /// two cells per character, not one. The dirty marker keeps its cell whether or
 /// not the file is modified, so that typing the first character into a file
 /// does not shift every tab after it sideways under the pointer.
 pub fn tab_width(title: &str) -> u16 {
-    title.width() as u16 + 6
+    title.width() as u16 + 7
 }
 
 /// A centred modal box (SPEC §40).
@@ -735,7 +759,7 @@ mod tests {
         // Twelve `file00.rs` tabs are fifteen cells each; a 60-cell bar with
         // an arrow at each end lays them out in 58, so three fit at a time.
         app.tab_bar_width = 60;
-        assert_eq!(tab_width("file00.rs"), 15);
+        assert_eq!(tab_width("file00.rs"), 16);
 
         app.active_tab = Some(11);
         assert_eq!(tab_scroll_showing(&app), 9);
@@ -768,19 +792,20 @@ mod tests {
     fn a_tab_is_as_wide_as_its_name_plus_its_two_markers() {
         // ` main.rs ● × ` — the same width dirty or clean, so nothing moves
         // sideways when a file is edited.
-        assert_eq!(tab_width("main.rs"), 13);
+        assert_eq!(tab_width("main.rs"), 14);
         // A CJK name is two cells per character, not one: three ideographs
         // take as much room as six letters.
         assert_eq!(tab_width("日本語.rs"), tab_width("abcdef.rs"));
     }
 
     #[test]
-    fn every_whole_tab_has_a_close_button_on_its_last_but_one_cell() {
+    fn every_whole_tab_has_a_close_button_two_cells_off_its_right_edge() {
         let app = app();
         let rects = compute(Rect::new(0, 0, 120, 30), &app);
         for (tab, close) in rects.tabs.iter().zip(&rects.tab_closes) {
             assert_eq!(close.width, 1);
-            assert_eq!(close.x, tab.right() - 2);
+            // A space and the separator rule sit after it (ADR-072).
+            assert_eq!(close.x, tab.right() - 3);
             assert!(contains(*tab, *close));
         }
     }

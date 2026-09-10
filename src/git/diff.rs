@@ -185,6 +185,18 @@ struct Classifier {
     /// Whether a hunk of this file has begun. Before the first one every line
     /// describes the file; after it every line is contents.
     in_hunk: bool,
+    /// Whether the output opened with a commit describing itself (ADR-069).
+    ///
+    /// `git diff` opens with `diff --git`; `git show` opens with `commit
+    /// <oid>` and then says who wrote it, when, and the whole message — and a
+    /// message is prose, so a paragraph beginning `- ` is a bullet and not a
+    /// removed line. Everything from there to the first file header is
+    /// therefore the commit rather than a change. Only the *first* line can
+    /// turn this on, which is what keeps a diff whose contents happen to
+    /// contain the word from being read as one.
+    commit_header: bool,
+    /// Whether the line about to be classified is the first of the output.
+    first_line: bool,
 }
 
 impl Default for Classifier {
@@ -192,14 +204,27 @@ impl Default for Classifier {
         Self {
             columns: 1,
             in_hunk: false,
+            commit_header: false,
+            first_line: true,
         }
     }
 }
 
 impl Classifier {
     fn classify(&mut self, line: &str) -> DiffLineKind {
+        let first_line = std::mem::take(&mut self.first_line);
         if FILE_HEADERS.iter().any(|prefix| line.starts_with(prefix)) {
-            *self = Self::default();
+            *self = Self {
+                first_line: false,
+                ..Self::default()
+            };
+            return DiffLineKind::Header;
+        }
+        if first_line && line.starts_with("commit ") {
+            self.commit_header = true;
+            return DiffLineKind::Header;
+        }
+        if self.commit_header {
             return DiffLineKind::Header;
         }
         if let Some(columns) = hunk_columns(line) {
@@ -286,6 +311,41 @@ index 7898192..6178079 100644
             .into_iter()
             .map(|l| l.kind)
             .collect()
+    }
+
+    /// `git show` opens with the commit rather than with a file, and none of
+    /// what it says about itself is a change (ADR-069).
+    #[test]
+    fn the_header_git_show_writes_above_a_patch_is_not_read_for_changes() {
+        use DiffLineKind::{Added, Header, Hunk};
+        let text = "\
+commit 0123456789abcdef0123456789abcdef01234567
+Author: Ada <ada@example.com>
+Date:   2026-09-10
+
+    subject
+
+    -1 was the old way and +1 is the new one
+
+diff --git a/a.txt b/a.txt
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
++b
+";
+        let diff = Diff::parse(text);
+        let kinds: Vec<DiffLineKind> = diff.lines.iter().map(|l| l.kind).collect();
+        assert!(
+            kinds[..8].iter().all(|kind| *kind == Header),
+            "the commit describes itself: {kinds:?}"
+        );
+        assert_eq!(kinds[11], Hunk);
+        assert_eq!(kinds[12], Added);
+        assert_eq!(
+            (diff.added, diff.removed),
+            (1, 0),
+            "a message that mentions -1 and +1 is not a change"
+        );
     }
 
     #[test]

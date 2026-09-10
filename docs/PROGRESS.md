@@ -784,6 +784,40 @@ the per-file quit walk, the Open browser and green CI done)
   unchanged. `Settings::default` had to be written out: `check-for-updates` is the first
   setting whose default is not the zero value.
 
+- **Commit history** (ADR-068, ADR-069). Three histories in one viewer, in a tab beside the
+  diffs: the repository's (*Git ▸ Log*, `l` in the panel), one file's (*File History*, `h`,
+  followed across renames) and one range of lines' (*Line History*, `git log -L` over what
+  the editor's selection covers). Rows are the abbreviated name, the date, the author and
+  the subject in columns; `Enter`, `d` or a click on a row opens that commit as a diff —
+  `git show`, message and all, narrowed to the file when the history is a file's.
+  - The search field is `/`, and it has two speeds: typing narrows the commits already read
+    without a subprocess, and `Enter` hands the text to `git log --grep`, which reaches the
+    whole message and the commits past the two-thousand cap. The title says which is on
+    screen, and `Esc` gives up the field and the narrowing together.
+  - `FocusTarget::Log` stands where `Diff` does in the cycle, and `LogSearch` is a focus of
+    its own so the pane keeps its single-letter keys.
+  - `DiffState` grew a `DiffSource`: a working diff or a commit. A commit has one side, is
+    never re-read after a git job, and its `git show` header is classified as a header — so
+    a message paragraph beginning `- ` is not counted as a removed line.
+  - Every open history is re-read after a git job that can have moved `HEAD` — a commit, a
+    pull, a switch, a branch, a merge. Staging cannot, and three staged files would
+    otherwise be three subprocesses re-answering an unchanged question.
+- **The repository's git config** (ADR-070). *Git ▸ Config* (`g` in the panel) opens
+  `.git/config` in an ordinary editor tab, out of the directory `rev-parse --absolute-git-dir`
+  named. A picker of `key = value` rows was built first and thrown away: it showed less than
+  the file does — sections, comments, settings commented out and kept — and it was a second
+  editor inside a text editor.
+- **The menu advertises no bare letter** (ADR-071). `keyboard::menu_binding` drops a binding
+  that is a printable character with no modifier, so *Stage All* no longer says `a` in a
+  menu read with the caret in a document. The keys are unchanged. The log viewer carries a
+  legend on its bottom border instead, generated from the keymap and shortened from the end
+  when it does not fit; `F1` and `docs/SHORTCUTS.md` still list every key under its pane.
+- A diff or a history asked for from the editor now resolves the buffer's path when the
+  plain comparison fails: macOS puts a temporary directory behind a symbolic link and
+  `git rev-parse --show-toplevel` answers with the resolved path, so the root was not a
+  prefix of the file.
+- 1015 tests (was 989); the config picker's own tests went with it.
+
 ## Known issues
 
 - **`cross` is unusable on this machine.** Both musl targets fail before the build
@@ -1402,3 +1436,5 @@ Phase 14 continues. What is left of it, roughly in order of how much it is worth
   the buffer, and a save overwrites. Nothing in SPEC asks for a third answer, and the
   reload being undoable is what makes the pair enough.
 - No README screenshot yet; the block at the top of it is still a hand-drawn mockup.
+- Blame and stash are still unbuilt; the log, the file and line histories and the config
+  editor are the parts of SPEC §62's git list that now exist.

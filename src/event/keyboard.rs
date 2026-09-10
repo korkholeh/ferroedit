@@ -406,6 +406,30 @@ pub static BINDINGS: &[Binding] = &[
         Command::GitDiff,
         "d",
     ),
+    // `l` is the repository's history and `h` is the selected file's — the two
+    // histories a panel of changed files can be asked for (ADR-068). The line
+    // history has no key here: it is about a selection in the editor, and the
+    // panel has none.
+    sidebar(
+        FocusTarget::GitPanel,
+        KeyCode::Char('l'),
+        Command::GitLog,
+        "l",
+    ),
+    sidebar(
+        FocusTarget::GitPanel,
+        KeyCode::Char('h'),
+        Command::GitFileHistory,
+        "h",
+    ),
+    // `g` for the config: `c` is the commit dialog, and a repository's settings
+    // are the one thing in the Git menu that has no other way in.
+    sidebar(
+        FocusTarget::GitPanel,
+        KeyCode::Char('g'),
+        Command::GitOpenConfig,
+        "g",
+    ),
     // Pull and push have no key on purpose: they are the two operations that
     // reach the network, and a single letter next to `c` is not the gesture for
     // something that changes what other people see. Both are Git menu entries.
@@ -448,6 +472,41 @@ pub static BINDINGS: &[Binding] = &[
     // `s` is the one key that changes what is being shown rather than where in
     // it we are: the staged diff and the unstaged one are different answers.
     diff(NONE, KeyCode::Char('s'), Command::GitDiffToggleSide, "s"),
+    // --- log viewer -------------------------------------------------------
+    // A list rather than a pager, so the arrows move a selection and not a
+    // window — the git panel's axis, in the editor's pane (ADR-068).
+    log_view(KeyCode::Esc, Command::LogClose, "Esc"),
+    log_view(KeyCode::Up, Command::LogMove(-1), "Up"),
+    log_view(KeyCode::Down, Command::LogMove(1), "Down"),
+    log_view(KeyCode::PageUp, Command::LogMovePage(-1), "PageUp"),
+    log_view(KeyCode::PageDown, Command::LogMovePage(1), "PageDown"),
+    log_view(KeyCode::Home, Command::LogHome, "Home"),
+    log_view(KeyCode::End, Command::LogEnd, "End"),
+    log_view(KeyCode::Enter, Command::LogShowCommit, "Enter"),
+    // `d` as well, because it is the key that shows a diff in the git panel and
+    // a reader stepping between the two panes should not have to change hands.
+    log_view(KeyCode::Char('d'), Command::LogShowCommit, "d"),
+    log_view(KeyCode::F(5), Command::LogRefresh, "F5"),
+    // `/` opens the search field, which is what every pager the terminal has
+    // ever had uses for it.
+    log_view(KeyCode::Char('/'), Command::LogSearchOpen, "/"),
+    // --- the log's search field -------------------------------------------
+    // Its own focus, so `d` and `/` here are letters (ADR-068). `Esc` gives up
+    // the field and the narrowing with it; `Enter` hands the text to git.
+    log_search(KeyCode::Esc, Command::LogSearchClose, "Esc"),
+    log_search(KeyCode::Enter, Command::LogSearchSubmit, "Enter"),
+    log_search(KeyCode::Backspace, Command::LogSearchBackspace, "Backspace"),
+    log_search(KeyCode::Delete, Command::LogSearchDelete, "Delete"),
+    log_search(KeyCode::Left, Command::LogSearchMove(-1), "Left"),
+    log_search(KeyCode::Right, Command::LogSearchMove(1), "Right"),
+    log_search(KeyCode::Home, Command::LogSearchHome, "Home"),
+    log_search(KeyCode::End, Command::LogSearchEnd, "End"),
+    // Up and Down still move the list under the field, the way they do in the
+    // Open dialog: the field is over a list, not instead of one.
+    log_search(KeyCode::Up, Command::LogMove(-1), "Up"),
+    log_search(KeyCode::Down, Command::LogMove(1), "Down"),
+    log_search(KeyCode::PageUp, Command::LogMovePage(-1), "PageUp"),
+    log_search(KeyCode::PageDown, Command::LogMovePage(1), "PageDown"),
     // --- help screen ------------------------------------------------------
     // The keymap on screen (SPEC §6). A pager like the diff viewer, and
     // deliberately the same keys: two read-only panes that scrolled
@@ -506,6 +565,14 @@ const fn search(
 
 const fn diff(mods: KeyModifiers, code: KeyCode, command: Command, label: &'static str) -> Binding {
     binding(mods, code, Some(FocusTarget::Diff), command, label)
+}
+
+const fn log_view(code: KeyCode, command: Command, label: &'static str) -> Binding {
+    binding(NONE, code, Some(FocusTarget::Log), command, label)
+}
+
+const fn log_search(code: KeyCode, command: Command, label: &'static str) -> Binding {
+    binding(NONE, code, Some(FocusTarget::LogSearch), command, label)
 }
 
 const fn help(code: KeyCode, command: Command, label: &'static str) -> Binding {
@@ -642,17 +709,37 @@ fn typed_character(key: KeyEvent, focus: FocusTarget) -> Option<Command> {
         // The search bar takes typing too, into whichever of its fields has the
         // caret — the same rule, one table lookup earlier.
         FocusTarget::Search => Some(Command::SearchInputChar(ch)),
+        // And the log's own field, which is a focus rather than a flag exactly
+        // so that this line can exist without costing the pane its letters.
+        FocusTarget::LogSearch => Some(Command::LogSearchChar(ch)),
         _ => None,
     }
 }
 
-/// The printable key label bound to a command, if any.
+/// The binding a menu entry advertises, if any (ADR-071).
 ///
 /// The menu renders its shortcut column from this rather than from its own
 /// strings, so a menu entry cannot advertise a key that is not bound — the
 /// anti-drift requirement in SPEC §25.
+///
+/// A bare printable character is deliberately not advertised. `a`, `d`, `l`
+/// and the rest work in the git panel and in the log viewer, where nothing
+/// types; in a *text editor's* menu they read as keys to press at the caret,
+/// where they would insert a letter instead. The pane that owns them says so
+/// itself — the log viewer in its legend, and both of them in `F1` and in
+/// `docs/SHORTCUTS.md`, which name the focus each key needs.
+pub fn menu_binding(command: &Command) -> Option<&'static Binding> {
+    binding_for(command).filter(|b| !is_bare_character(b))
+}
+
+/// The printable key label a menu entry advertises, if any.
 pub fn shortcut_for(command: &Command) -> Option<&'static str> {
-    binding_for(command).map(|b| b.label)
+    menu_binding(command).map(|b| b.label)
+}
+
+/// A key that is a character and nothing else — no `Ctrl`, no `Alt`.
+fn is_bare_character(binding: &Binding) -> bool {
+    binding.mods == NONE && matches!(binding.code, KeyCode::Char(_))
 }
 
 /// The whole binding, for the readers that also need its scope.
@@ -678,6 +765,28 @@ mod tests {
     /// flag themselves.
     fn resolve(key: KeyEvent, focus: FocusTarget) -> Option<Command> {
         super::resolve(key, focus, false)
+    }
+
+    /// ADR-071: the menu is read at the caret, where a bare letter would type.
+    #[test]
+    fn the_menu_advertises_no_bare_letter() {
+        assert_eq!(
+            shortcut_for(&Command::GitStageAll),
+            None,
+            "`a` works in the git panel and says so in F1, not in the menu"
+        );
+        assert_eq!(shortcut_for(&Command::GitLog), None);
+        assert_eq!(shortcut_for(&Command::LogSearchOpen), None);
+        // The keys that are not letters are still advertised: nothing types an
+        // `F5`, so there is nothing to be confused about.
+        assert_eq!(shortcut_for(&Command::GitRefresh), Some("F5"));
+        assert_eq!(shortcut_for(&Command::GitCancel), Some("Esc"));
+        assert_eq!(shortcut_for(&Command::Save), Some("Ctrl+S"));
+        // And the binding itself is untouched — only what the menu says is.
+        assert_eq!(
+            resolve(key(KeyCode::Char('a'), NONE), FocusTarget::GitPanel),
+            Some(Command::GitStageAll)
+        );
     }
 
     #[test]

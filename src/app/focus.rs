@@ -23,12 +23,23 @@ pub enum FocusTarget {
     /// The find/replace bar. Reached by `Ctrl+F` and left by `Esc`, never by
     /// the cycle key: it is a transient tool, not one of the panes.
     Search,
+    /// A log tab (ADR-068). It stands where `Editor` and `Diff` do — the same
+    /// pane, showing a history instead of a document — so the cycle key treats
+    /// the three as one stop.
+    Log,
+    /// The log's search field, while it has the caret.
+    ///
+    /// A focus of its own rather than a flag, for the reason the find bar is
+    /// one: the pane's keys are a pager's — `d`, `Enter`, `Home` — and a field
+    /// that shared them could not type a `d`. `resolve` picks a table from the
+    /// focus, so the two meanings can never both match (SPEC §22).
+    LogSearch,
 }
 
 impl FocusTarget {
-    /// Panes reachable by the cycle key. The menu and the search bar are
+    /// Panes reachable by the cycle key. The menu and the two search fields are
     /// entered explicitly and left explicitly, and a dialog is modal, so none
-    /// of the three is ever cycled into.
+    /// of them is ever cycled into.
     const CYCLE: [FocusTarget; 3] = [Self::Editor, Self::Explorer, Self::GitPanel];
 
     pub fn next(self) -> Self {
@@ -36,7 +47,7 @@ impl FocusTarget {
         // what the editor pane is showing (SPEC §36). Without this the cycle
         // key could not leave a diff: `App::normalize_focus` would put focus
         // straight back on it.
-        let from = if self == Self::Diff {
+        let from = if matches!(self, Self::Diff | Self::Log | Self::LogSearch) {
             Self::Editor
         } else {
             self
@@ -57,6 +68,8 @@ impl FocusTarget {
             Self::Dialog => "Dialog",
             Self::Search => "Search",
             Self::Diff => "Diff",
+            Self::Log => "Log",
+            Self::LogSearch => "Log search",
             Self::Help => "Help",
         }
     }
@@ -92,9 +105,11 @@ mod tests {
     }
 
     /// A diff is in the editor's pane, so the cycle steps out of it to where
-    /// it would step out of the editor.
+    /// it would step out of the editor. A history is the same pane again.
     #[test]
-    fn cycling_out_of_a_diff_goes_where_the_editor_would() {
+    fn cycling_out_of_a_diff_or_a_log_goes_where_the_editor_would() {
         assert_eq!(FocusTarget::Diff.next(), FocusTarget::Explorer);
+        assert_eq!(FocusTarget::Log.next(), FocusTarget::Explorer);
+        assert_eq!(FocusTarget::LogSearch.next(), FocusTarget::Explorer);
     }
 }

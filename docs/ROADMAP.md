@@ -28,5 +28,9 @@ Phases are ordered by dependency, not by importance. Each phase ends green on
 ## Explicitly out of MVP scope
 
 Windows support, LSP, tree-sitter, command palette, split editor, integrated terminal,
-git history/blame/stash, formatters, plugin API. The architecture should not *prevent*
+blame, git stash, formatters, plugin API. The architecture should not *prevent*
 these (SPEC §62), but none of them is built now.
+
+Git *history* has since been built — the log viewer with its search, the history of a file
+and of a range of lines, and `.git/config` opened as a file (ADR-068, ADR-069, ADR-070). It was out of
+MVP scope, not out of the architecture's.

@@ -15,7 +15,7 @@ event/         → terminal events + worker messages → AppEvent → Command
 ui/            → pure render functions: fn(&App, &mut Frame) — never mutates App
 editor/        → headless core: Rope, Cursor, Selection, History, Search. No TUI types.
 filesystem/    → lazy tree, file IO
-git/           → GitService (subprocess), porcelain=v2 parser, worker thread
+git/           → GitService (subprocess), porcelain=v2 parser, log reader, worker thread
 syntax/        → syntect wrapper + per-line highlight cache
 config/        → TOML settings, theme
 update/        → the release check: one subprocess, one thread (ADR-065)
@@ -52,16 +52,16 @@ src/
   cli.rs                  # arg parsing, `+42 file.rs`
   terminal.rs             # RAII TerminalGuard + panic hook
   docs.rs                 # renders docs/SHORTCUTS.md from the tables (ADR-028)
-  app/       mod.rs focus.rs tabs.rs dialog.rs diff.rs input_field.rs
+  app/       mod.rs focus.rs tabs.rs dialog.rs diff.rs log.rs input_field.rs
              browser.rs notifications.rs search.rs table.rs workspace.rs
   event/     mod.rs keyboard.rs mouse.rs
   commands/  mod.rs execute.rs
   ui/        mod.rs layout.rs menu.rs tabs.rs editor.rs explorer.rs field.rs
-             git.rs search.rs statusbar.rs dialog.rs diff.rs table.rs theme.rs
+             git.rs search.rs statusbar.rs dialog.rs diff.rs log.rs table.rs theme.rs
   editor/    mod.rs document.rs cursor.rs selection.rs history.rs search.rs
              coords.rs viewport.rs wrap.rs clipboard.rs charset.rs csv.rs
   filesystem/ mod.rs tree.rs      # file operations; lazy, ignore-aware tree
-  git/       mod.rs service.rs parser.rs models.rs diff.rs worker.rs
+  git/       mod.rs service.rs parser.rs models.rs diff.rs log.rs worker.rs
   syntax/    mod.rs highlighter.rs cache.rs
   config/    mod.rs settings.rs
   update/    mod.rs           # curl/wget → the newest release tag (ADR-065)
@@ -148,9 +148,9 @@ keyboard, the menu and the mouse, and a new dialog is a constructor rather than 
 input mode.
 
 The body is the enum: `Message` for a confirmation, `Input` for a name (ADR-019), `List`
-for a choice — the branch picker, and the one case where no pane behind the dialog
-already lists the same things (ADR-035) — and `Browser` for Open, a directory listing
-with a filter over it (ADR-051). A dialog with a field has its own keymap table, because
+for a choice — the branch picker and the syntax picker, the cases where no pane behind the
+dialog already lists the same things (ADR-035) — and `Browser` for Open, a directory
+listing with a filter over it (ADR-051). A dialog with a field has its own keymap table, because
 `Left` is a caret there and a button selection everywhere else, and `resolve` picks the
 table from the open dialog. `Up` and `Down` are the list's axis the way `Left` and
 `Right` are the button row's, and they are in *both* tables: the browser is a field and a
@@ -203,8 +203,10 @@ highlight-from-scratch equals highlight-after-random-edits.
 `std::thread` + `mpsc`, no async runtime (ADR-002). Reading `git status` is not one of
 the long operations: it is a local read taken on the UI thread, on demand, after
 anything that changes the tree (ADR-030). Everything that *writes* to the repository —
-stage, unstage, commit, pull, push — runs on the git worker instead (ADR-033): one
-thread, one `mpsc` in, and the loop's own `AppEvent` channel out.
+stage, unstage, commit, pull, push — runs on the git worker instead (ADR-033): one thread,
+one `mpsc` in, and the loop's own `AppEvent` channel out.
+Reading a history is a read like the status: `git log` under a cap finishes in
+milliseconds, so it is taken on the UI thread on demand (ADR-068).
 
 ```
 GitState::start(GitJob)  ──►  [git worker]  ──►  AppEvent::GitJob(JobOutcome)

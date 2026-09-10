@@ -167,6 +167,47 @@ pub enum Command {
     DiffHome,
     DiffEnd,
 
+    /// Opens the repository's own history in a tab of its own (ADR-068).
+    GitLog,
+    /// The history of one file: the one in front of the editor, or the row the
+    /// git panel's selection is on when the panel has focus.
+    GitFileHistory,
+    /// The history of the lines the editor's selection covers — the caret's own
+    /// line when there is no selection (ADR-068).
+    GitLineHistory,
+    /// Re-reads the history the viewer is showing, search and all.
+    LogRefresh,
+    /// Closes the viewer and gives the pane behind it its focus back.
+    LogClose,
+    /// Moves the selection by rows, and by whole panes.
+    LogMove(i16),
+    LogMovePage(i16),
+    LogHome,
+    LogEnd,
+    /// Selects the row `n` cells down the pane and opens its commit — what a
+    /// click on a history does, the way a click on a changed file in the git
+    /// panel opens that file's diff (ADR-068).
+    LogShowRow(usize),
+    /// Scrolls the list by moving the selection — the wheel.
+    LogScroll(i16),
+    /// Opens the diff of the commit the selection is on (ADR-069).
+    LogShowCommit,
+    /// Opens the log's search field, and its editing keys. Typing narrows what
+    /// was read; `LogSearchSubmit` is what asks git for the whole history.
+    LogSearchOpen,
+    LogSearchClose,
+    LogSearchChar(char),
+    LogSearchText(String),
+    LogSearchBackspace,
+    LogSearchDelete,
+    LogSearchMove(i16),
+    LogSearchHome,
+    LogSearchEnd,
+    LogSearchSubmit,
+
+    /// Opens `.git/config` in an editor tab (ADR-070).
+    GitOpenConfig,
+
     /// Something changed on disk that the editor did not do (ADR-040). Like
     /// `GitJobFinished` no user can produce it: the run loop makes it out of an
     /// `AppEvent::FilesChanged` so that the watcher reaches `App` through the
@@ -544,6 +585,37 @@ impl Command {
             Self::DiffHome => "Go to the first line".into(),
             Self::DiffEnd => "Go to the last line".into(),
 
+            Self::GitLog => "Show the repository's history".into(),
+            Self::GitFileHistory => "Show the history of this file".into(),
+            Self::GitLineHistory => "Show the history of the selected lines".into(),
+            Self::LogRefresh => "Re-read the history".into(),
+            Self::LogClose => "Close the log tab".into(),
+            Self::LogMove(delta) => step(
+                *delta,
+                "Select the next commit",
+                "Select the previous commit",
+            ),
+            Self::LogMovePage(delta) => step(*delta, "Move down a page", "Move up a page"),
+            Self::LogHome => "Select the newest commit".into(),
+            Self::LogEnd => "Select the oldest commit listed".into(),
+            Self::LogShowRow(_) => "Show a commit as a diff".into(),
+            Self::LogScroll(delta) => step(*delta, "Scroll down", "Scroll up"),
+            Self::LogShowCommit => "Show the selected commit as a diff".into(),
+            Self::LogSearchOpen => "Search the history".into(),
+            Self::LogSearchClose => "Close the search field and show everything".into(),
+            Self::LogSearchChar(_) => "Type it into the search field".into(),
+            Self::LogSearchText(_) => "Paste into the search field".into(),
+            Self::LogSearchBackspace => "Delete the cluster before the caret".into(),
+            Self::LogSearchDelete => "Delete the cluster after the caret".into(),
+            Self::LogSearchMove(delta) => {
+                step(*delta, "Move the caret right", "Move the caret left")
+            }
+            Self::LogSearchHome => "Move the caret to the start".into(),
+            Self::LogSearchEnd => "Move the caret to the end".into(),
+            Self::LogSearchSubmit => "Ask git to search the whole history".into(),
+
+            Self::GitOpenConfig => "Open .git/config in a tab".into(),
+
             Self::NewFilePrompt => "New file — asks for a name".into(),
             Self::NewDirectoryPrompt => "New folder — asks for a name".into(),
             Self::RenamePrompt => "Rename what is selected in the explorer".into(),
@@ -726,6 +798,8 @@ fn pane_name(target: FocusTarget) -> &'static str {
         FocusTarget::Dialog => "dialog",
         FocusTarget::Search => "find bar",
         FocusTarget::Diff => "diff viewer",
+        FocusTarget::Log => "log viewer",
+        FocusTarget::LogSearch => "log search field",
         FocusTarget::Help => "help screen",
     }
 }
@@ -939,6 +1013,11 @@ pub static MENUS: &[MenuDef] = &[
             item("Merge…", Command::GitMergePrompt),
             SEP,
             item("Diff", Command::GitDiff),
+            item("Log", Command::GitLog),
+            item("File History", Command::GitFileHistory),
+            item("Line History", Command::GitLineHistory),
+            SEP,
+            item("Config", Command::GitOpenConfig),
         ],
     },
     MenuDef {

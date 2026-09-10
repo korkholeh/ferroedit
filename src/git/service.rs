@@ -14,6 +14,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::diff::{Diff, DiffSide};
+use super::log::{parse_log, Commit, LogScope, FORMAT, MAX_COMMITS};
 use super::models::{Branch, GitError, Operation, RepoStatus};
 use super::parser::parse_status;
 use super::worker::CancelToken;
@@ -127,6 +128,14 @@ impl GitService {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The repository's own directory, absolute — `<root>/.git` in the ordinary
+    /// case, and somewhere else entirely in a worktree or a submodule, which is
+    /// why it is what `rev-parse` answered rather than a path built by hand.
+    /// `.git/config` is opened out of it (ADR-070).
+    pub fn git_dir(&self) -> &Path {
+        &self.git_dir
     }
 
     /// The changed files and the current branch, in one invocation (SPEC §30).
@@ -271,6 +280,76 @@ impl GitService {
         let output = self.git_os(&args)?;
         // Lossy on purpose: a diff is text to look at, and one line of a file
         // in another encoding must not cost the user the rest of the hunk.
+        Ok(Diff::parse(&String::from_utf8_lossy(&output)))
+    }
+
+    /// The commits of one history, newest first (ADR-068).
+    ///
+    /// `grep` is what the log viewer's search field asks git for: a fixed
+    /// string, matched case-insensitively against the whole commit message and
+    /// not only the subject the list shows. It is passed as `--grep=` in one
+    /// argument, so a pattern beginning with a dash is a pattern.
+    ///
+    /// `--no-color` and `--no-ext-diff` for the reason `diff` passes them: a
+    /// user's configuration must not change what the editor parses. `-z` is
+    /// what separates the records, and `--max-count` is what keeps a hundred
+    /// thousand of them out of the viewer.
+    pub fn log(&self, scope: &LogScope, grep: Option<&str>) -> Result<Vec<Commit>, GitError> {
+        let mut args: Vec<OsString> = [
+            "log",
+            "--no-color",
+            "--no-ext-diff",
+            "--date=short",
+            FORMAT,
+            "-z",
+            &format!("--max-count={MAX_COMMITS}"),
+        ]
+        .iter()
+        .map(OsString::from)
+        .collect();
+        if let Some(pattern) = grep.filter(|pattern| !pattern.is_empty()) {
+            // `--fixed-strings` because the field is a search box and not a
+            // regex prompt: a user typing `c++` means `c++`.
+            args.push(OsString::from("--fixed-strings"));
+            args.push(OsString::from("--regexp-ignore-case"));
+            args.push(OsString::from(format!("--grep={pattern}")));
+        }
+        args.extend(scope.args());
+        let output = self.git_os(&args)?;
+        let commits = parse_log(&output)?;
+        log::debug!("{} commits for {}", commits.len(), scope.label());
+        Ok(commits)
+    }
+
+    /// One commit as a diff (ADR-069), narrowed to `path` when the history
+    /// being read is one file's.
+    ///
+    /// `--format` keeps the header git writes above the patch — who wrote it,
+    /// when, and the whole message — because that is half of what a commit is
+    /// and the list above only had room for its first line.
+    ///
+    /// `-m --first-parent` is what makes a merge commit show something: the
+    /// default for a merge is no patch at all, and a viewer that opened empty
+    /// on every merge would look broken. The diff shown is then against the
+    /// branch that was merged *into*, which is the one the reader was on.
+    pub fn show(&self, oid: &str, path: Option<&Path>) -> Result<Diff, GitError> {
+        let mut args: Vec<OsString> = [
+            "show",
+            "--no-color",
+            "--no-ext-diff",
+            "--date=short",
+            "-m",
+            "--first-parent",
+            oid,
+        ]
+        .iter()
+        .map(OsString::from)
+        .collect();
+        if let Some(path) = path {
+            args.push(OsString::from("--"));
+            args.push(path.as_os_str().to_os_string());
+        }
+        let output = self.git_os(&args)?;
         Ok(Diff::parse(&String::from_utf8_lossy(&output)))
     }
 
@@ -1282,5 +1361,157 @@ mod tests {
             .diff(Path::new("src/a.txt"), DiffSide::Worktree)
             .unwrap();
         assert_eq!((diff.added, diff.removed), (1, 1));
+    }
+
+    // --- history and config ------------------------------------------------
+
+    /// A repository with three commits, the middle one touching `b.txt` only.
+    fn repo_with_history() -> TestRepo {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "one\ntwo\nthree\n");
+        repo.run(&["add", "."]);
+        repo.commit("first: add a");
+        repo.write("b.txt", "b\n");
+        repo.run(&["add", "."]);
+        repo.commit("second: add b");
+        repo.write("a.txt", "one\nTWO\nthree\n");
+        repo.run(&["add", "."]);
+        repo.commit("third: shout at a");
+        repo
+    }
+
+    #[test]
+    fn the_log_is_newest_first_with_a_field_per_column() {
+        let repo = repo_with_history();
+        let service = GitService::discover(repo.path()).unwrap();
+        let commits = service.log(&LogScope::Repository, None).unwrap();
+
+        let subjects: Vec<&str> = commits.iter().map(|c| c.subject.as_str()).collect();
+        assert_eq!(
+            subjects,
+            vec!["third: shout at a", "second: add b", "first: add a"]
+        );
+        let newest = &commits[0];
+        assert_eq!(newest.oid.len(), 40, "the full name, not the abbreviation");
+        assert!(newest.oid.starts_with(&newest.short));
+        assert_eq!(newest.author, "FerroEdit Test");
+        assert_eq!(newest.date.len(), 10, "--date=short: {}", newest.date);
+    }
+
+    #[test]
+    fn a_file_scope_lists_only_the_commits_that_touched_it() {
+        let repo = repo_with_history();
+        let service = GitService::discover(repo.path()).unwrap();
+        let commits = service
+            .log(&LogScope::File(PathBuf::from("b.txt")), None)
+            .unwrap();
+        let subjects: Vec<&str> = commits.iter().map(|c| c.subject.as_str()).collect();
+        assert_eq!(subjects, vec!["second: add b"]);
+    }
+
+    /// The point of `--follow`: a file has a history on both sides of the
+    /// rename that gave it its current name.
+    #[test]
+    fn a_file_scope_follows_the_file_across_a_rename() {
+        let repo = repo_with_history();
+        repo.run(&["mv", "a.txt", "renamed.txt"]);
+        repo.commit("fourth: rename a");
+        let service = GitService::discover(repo.path()).unwrap();
+        let commits = service
+            .log(&LogScope::File(PathBuf::from("renamed.txt")), None)
+            .unwrap();
+        let subjects: Vec<&str> = commits.iter().map(|c| c.subject.as_str()).collect();
+        assert_eq!(
+            subjects,
+            vec!["fourth: rename a", "third: shout at a", "first: add a"],
+            "the history did not begin at the rename"
+        );
+    }
+
+    #[test]
+    fn a_line_scope_lists_only_the_commits_that_touched_those_lines() {
+        let repo = repo_with_history();
+        let service = GitService::discover(repo.path()).unwrap();
+        let touched_line_two = service
+            .log(
+                &LogScope::Lines {
+                    path: PathBuf::from("a.txt"),
+                    first: 2,
+                    last: 2,
+                },
+                None,
+            )
+            .unwrap();
+        let subjects: Vec<&str> = touched_line_two
+            .iter()
+            .map(|c| c.subject.as_str())
+            .collect();
+        assert_eq!(subjects, vec!["third: shout at a", "first: add a"]);
+
+        let touched_line_three = service
+            .log(
+                &LogScope::Lines {
+                    path: PathBuf::from("a.txt"),
+                    first: 3,
+                    last: 3,
+                },
+                None,
+            )
+            .unwrap();
+        let subjects: Vec<&str> = touched_line_three
+            .iter()
+            .map(|c| c.subject.as_str())
+            .collect();
+        assert_eq!(subjects, vec!["first: add a"], "the shout was a line above");
+    }
+
+    /// The search field asks git rather than filtering what was loaded, so it
+    /// reaches the message body and the commits past the cap.
+    #[test]
+    fn a_search_is_a_fixed_string_matched_without_case() {
+        let repo = repo_with_history();
+        let service = GitService::discover(repo.path()).unwrap();
+        let found = service.log(&LogScope::Repository, Some("SHOUT")).unwrap();
+        let subjects: Vec<&str> = found.iter().map(|c| c.subject.as_str()).collect();
+        assert_eq!(subjects, vec!["third: shout at a"]);
+
+        let none = service
+            .log(&LogScope::Repository, Some("nothing like this"))
+            .unwrap();
+        assert!(none.is_empty(), "a search with no hits is an empty list");
+    }
+
+    #[test]
+    fn a_commit_is_shown_with_its_message_above_its_patch() {
+        let repo = repo_with_history();
+        let service = GitService::discover(repo.path()).unwrap();
+        let head = &service.log(&LogScope::Repository, None).unwrap()[0];
+        let diff = service.show(&head.oid, None).unwrap();
+
+        let text: Vec<&str> = diff.lines.iter().map(|l| l.text.as_str()).collect();
+        assert!(text[0].starts_with("commit "), "{:?}", text[0]);
+        assert!(
+            text.iter().any(|line| line.contains("third: shout at a")),
+            "the message is part of what a commit is"
+        );
+        assert_eq!((diff.added, diff.removed), (1, 1));
+    }
+
+    /// A commit that touched several files, read from one file's history,
+    /// shows the file the reader was looking at.
+    #[test]
+    fn a_commit_shown_from_a_files_history_is_narrowed_to_that_file() {
+        let repo = repo_with_history();
+        repo.write("a.txt", "one\nTWO\nTHREE\n");
+        repo.write("b.txt", "bb\n");
+        repo.run(&["add", "."]);
+        repo.commit("fourth: touch both");
+        let service = GitService::discover(repo.path()).unwrap();
+        let head = &service.log(&LogScope::Repository, None).unwrap()[0];
+
+        let whole = service.show(&head.oid, None).unwrap();
+        let narrowed = service.show(&head.oid, Some(Path::new("b.txt"))).unwrap();
+        assert_eq!((whole.added, whole.removed), (2, 2));
+        assert_eq!((narrowed.added, narrowed.removed), (1, 1));
     }
 }

@@ -1,4 +1,4 @@
-//! The diff viewer's state: which file, which side, and where it is scrolled.
+//! The diff viewer's state: which diff, and where it is scrolled.
 //!
 //! Read-only by construction (SPEC §36): there is no document, no cursor and
 //! no history here, only lines and an offset into them. It is the payload of a
@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::git::diff::{Diff, DiffSide};
+use crate::git::Commit;
 
 /// Columns one press of `Left` or `Right` moves the window by.
 ///
@@ -17,11 +18,73 @@ use crate::git::diff::{Diff, DiffSide};
 /// would lose the reader's place. Eight is a step that stays readable.
 pub const HORIZONTAL_STEP: usize = 8;
 
+/// Which diff a viewer is showing (ADR-069).
+///
+/// The two are different questions and are re-read differently: a working
+/// diff is `git diff` of a path and changes as the file does, while a commit
+/// is `git show` of an object name and never changes at all. Keeping them
+/// apart here is what lets `Refresh` and the side toggle mean the right thing
+/// without either asking "is the path empty?".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiffSource {
+    /// One file, worktree or staged (SPEC §36).
+    Working {
+        /// Repository-relative, exactly as git printed it in the status.
+        path: PathBuf,
+        side: DiffSide,
+    },
+    /// One commit, narrowed to a file when it was opened from that file's own
+    /// history (ADR-068).
+    Commit {
+        commit: Commit,
+        path: Option<PathBuf>,
+    },
+}
+
+impl DiffSource {
+    /// The file this diff is about, when it is about one.
+    pub fn path(&self) -> Option<&Path> {
+        match self {
+            Self::Working { path, .. } => Some(path),
+            Self::Commit { path, .. } => path.as_deref(),
+        }
+    }
+
+    /// What the title's bracket says: which side, or which commit.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Working { side, .. } => side.label().to_string(),
+            Self::Commit { commit, .. } => commit.short.clone(),
+        }
+    }
+
+    /// Whether two sources are the same thing being looked at.
+    ///
+    /// The *side* of a working diff is deliberately not part of it: turning a
+    /// file's worktree diff over to its staged one is the same tab showing the
+    /// other side, not a second tab (see `show_diff`). Two commits are the
+    /// same one only when the file they are narrowed to matches as well.
+    pub fn is_same_target(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Working { path: a, .. }, Self::Working { path: b, .. }) => a == b,
+            (
+                Self::Commit {
+                    commit: a,
+                    path: pa,
+                },
+                Self::Commit {
+                    commit: b,
+                    path: pb,
+                },
+            ) => a.oid == b.oid && pa == pb,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffState {
-    /// Repository-relative, exactly as git printed it in the status.
-    pub path: PathBuf,
-    pub side: DiffSide,
+    pub source: DiffSource,
     pub diff: Diff,
     /// First line drawn.
     pub scroll: usize,
@@ -30,23 +93,56 @@ pub struct DiffState {
 }
 
 impl DiffState {
+    /// A file's worktree or staged diff.
     pub fn new(path: &Path, side: DiffSide, diff: Diff) -> Self {
+        Self::from_source(
+            DiffSource::Working {
+                path: path.to_path_buf(),
+                side,
+            },
+            diff,
+        )
+    }
+
+    /// One commit, whole or narrowed to the file whose history it came from.
+    pub fn for_commit(commit: Commit, path: Option<PathBuf>, diff: Diff) -> Self {
+        Self::from_source(DiffSource::Commit { commit, path }, diff)
+    }
+
+    pub fn from_source(source: DiffSource, diff: Diff) -> Self {
         Self {
-            path: path.to_path_buf(),
-            side,
+            source,
             diff,
             scroll: 0,
             h_scroll: 0,
         }
     }
 
+    /// The file this diff is about, when it is about one. A whole commit is
+    /// not.
+    pub fn path(&self) -> Option<&Path> {
+        self.source.path()
+    }
+
+    /// Which side a working diff is showing. `None` for a commit, which has no
+    /// other side to turn to.
+    pub fn side(&self) -> Option<DiffSide> {
+        match &self.source {
+            DiffSource::Working { side, .. } => Some(*side),
+            DiffSource::Commit { .. } => None,
+        }
+    }
+
     /// The file name alone, for the tab strip. A tab is a dozen cells wide and
     /// `src/commands/execute.rs` is not.
     pub fn name(&self) -> String {
-        self.path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| self.path.display().to_string())
+        match &self.source {
+            DiffSource::Working { path, .. } => file_name(path),
+            // A commit narrowed to a file is still that commit: the short name
+            // is what tells two of them apart, and the file is already the tab
+            // beside it.
+            DiffSource::Commit { commit, .. } => commit.short.clone(),
+        }
     }
 
     /// ` Diff — src/main.rs [worktree] +12 −3 `.
@@ -57,6 +153,10 @@ impl DiffState {
     /// screen then is a combined diff, whose `+` and `-` are one column per
     /// parent rather than one change (ADR-045), and the columns do not
     /// announce themselves.
+    ///
+    /// A commit names itself instead — `Commit — 5944bbe src/main.rs [Ada,
+    /// 2026-09-10]` — because "which file" is not what a reader of one is
+    /// trying to establish (ADR-069).
     pub fn title(&self) -> String {
         let truncated = if self.diff.truncated { " (cut)" } else { "" };
         let merge = if self.diff.is_combined() {
@@ -64,12 +164,27 @@ impl DiffState {
         } else {
             ""
         };
-        format!(
-            " Diff — {} [{}{merge}] {}{truncated} ",
-            self.path.display(),
-            self.side.label(),
-            self.diff.summary()
-        )
+        match &self.source {
+            DiffSource::Working { path, side } => format!(
+                " Diff — {} [{}{merge}] {}{truncated} ",
+                path.display(),
+                side.label(),
+                self.diff.summary()
+            ),
+            DiffSource::Commit { commit, path } => {
+                let file = match path {
+                    Some(path) => format!(" {}", path.display()),
+                    None => String::new(),
+                };
+                format!(
+                    " Commit — {}{file} [{}, {}{merge}] {}{truncated} ",
+                    commit.short,
+                    commit.author,
+                    commit.date,
+                    self.diff.summary()
+                )
+            }
+        }
     }
 
     /// `12/340`, the bottom-right readout: which line is at the top of the
@@ -118,6 +233,12 @@ impl DiffState {
         self.scroll = self.scroll.min(last);
         self.h_scroll = self.h_scroll.min(self.diff.width.saturating_sub(1));
     }
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 #[cfg(test)]

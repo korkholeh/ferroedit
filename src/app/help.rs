@@ -226,8 +226,11 @@ mod tests {
         for binding in BINDINGS.iter().chain(INPUT_BINDINGS) {
             assert!(
                 lines.iter().any(|line| match line {
+                    // `HelpRow::key_label` joins with " / ", and `/` is itself
+                    // a key label — the log's search — so the separator has to
+                    // be matched whole rather than on the slash alone.
                     HelpLine::Row { keys, .. } =>
-                        keys.split('/').any(|key| key.trim() == binding.label),
+                        keys.split(" / ").any(|key| key.trim() == binding.label),
                     _ => false,
                 }),
                 "{} is bound but not on the help screen",

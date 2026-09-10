@@ -10,8 +10,33 @@ version, so that heading becomes the new version's on the way out (see
 
 ## [Unreleased]
 
+### Added
+
+- **A log viewer**, in a tab of its own beside the diffs. *Git ▸ Log* (`l` in the git
+  panel) shows the repository's history — the abbreviated name, the date, the author and
+  the subject, in columns. `Enter` or `d` opens the commit under the selection as a diff,
+  message and all; `F5` re-reads it (ADR-068, ADR-069).
+- **Text search over the history.** `/` opens a field in the viewer. Typing narrows the
+  commits already read, which is instant; `Enter` hands the text to `git log --grep`, which
+  searches the whole commit message and the whole history rather than only what was loaded.
+  The title says which of the two is on screen. A click on a row opens its commit, the way
+  `Enter` does.
+- **The history of the open file.** *Git ▸ File History* (`h` in the git panel) follows the
+  file across renames, and a commit opened from it is narrowed to that file.
+- **The history of the selected lines.** *Git ▸ Line History* runs `git log -L` over the
+  lines the editor's selection covers — the caret's own line when nothing is selected.
+- **The repository's git config opens as a file.** *Git ▸ Config* (`g` in the git panel)
+  opens `.git/config` in an ordinary editor tab — read, edited and saved by the same code
+  as every other file, comments and all (ADR-070).
+
 ### Changed
 
+- **The menu bar no longer advertises bare letters.** `a`, `d`, `l` and the rest work in
+  the git panel and the log viewer exactly as before, but a menu is read with the caret in
+  a document, where pressing one of them types it. The log viewer instead carries a legend
+  on its bottom border — `↑↓ move · Enter diff · / search · F5 refresh · Esc close` — read
+  out of the keymap, so it cannot drift. `F1` and `docs/SHORTCUTS.md` still list every key
+  under the pane it needs (ADR-071).
 - **The chrome at the top of the window no longer reads as one slab.** The tab strip is
   drawn in a tone of its own — a shade under the grey the menu bar is cut from, and not the
   editor's ground either — so both of its edges read; it was most visible on the Retro
@@ -20,6 +45,12 @@ version, so that heading becomes the new version's on the way out (see
   dim, and a `│` rule divides one tab from the next. The file tree draws a rule under the
   menu bar as well, the way the git panel below it always has, with its title on the line
   (ADR-072).
+
+### Fixed
+
+- A diff or a history asked for from the editor now finds the file when the workspace was
+  opened through a symbolic link — macOS puts its temporary directories behind one, and
+  `git rev-parse --show-toplevel` answers with the resolved path.
 
 ## [0.1.5] — 2026-09-09
 

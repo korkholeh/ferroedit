@@ -2327,6 +2327,164 @@ know where the caret is.
 
 ---
 
+## ADR-068: One log viewer for three histories, and a search field with two speeds
+
+**Decision.** The repository's history, one file's history and one range of lines' history
+are one viewer over one `LogScope`. The scope is the only difference: it is what supplies
+the extra arguments to `git log` (`--follow -- <path>` for a file, `-L first,last:<path>
+--no-patch` for lines, nothing for the repository) and what the title and the tab strip name
+themselves after. The viewer is a `TabItem::Log`, beside `TabItem::Diff`, and `FocusTarget::Log`
+stands where `Diff` does in the focus cycle.
+
+Its search field is a focus of its own, `FocusTarget::LogSearch`, opened with `/`. While it
+has the caret it does two different things at two different speeds:
+
+- **Typing narrows what was already read.** No subprocess, so the list moves on every
+  keystroke. It matches the subject, the author, the date and the object name.
+- **`Enter` hands the text to git** as `--fixed-strings --regexp-ignore-case --grep=…`,
+  which searches the whole commit *message* and the whole history — including the commits
+  past the cap. The answer replaces the list, the field closes, and the title says
+  `matching "…"` so the two states are never confused on screen.
+
+**Why a tab and not a dialog.** Every other list the editor shows in a dialog is answered in
+one keystroke — pick a branch, pick a grammar — and then gone. A history is *read*: scrolled,
+searched, come back to, and opened into diffs one commit at a time. A ten-row modal box is
+the wrong shape for it, and the diff viewer had already proved the tab is the right one
+(ADR-037, ADR-053).
+
+**Why a list and not a pager.** The diff viewer scrolls a window over lines; the log moves a
+selection down rows, because a row is a thing you then *do* something with. That is the git
+panel's axis, and `Enter` means the same thing in both: open what is selected. A *click* on
+a row does the same, in one gesture rather than two — unlike the git panel, where the list
+stays on screen beside the diff it opened, a history is the pane the diff replaces, so a
+click that only moved the selection would leave the user pressing `Enter` at a row they had
+already pointed at.
+
+**Why the field is a focus rather than a flag.** The pane's keys are single letters — `d`,
+`/`, `Enter` — and `resolve` picks its bindings from the focus alone. A field that shared
+the pane's focus could not type a `d`. The find bar has been arranged this way since Phase 8
+and this is the same arrangement, which is why `Esc` and `Enter` mean what they already mean.
+
+**Why `Esc` drops the narrowing with the field.** A list still filtered by text nobody can
+see is a viewer that appears to have lost half its commits.
+
+**Why two thousand commits.** The ADR-027 reason `MAX_LINES` and `MAX_ENTRIES` exist: a
+repository with a hundred thousand commits is a list nobody reaches the end of and megabytes
+nobody asked to allocate. The title says `(cut)` when the limit is what ended the list, and
+`Enter` in the search field is the way past it — git does the search, so the cap applies to
+the *answer* rather than to what was searched.
+
+**Why the read is on the UI thread.** ADR-030's rule: `git log` with a cap is a local read
+that finishes in milliseconds, like the status and the branch list and the diff. A viewer
+that opened empty and filled in later would be one whose selection moves under the reader.
+The *writes* are still the worker's, and nothing here writes.
+
+**Why line numbers are one-based and inclusive.** They are what git's `-L` takes and what
+the gutter shows, so the range in the title is the range the user can see. A selection whose
+end sits at column zero of a line has not reached into that line, so its last row is the one
+above — the rule a reader's eye already applies to a highlight that stops at a line's start.
+
+---
+
+## ADR-069: A commit is a diff with a different source, not a different viewer
+
+**Decision.** `DiffState` carries a `DiffSource`: either `Working { path, side }` — what
+SPEC §36 has always shown — or `Commit { commit, path }`, which is `git show`. Everything
+else about the viewer is unchanged, so a commit is scrolled, refreshed, closed and coloured
+by the code that already did those things for a working diff. What the source decides is
+the title, what `F5` re-runs, and whether there is another side to turn to.
+
+**Why not a separate viewer.** A commit *is* a unified diff. A second pane would be a second
+copy of the horizontal window, the tab reuse, the `(cut)` rule and the combined-diff
+classifier, kept in step by hand.
+
+**What the source changes.**
+
+- A commit has one side. `s` says so rather than emptying the pane: there is no index or
+  worktree to compare a written object against.
+- A commit is never re-read after a git job. Nothing that happens in the worktree can change
+  it, so its tab is left exactly as it is — where a working diff whose changes were all
+  staged closes itself.
+- A commit reached from a file's history is narrowed to that file. A commit that touched
+  forty files, opened from `src/main.rs`'s own history, is being asked about `src/main.rs`.
+
+**Why `git show`'s header is drawn as a header.** `git show` opens with `commit <oid>`, the
+author, the date and the whole message — and a message is prose, so a paragraph beginning
+`- ` is a bullet and not a removed line. The classifier therefore gains one piece of state:
+if the *first* line of the output is `commit `, everything up to the first `diff --git` is
+the commit describing itself. Only the first line can turn it on, so a diff whose contents
+contain the word is unaffected, and `git diff` — which always opens with a file header — is
+classified exactly as before.
+
+**Why `-m --first-parent`.** A merge commit shows no patch at all by default, and a viewer
+that opened empty on every merge would look broken. The diff shown is against the branch
+that was merged into, which is the one the reader was on.
+
+---
+
+## ADR-070: The git config is opened as a file
+
+**Decision.** *Git ▸ Config* opens `.git/config` in an ordinary editor tab. There is no
+dialog, no picker and no `git config` subprocess: the file is read, edited and saved by the
+same code that reads, edits and saves every other file.
+
+**Why not a form over it.** A picker of `key = value` rows was built first, and it was the
+wrong shape twice over. It showed *less* than the file does — the section structure git
+writes, the comments a user has put in it, the settings commented out and kept for later —
+and it could not add any of them. And it was a second editor inside a text editor: three
+dialogs, two marker commands and a key validator, all to change a line that the buffer in
+front of the user could already change.
+
+**Why the file is safe to hand over.** `.git/config` is text, it is small, and the editor's
+own save is the one the user already trusts with their source. A malformed one is git's own
+clear complaint on the next command, which is the same thing that happens when they edit it
+in any other editor — and the buffer that produced it is still open, with undo behind it.
+
+**Which file.** The one `git rev-parse --absolute-git-dir` named, not `<root>/.git`
+assembled by hand: in a worktree or a submodule the latter is a *file* pointing elsewhere,
+and the config a command in this tree reads is the one git named. `GitService::git_dir` was
+already held for `MERGE_HEAD`; this is its second reader.
+
+**What this gives up.** The picker's filter, and a `Remove` button. `Ctrl+F` searches the
+buffer and a line is deleted with the keys that delete a line, which is what a person in a
+text editor was going to reach for anyway.
+
+---
+
+## ADR-071: The menu advertises no bare letter, and the pane that owns one says so itself
+
+**Decision.** `keyboard::menu_binding` is what the menu bar's shortcut column renders from,
+and it drops any binding that is a printable character with no modifier: `a`, `u`, `c`, `b`,
+`m`, `d`, `h`, `l`, `g`, `/`. The keys themselves are unchanged and still resolve in the
+panes that own them. Instead, the log viewer draws a legend along its bottom border, beside
+the position readout — `↑↓ move · Enter diff · / search · F5 refresh · Esc close`, and
+`↑↓ move · Enter search git · Esc cancel` while its search field is open.
+
+**Why.** This is a text editor. A menu is read with a caret sitting in a document, and a
+column that says `Stage All   a` reads as "press `a`" — which, where the reader is looking,
+types an `a`. The key is real, but it is real *only while the git panel has focus*, and the
+menu had no room to say so. `F5`, `Esc` and `Ctrl+S` have no such ambiguity: nothing types
+them.
+
+**Why a legend rather than nothing.** Dropping the letters from the menu would otherwise
+make them findable only in `F1`. The pane that owns a key is the honest place to advertise
+it, because standing in that pane is exactly the condition under which it works — and a
+list of commits has a spare border to put it on. The git panel gets none: it is sixteen
+cells wide at its narrowest, which is not a line of legend, and its border is already
+carrying the branch and the change count.
+
+**Why it is generated.** The legend reads its labels out of the keymap through
+`binding_for`, the way the menu reads its column and `docs/SHORTCUTS.md` reads its tables
+(ADR-028). A legend written by hand is the same drift SPEC §25 exists to prevent. Pieces
+are dropped from the end while the line does not fit, so a narrow terminal keeps the most
+useful ones instead of losing the line.
+
+**Where the letters still are.** `F1` and `docs/SHORTCUTS.md`, in a table per focus, each
+under the heading naming the pane its keys need. That was already true; what changed is
+that the menu no longer says it badly.
+
+---
+
 ## ADR-072: The tab strip is a tone of its own, and its tabs are told apart by their text
 
 **Decision.** The strip between the menu bar and the editor gets a ground of its own —

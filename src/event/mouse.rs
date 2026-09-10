@@ -190,6 +190,15 @@ fn left_click(app: &App, rects: &LayoutRects, at: Position) -> Option<Command> {
     if rects.diff.is_some_and(|diff| diff.contains(at)) {
         return Some(Command::FocusPane(FocusTarget::Diff));
     }
+    // The log covers the editor pane the same way. A click on a row opens that
+    // commit rather than only taking focus: it is a list of things to look at,
+    // and one click is how a row of one is opened (ADR-068).
+    if rects.log.is_some_and(|log| log.contains(at)) {
+        if let Some(rows) = rects.log_rows.filter(|rows| rows.contains(at)) {
+            return Some(Command::LogShowRow((at.y - rows.y) as usize));
+        }
+        return Some(Command::FocusPane(FocusTarget::Log));
+    }
     // The table covers the editor pane the same way, and for the same reason
     // has to be tested before it: a click on a cell must not put a caret in the
     // text behind it (SPEC §65).
@@ -384,6 +393,9 @@ fn scroll(rects: &LayoutRects, at: Position, delta: i16) -> Option<Command> {
     }
     if rects.diff.is_some_and(|diff| diff.contains(at)) {
         return Some(Command::DiffScroll(delta));
+    }
+    if rects.log.is_some_and(|log| log.contains(at)) {
+        return Some(Command::LogScroll(delta));
     }
     if rects.table.is_some_and(|table| table.contains(at)) {
         return Some(Command::ScrollTable(delta));
@@ -1105,7 +1117,7 @@ mod tests {
         use crate::git::diff::{Diff, DiffSide};
 
         let mut app = app();
-        app.tabs.push(crate::app::TabItem::Diff(DiffState::new(
+        app.tabs.push(crate::app::TabItem::viewing(DiffState::new(
             std::path::Path::new("src/main.rs"),
             DiffSide::Worktree,
             Diff::parse("@@ -1 +1 @@\n-a\n+b\n"),
@@ -1113,6 +1125,54 @@ mod tests {
         app.active_tab = Some(app.tabs.len() - 1);
         app.focus = FocusTarget::Diff;
         app
+    }
+
+    /// A history covers the editor the same way, and a click on one of its rows
+    /// opens that commit rather than only taking focus (ADR-068).
+    fn app_with_log() -> App {
+        use crate::app::log::LogState;
+        use crate::git::{Commit, LogScope};
+
+        let commits = (0..8)
+            .map(|i| Commit {
+                oid: format!("{i:0<40}"),
+                short: format!("{i:07}"),
+                author: "Ada".into(),
+                date: "2026-09-10".into(),
+                subject: format!("commit {i}"),
+            })
+            .collect();
+        let mut app = app();
+        app.tabs.push(crate::app::TabItem::history(LogState::new(
+            LogScope::Repository,
+            commits,
+            None,
+        )));
+        app.active_tab = Some(app.tabs.len() - 1);
+        app.focus = FocusTarget::Log;
+        app
+    }
+
+    #[test]
+    fn clicking_a_row_of_the_history_opens_that_commit() {
+        let app = app_with_log();
+        let rects = rects(&app);
+        let rows = rects.log_rows.expect("the viewer is open");
+        assert_eq!(
+            hit_test(&app, &rects, click(rows.x + 2, rows.y + 3)),
+            Some(Command::LogShowRow(3))
+        );
+    }
+
+    #[test]
+    fn the_wheel_over_the_history_moves_it_and_not_the_editor() {
+        let app = app_with_log();
+        let rects = rects(&app);
+        let (x, y) = centre(rects.log.expect("the viewer is open"));
+        assert_eq!(
+            hit_test(&app, &rects, wheel(MouseEventKind::ScrollDown, x, y)),
+            Some(Command::LogScroll(3))
+        );
     }
 
     #[test]

@@ -115,6 +115,22 @@ impl GitJob {
         }
     }
 
+    /// Whether finishing this job can have moved `HEAD`.
+    ///
+    /// What an open history is a list of (ADR-068), so it decides which jobs
+    /// are worth re-reading one for. Staging does not: it moves work between
+    /// the index and the worktree and writes no commit. Neither does a push,
+    /// which sends what is already there. `Pull` does, because it merges or
+    /// rebases; a config write can rewrite `branch.<name>.merge`, which is not
+    /// `HEAD` itself but is what the next pull follows — and it is cheap to be
+    /// wrong in this direction rather than the other.
+    pub fn moves_head(&self) -> bool {
+        matches!(
+            self,
+            Self::Commit(_) | Self::Pull | Self::Switch(_) | Self::CreateBranch(_) | Self::Merge(_)
+        )
+    }
+
     /// The noun a failure is reported under: `Push failed: …`.
     pub fn label(&self) -> &'static str {
         match self {
@@ -458,6 +474,22 @@ mod tests {
         worker.submit(GitJob::StageAll, service).unwrap();
 
         assert_eq!(outcome(&rx).result, Ok("Staged every change".into()));
+    }
+
+    /// Only the jobs that write a commit or move to one are worth re-reading a
+    /// history for (ADR-068).
+    #[test]
+    fn only_the_jobs_that_can_move_head_say_they_do() {
+        assert!(GitJob::Commit("m".into()).moves_head());
+        assert!(GitJob::Pull.moves_head());
+        assert!(GitJob::Switch("main".into()).moves_head());
+        assert!(GitJob::CreateBranch("topic".into()).moves_head());
+        assert!(GitJob::Merge("other".into()).moves_head());
+
+        assert!(!GitJob::StageAll.moves_head());
+        assert!(!GitJob::UnstageAll.moves_head());
+        assert!(!GitJob::Stage(vec![PathBuf::from("a")]).moves_head());
+        assert!(!GitJob::Push.moves_head(), "it sends what is already there");
     }
 
     #[test]

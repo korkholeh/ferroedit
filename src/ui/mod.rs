@@ -8,6 +8,7 @@ pub mod field;
 pub mod git;
 pub mod help;
 pub mod layout;
+pub mod log;
 pub mod menu;
 pub mod scrollbar;
 pub mod search;
@@ -53,6 +54,10 @@ pub fn render(frame: &mut Frame, app: &App, rects: &LayoutRects, theme: &Theme) 
     // Over the editor, because that is the pane it replaces while it is open.
     if let Some(area) = rects.diff {
         diff::render(frame, app, area, theme);
+    }
+    // The same, for a tab that holds a history rather than a document.
+    if let Some(area) = rects.log {
+        log::render(frame, app, area, theme);
     }
     // The same, for a file being read as columns rather than as lines.
     if let Some(area) = rects.table {
@@ -1164,6 +1169,75 @@ mod tests {
         assert!(screen.contains("Find:"), "the field survives: {screen}");
     }
 
+    // --- log viewer (ADR-068) ---------------------------------------------
+
+    fn app_with_log(searching: bool) -> App {
+        use crate::app::log::LogState;
+        use crate::git::{Commit, LogScope};
+
+        let commits = vec![
+            Commit {
+                oid: "a".repeat(40),
+                short: "aaaaaaa".into(),
+                author: "Ada".into(),
+                date: "2026-09-10".into(),
+                subject: "feat: the newest thing".into(),
+            },
+            Commit {
+                oid: "b".repeat(40),
+                short: "bbbbbbb".into(),
+                author: "Grace".into(),
+                date: "2026-09-09".into(),
+                subject: "fix: a bug".into(),
+            },
+        ];
+        let mut log = LogState::new(LogScope::Repository, commits, None);
+        if searching {
+            log.open_search();
+            log.field.insert_str("fix");
+            log.refilter(10);
+        }
+        let mut app = app();
+        app.tabs.push(crate::app::TabItem::history(log));
+        app.active_tab = Some(app.tabs.len() - 1);
+        app.focus = if searching {
+            FocusTarget::LogSearch
+        } else {
+            FocusTarget::Log
+        };
+        app
+    }
+
+    #[test]
+    fn the_history_draws_its_commits_over_the_editor() {
+        let app = app_with_log(false);
+        let screen = draw(&app, 90, 24).join("\n");
+        assert!(
+            screen.contains("Log — the repository — 2 commits"),
+            "{screen}"
+        );
+        assert!(screen.contains("aaaaaaa"), "{screen}");
+        assert!(screen.contains("2026-09-10"), "{screen}");
+        assert!(screen.contains("feat: the newest thing"), "{screen}");
+        assert!(screen.contains("Grace"), "{screen}");
+    }
+
+    #[test]
+    fn the_search_field_takes_the_top_row_and_the_title_says_what_it_hid() {
+        let app = app_with_log(true);
+        let screen = draw(&app, 90, 24).join("\n");
+        assert!(screen.contains("Search: fix"), "{screen}");
+        assert!(
+            screen.contains("2 commits of 2") || screen.contains("1 commit of 2"),
+            "{screen}"
+        );
+        assert!(
+            !screen.contains("feat: the newest thing"),
+            "narrowed: {screen}"
+        );
+        assert!(screen.contains("fix: a bug"), "{screen}");
+    }
+
     // --- diff viewer (SPEC §36) -------------------------------------------
 
     /// An app with a viewer open over the editor, built in memory: the
@@ -1182,7 +1256,7 @@ mod tests {
              -removed line\n\
              +added line\n",
         );
-        app.tabs.push(crate::app::TabItem::Diff(DiffState::new(
+        app.tabs.push(crate::app::TabItem::viewing(DiffState::new(
             std::path::Path::new("src/main.rs"),
             DiffSide::Worktree,
             diff,

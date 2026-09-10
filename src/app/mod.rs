@@ -8,6 +8,10 @@ pub mod focus;
 pub mod git;
 pub mod help;
 pub mod input_field;
+// Shadows the `log` *crate* inside this file, and only inside this file: the
+// three logging calls below therefore spell it `::log::`. Every other module
+// imports `LogState` by name and is unaffected.
+pub mod log;
 pub mod notifications;
 pub mod search;
 pub mod table;
@@ -25,6 +29,7 @@ use diff::DiffState;
 use focus::FocusTarget;
 use git::GitState;
 use help::HelpState;
+use log::LogState;
 use notifications::Notifications;
 use search::SearchState;
 pub use tabs::{Tab, TabItem};
@@ -223,6 +228,10 @@ pub struct App {
     /// reason as `git_rows`: a diff is longer than its pane and paging through
     /// it needs the pane's height.
     pub diff_rows: u16,
+    /// Rows the log viewer could show, for the same reason again. It is not the
+    /// diff's: the log's search field takes a row off the top of the pane, so
+    /// the two are different heights whenever it is open.
+    pub log_rows: u16,
     /// Rows and columns the help screen could show in the last drawn frame.
     /// The width matters as well as the height here, because a note wraps: the
     /// lines are laid out against it, and so is the scroll.
@@ -273,6 +282,7 @@ impl App {
             explorer_rows: 0,
             git_rows: 0,
             diff_rows: 0,
+            log_rows: 0,
             help_rows: 0,
             help_cols: 0,
             dialog_rows: 0,
@@ -352,6 +362,20 @@ impl App {
         }
     }
 
+    /// The history in front, when the tab in front is one (ADR-068).
+    pub fn log(&self) -> Option<&LogState> {
+        self.active_tab
+            .and_then(|i| self.tabs.get(i))
+            .and_then(TabItem::log)
+    }
+
+    pub fn log_mut(&mut self) -> Option<&mut LogState> {
+        match self.active_tab {
+            Some(index) => self.tabs.get_mut(index).and_then(TabItem::log_mut),
+            None => None,
+        }
+    }
+
     /// Keeps focus and the tab in front in step (SPEC §26).
     ///
     /// The two read-only panes are one focus target each, and which of them the
@@ -360,14 +384,18 @@ impl App {
     /// command: a diff tab in front means `Diff` has focus wherever `Editor`
     /// would have, and the other way round.
     pub fn normalize_focus(&mut self) {
-        let showing_diff = self
-            .active_tab
-            .and_then(|i| self.tabs.get(i))
-            .is_some_and(|item| item.diff().is_some());
-        self.focus = match (self.focus, showing_diff) {
-            (FocusTarget::Editor, true) => FocusTarget::Diff,
-            (FocusTarget::Diff, false) => FocusTarget::Editor,
-            (other, _) => other,
+        let front = self.active_tab.and_then(|i| self.tabs.get(i));
+        let showing_diff = front.is_some_and(|item| item.diff().is_some());
+        let showing_log = front.is_some_and(|item| item.log().is_some());
+        self.focus = match self.focus {
+            FocusTarget::Editor if showing_diff => FocusTarget::Diff,
+            FocusTarget::Editor if showing_log => FocusTarget::Log,
+            FocusTarget::Diff if !showing_diff => FocusTarget::Editor,
+            // The search field goes with its own tab: switching away from a
+            // history has to leave the field as well, or the next pane's keys
+            // would be typing into a list that is not on screen.
+            FocusTarget::Log | FocusTarget::LogSearch if !showing_log => FocusTarget::Editor,
+            other => other,
         };
     }
 
@@ -436,7 +464,7 @@ impl App {
             self.search.case_sensitive,
             search::MAX_MATCHES,
         );
-        log::debug!(
+        ::log::debug!(
             "search {:?}: {} hits{}",
             self.search.query.value,
             matches.len(),
@@ -458,7 +486,7 @@ impl App {
     /// watcher thread at the end of it.
     pub fn open_workspace(&mut self, root: &Path) {
         let workspace = Workspace::at(root);
-        log::info!("workspace is now {}", workspace.root().display());
+        ::log::info!("workspace is now {}", workspace.root().display());
         self.sidebar.tree = FileTree::new(workspace.root());
         self.sidebar.selected = 0;
         self.sidebar.scroll = 0;
@@ -468,7 +496,7 @@ impl App {
             match crate::filesystem::watcher::spawn(workspace.root(), events) {
                 Ok(watch) => self.watch = Some(watch),
                 Err(err) => {
-                    log::warn!("no filesystem watcher: {err}");
+                    ::log::warn!("no filesystem watcher: {err}");
                     self.notifications.warning(format!(
                         "Not watching for outside changes: {err} — F5 refreshes"
                     ));

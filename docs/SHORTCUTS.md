@@ -115,6 +115,9 @@ The changed-files list (SPEC §31, §33, §35). Everything that writes to the re
 | `b` | Switch branch — opens a picker |
 | `m` | Merge a branch — opens a picker |
 | `d` | Show the diff of the selected file |
+| `l` | Show the repository's history |
+| `h` | Show the history of this file |
+| `g` | Open .git/config in a tab |
 
 ## Diff viewer
 
@@ -133,6 +136,42 @@ The read-only unified diff (SPEC §36). It opens in a tab of its own, beside the
 | `Right` | Scroll right |
 | `F5` | Re-read the diff |
 | `s` | Show the other side: staged or unstaged |
+
+## Log viewer
+
+A commit history — the repository's, one file's, or one range of lines' (ADR-068). It opens in a tab of its own beside the diffs, and it is a *list*: the arrows move a selection, and `Enter` opens the commit it is on as a diff.
+
+| Keys | Action |
+|---|---|
+| `Esc` | Close the log tab |
+| `Up` | Select the previous commit |
+| `Down` | Select the next commit |
+| `PageUp` | Move up a page |
+| `PageDown` | Move down a page |
+| `Home` | Select the newest commit |
+| `End` | Select the oldest commit listed |
+| `Enter` / `d` | Show the selected commit as a diff |
+| `F5` | Re-read the history |
+| `/` | Search the history |
+
+## Log search field
+
+The field `/` opens over a history. Typing narrows the commits already read, which is instant; `Enter` hands the text to `git log --grep`, which searches the whole message and the whole history.
+
+| Keys | Action |
+|---|---|
+| `Esc` | Close the search field and show everything |
+| `Enter` | Ask git to search the whole history |
+| `Backspace` | Delete the cluster before the caret |
+| `Delete` | Delete the cluster after the caret |
+| `Left` | Move the caret left |
+| `Right` | Move the caret right |
+| `Home` | Move the caret to the start |
+| `End` | Move the caret to the end |
+| `Up` | Select the previous commit |
+| `Down` | Select the next commit |
+| `PageUp` | Move up a page |
+| `PageDown` | Move down a page |
 
 ## Help screen
 
@@ -283,16 +322,20 @@ Every item is a command, and the *Shortcut* column is the same lookup the menu i
 | Git | Refresh | `F5` | Git panel |
 | Git | Stage | — | — |
 | Git | Unstage | — | — |
-| Git | Stage All | `a` | Git panel |
-| Git | Unstage All | `u` | Git panel |
-| Git | Commit… | `c` | Git panel |
+| Git | Stage All | — | — |
+| Git | Unstage All | — | — |
+| Git | Commit… | — | — |
 | Git | Pull | — | — |
 | Git | Push | — | — |
 | Git | Cancel | `Esc` | Git panel |
-| Git | Branch… | `b` | Git panel |
+| Git | Branch… | — | — |
 | Git | New Branch… | — | — |
-| Git | Merge… | `m` | Git panel |
-| Git | Diff | `d` | Git panel |
+| Git | Merge… | — | — |
+| Git | Diff | — | — |
+| Git | Log | — | — |
+| Git | File History | — | — |
+| Git | Line History | — | — |
+| Git | Config | — | — |
 | Help | Shortcuts | `F1` | anywhere |
 | Help | About | — | — |
 | Help | Check for Updates | — | — |

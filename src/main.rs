@@ -232,6 +232,9 @@ fn sync_editor_view(app: &mut App, rects: &LayoutRects) -> bool {
     // Two rows of border, like the dialog's; paging through a diff is measured
     // against what is left.
     app.diff_rows = rects.diff.map_or(0, |diff| diff.height.saturating_sub(2));
+    // Already the inside of the log's frame, less its field's row, so nothing
+    // is subtracted here (ADR-068).
+    app.log_rows = rects.log_rows.map_or(0, |rows| rows.height);
     // The help screen wraps its notes, so its width is geometry the scroll
     // depends on as much as its height is (ADR-038).
     app.help_rows = rects.help.map_or(0, |help| help.height.saturating_sub(2));
@@ -362,6 +365,10 @@ fn handle_event(app: &mut App, rects: &LayoutRects, event: AppEvent) {
                 Some(Command::DialogInputText(text.replace(['\n', '\r'], " ")))
             } else if app.focus == FocusTarget::Search {
                 Some(Command::SearchInputText(text))
+            } else if app.focus == FocusTarget::LogSearch {
+                // One line, like a dialog's field: the log's search box is one
+                // row and a pasted newline would be invisible in it.
+                Some(Command::LogSearchText(text.replace(['\n', '\r'], " ")))
             } else {
                 (app.focus == FocusTarget::Editor).then_some(Command::InsertText(text))
             }

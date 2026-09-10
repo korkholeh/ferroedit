@@ -269,7 +269,18 @@ fn readout(app: &App, width: u16, left: u16) -> Vec<Piece> {
     if let Some(viewer) = app.diff() {
         let pieces = vec![
             piece(viewer.position().trim().to_string(), 0),
-            piece(viewer.side.label().to_string(), 1),
+            piece(viewer.source.label(), 1),
+            clickable(app.git.branch_label().to_string(), 2, StatusZone::Branch),
+            piece(app.focus.label().to_string(), 3),
+        ];
+        return trim(pieces, budget(width, left));
+    }
+    // A history is a list and not a document either: where the selection is,
+    // and which history it is in (ADR-068).
+    if let Some(log) = app.log() {
+        let pieces = vec![
+            piece(log.position().trim().to_string(), 0),
+            piece(log.scope.label(), 1),
             clickable(app.git.branch_label().to_string(), 2, StatusZone::Branch),
             piece(app.focus.label().to_string(), 3),
         ];

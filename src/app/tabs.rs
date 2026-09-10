@@ -8,6 +8,7 @@
 use std::path::Path;
 
 use crate::app::diff::DiffState;
+use crate::app::log::LogState;
 use crate::app::table::TableView;
 use crate::app::TextView;
 use crate::editor::csv::Dialect;
@@ -29,7 +30,8 @@ pub enum Stale {
     Gone,
 }
 
-/// One tab of the strip: a file being edited, or a diff being read.
+/// One tab of the strip: a file being edited, a diff being read, or a history
+/// being scrolled.
 ///
 /// A diff is a tab rather than a pane drawn over the editor (it was one until
 /// ADR-037): it is a thing the user opens, keeps, comes back to and closes, and
@@ -41,25 +43,30 @@ pub enum Stale {
 /// of forty commands.
 #[derive(Debug)]
 pub enum TabItem {
-    /// Boxed because a `Tab` is several times the size of a `DiffState`, and
-    /// every element of `App::tabs` would otherwise be as big as the largest
-    /// of them — a strip of diffs paying for documents that are not there.
+    /// Every variant is boxed, so an element of `App::tabs` is a pointer
+    /// rather than the size of the largest of them — a strip of diffs paying
+    /// for documents that are not there.
     Editor(Box<Tab>),
-    Diff(DiffState),
+    Diff(Box<DiffState>),
+    /// A commit history (ADR-068). A tab for the reason a diff is one — it is
+    /// opened, kept, come back to and closed — and read-only for the same
+    /// reason: `App::active` answers `None` for it, so no editing command can
+    /// reach it.
+    Log(Box<LogState>),
 }
 
 impl TabItem {
     pub fn editor(&self) -> Option<&Tab> {
         match self {
             Self::Editor(tab) => Some(tab),
-            Self::Diff(_) => None,
+            _ => None,
         }
     }
 
     pub fn editor_mut(&mut self) -> Option<&mut Tab> {
         match self {
             Self::Editor(tab) => Some(tab),
-            Self::Diff(_) => None,
+            _ => None,
         }
     }
 
@@ -68,18 +75,41 @@ impl TabItem {
         Self::Editor(Box::new(tab))
     }
 
+    /// A tab over a diff being read.
+    pub fn viewing(diff: DiffState) -> Self {
+        Self::Diff(Box::new(diff))
+    }
+
     pub fn diff(&self) -> Option<&DiffState> {
         match self {
             Self::Diff(diff) => Some(diff),
-            Self::Editor(_) => None,
+            _ => None,
         }
     }
 
     pub fn diff_mut(&mut self) -> Option<&mut DiffState> {
         match self {
             Self::Diff(diff) => Some(diff),
-            Self::Editor(_) => None,
+            _ => None,
         }
+    }
+
+    pub fn log(&self) -> Option<&LogState> {
+        match self {
+            Self::Log(log) => Some(log),
+            _ => None,
+        }
+    }
+
+    pub fn log_mut(&mut self) -> Option<&mut LogState> {
+        match self {
+            Self::Log(log) => Some(log),
+            _ => None,
+        }
+    }
+
+    pub fn history(log: LogState) -> Self {
+        Self::Log(Box::new(log))
     }
 
     /// What the tab bar draws. A diff says whose diff it is: two tabs called
@@ -89,6 +119,7 @@ impl TabItem {
         match self {
             Self::Editor(tab) => tab.document.title().to_string(),
             Self::Diff(diff) => format!("Diff: {}", diff.name()),
+            Self::Log(log) => log.name(),
         }
     }
 
