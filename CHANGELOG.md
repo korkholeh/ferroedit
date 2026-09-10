@@ -10,6 +10,10 @@ version, so that heading becomes the new version's on the way out (see
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.6] — 2026-09-10
+
 ### Added
 
 - **A log viewer**, in a tab of its own beside the diffs. *Git ▸ Log* (`l` in the git
@@ -151,7 +155,8 @@ The first release: the editor through Phase 14.
   the help screen, and a quit that asks about each unsaved file in turn.
 - Releases are GitHub Releases, built for four targets.
 
-[Unreleased]: https://github.com/korkholeh/ferroedit/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/korkholeh/ferroedit/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/korkholeh/ferroedit/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/korkholeh/ferroedit/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/korkholeh/ferroedit/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/korkholeh/ferroedit/compare/v0.1.2...v0.1.3
