@@ -2485,18 +2485,19 @@ that the menu no longer says it badly.
 
 ---
 
-## ADR-072: The tab strip is a tone of its own, and its tabs are told apart by their text
+## ADR-072: The tab strip is a tone of its own, and the tab in front is the pane's
 
 **Decision.** The strip between the menu bar and the editor gets a ground of its own —
 `Palette::tab_strip`, a shade darker than the `chrome` the menu bar, the status bar and the
-dialogs are cut from, and not the editor's `background` either. Every tab is drawn on it:
-which one is in front is said by the text — `on_chrome` and bold for the tab in front,
-`on_chrome_dim` for the ones behind — and one tab is divided from the next by a `│` rule,
-which is the seventh cell of ` name ● × │`. The sixteen-colour schemes have no third tone
-to spend and fall back to `background`. Separately, the explorer draws `Borders::TOP` as
-well as `Borders::RIGHT`, so a rule runs under the menu bar across the sidebar with the
-` Files — name ` title on it, and the title now keeps three cells of that rule clear
-instead of eliding the folder name to fill the row.
+dialogs are cut from, and not the editor's `background` either. The tabs behind are drawn
+on it in `on_chrome_dim`; the tab in front is drawn in the editor's own `background` and
+`foreground`, bold, so it runs into the pane below it. One tab is divided from the next by
+a `│` rule, which is the seventh cell of ` name ● × │`. The sixteen-colour schemes have no
+third tone to spend and fall back to `background`, where the tab in front is told apart by
+its text alone. Separately, the explorer draws `Borders::TOP` as well as `Borders::RIGHT`,
+so a rule runs under the menu bar across the sidebar with the ` Files — name ` title on it,
+and the title now keeps three cells of that rule clear instead of eliding the folder name
+to fill the row.
 
 **Why a third tone.** The menu bar and the tab strip are adjacent rows and were the same
 colour. On the Retro scheme, whose chrome is a flat grey 248 over a blue ground, that read
@@ -2506,12 +2507,17 @@ solving it: the boundary with the menu appeared and the boundary with the pane w
 the strip then looked like the top of the document. A row that belongs to neither
 neighbour has to be neither neighbour's colour.
 
-**Why the tabs share it.** Giving the tab in front its own background is the other way to
-mark it, and it is the way that costs a fourth tone and puts a second edge in a one-row
-bar. Text carries it instead: full-contrast and bold against dim is legible in all five
-schemes — the check in `no_theme_draws_text_in_the_colour_underneath_it` covers both
-against the strip — and it leaves the strip reading as one continuous bar, which is what
-lets a rule between tabs do its job.
+**Why the tab in front is the pane's colour.** Marking it by text alone was tried first —
+full contrast and bold against dim, which is legible in all five schemes — and it is not
+enough at a glance: on a strip of identically-grounded tabs the eye has to read the names
+to find the file it is looking at. Giving that one tab the editor's ground says it before
+anything is read, and it says the right thing: the tab and the pane under it are the same
+document, so the boundary between them is the one boundary that *should* vanish. The cost
+is a fourth tone in the bar, which the strip's own tone is what makes affordable — the
+strip still divides the menu from the pane, and the tabs behind still sit on it as one
+continuous run for the `│` rules to divide. `no_theme_draws_text_in_the_colour_underneath_it`
+covers both pairs, and the render check asserts the tab in front is the editor's ground on
+every scheme.
 
 **Why a rule and not a gap.** Tabs with the same ground and no divider run into each other
 the moment two short names sit side by side. A blank cell would be indistinguishable from

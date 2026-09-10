@@ -238,11 +238,12 @@ impl Theme {
             highlight: p.highlight,
             chrome_dim: p.on_chrome_dim,
 
-            // Every tab sits on the strip's own ground: which one is in front
-            // is said by the text, not by a second background (ADR-072).
+            // The tab in front carries the editor's own ground, so the file
+            // being edited reads as continuous with the pane under it; the
+            // ones behind sit on the strip (ADR-072).
             tab_active: Style::new()
-                .bg(p.tab_strip)
-                .fg(p.on_chrome)
+                .bg(p.background)
+                .fg(p.foreground)
                 .add_modifier(Modifier::BOLD),
             tab_inactive: Style::new().bg(p.tab_strip).fg(p.on_chrome_dim),
             tab_strip: Style::new().bg(p.tab_strip).fg(p.on_chrome_dim),

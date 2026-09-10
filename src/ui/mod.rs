@@ -1498,7 +1498,9 @@ mod tests {
     /// The strip is a tone of its own: never the menu bar's, and — where the
     /// palette has the colours to spare — never the editor's either. On the
     /// Retro scheme, where the strip and the menu were one flat grey, the two
-    /// rows read as a single slab (ADR-072).
+    /// rows read as a single slab. The tab in front is the exception: it
+    /// carries the editor's own ground, so the file being edited runs into the
+    /// pane below it (ADR-072).
     #[test]
     fn the_tab_strip_is_neither_the_menu_bar_nor_the_editor() {
         use crate::config::ThemeKind;
@@ -1525,7 +1527,12 @@ mod tests {
             let tail = buffer[(rects.tab_bar.right() - 1, rects.tab_bar.y)].clone();
             let menu = buffer[(rects.menu_bar.right() - 1, rects.menu_bar.y)].clone();
             let inactive = buffer[(rects.tabs[1].x + 1, rects.tab_bar.y)].clone();
+            let active = buffer[(rects.tabs[0].x + 1, rects.tab_bar.y)].clone();
             assert_ne!(tail.bg, menu.bg, "{kind:?}: the two bars share a colour");
+            assert_eq!(
+                active.bg, theme.background,
+                "{kind:?}: the tab in front is not the editor's ground"
+            );
             assert_ne!(
                 inactive.bg, menu.bg,
                 "{kind:?}: a tab behind is the colour of the menu bar"

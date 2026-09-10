@@ -44,11 +44,11 @@ Nothing yet.
 - **The chrome at the top of the window no longer reads as one slab.** The tab strip is
   drawn in a tone of its own — a shade under the grey the menu bar is cut from, and not the
   editor's ground either — so both of its edges read; it was most visible on the Retro
-  scheme, where the two rows were the same flat grey. Every tab sits on that strip and is
-  told apart by its text: the file in front is bold and full contrast, the ones behind are
-  dim, and a `│` rule divides one tab from the next. The file tree draws a rule under the
-  menu bar as well, the way the git panel below it always has, with its title on the line
-  (ADR-072).
+  scheme, where the two rows were the same flat grey. The tabs behind sit on that strip,
+  dim and divided from each other by a `│` rule; the tab in front carries the editor's own
+  ground, so the file being edited runs into the pane below it. The file tree draws a rule
+  under the menu bar as well, the way the git panel below it always has, with its title on
+  the line (ADR-072).
 
 ### Fixed
 
