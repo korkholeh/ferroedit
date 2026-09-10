@@ -155,7 +155,7 @@ the per-file quit walk, the Open browser and green CI done)
     (ADR-015): the bar starts at the earliest tab that still leaves room for the active
     one, and `‹` / `›` say there are more tabs off each edge. Twelve files open at 100
     columns show six and both work by mouse and keyboard.
-  - A tab is ` name ● × `, and the dirty marker keeps its cell whether or not the file
+  - A tab is ` name ● × │`, and the dirty marker keeps its cell whether or not the file
     is modified — typing the first character into a file must not shift every tab after
     it sideways under the pointer. A tab only partly on screen has no `×` to click.
   - The dialog system arrived with its first producer (SPEC §40): `app/dialog.rs` is a

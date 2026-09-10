@@ -49,6 +49,12 @@ pub struct Palette {
     pub title: Color,
     /// The ground of the bars: menu, status, tab strip, find bar.
     pub chrome: Color,
+    /// The tab strip's ground: a shade off `chrome`, and not `background`
+    /// (ADR-072). The bar under the menu is neither the menu nor the pane, and
+    /// a strip that is either of them makes one of the two boundaries vanish.
+    /// The sixteen-colour schemes have no third tone to spend here and fall
+    /// back to `background`.
+    pub tab_strip: Color,
     pub on_chrome: Color,
     /// Text on the chrome that is secondary — an inactive tab's name.
     pub on_chrome_dim: Color,
@@ -132,6 +138,13 @@ pub struct Theme {
 
     pub tab_active: Style,
     pub tab_inactive: Style,
+    /// The strip itself, tabs and all: a shade off the chrome the menu is cut
+    /// from, and not the pane's ground either (ADR-072). Two rows of the same
+    /// grey stacked on each other left the Retro scheme with a slab across the
+    /// top of the window that read as one bar.
+    pub tab_strip: Style,
+    /// The rule between one tab and the next.
+    pub tab_separator: Color,
     pub tab_dirty: Color,
     pub tab_close: Color,
 
@@ -225,11 +238,15 @@ impl Theme {
             highlight: p.highlight,
             chrome_dim: p.on_chrome_dim,
 
+            // Every tab sits on the strip's own ground: which one is in front
+            // is said by the text, not by a second background (ADR-072).
             tab_active: Style::new()
-                .bg(p.background)
-                .fg(p.foreground)
+                .bg(p.tab_strip)
+                .fg(p.on_chrome)
                 .add_modifier(Modifier::BOLD),
-            tab_inactive: Style::new().bg(p.chrome).fg(p.on_chrome_dim),
+            tab_inactive: Style::new().bg(p.tab_strip).fg(p.on_chrome_dim),
+            tab_strip: Style::new().bg(p.tab_strip).fg(p.on_chrome_dim),
+            tab_separator: p.on_chrome_dim,
             tab_dirty: p.modified,
             tab_close: p.on_chrome_dim,
 
@@ -299,6 +316,8 @@ fn dark() -> Palette {
         on_highlight: Color::Indexed(235),
         title: Color::Indexed(75),
         chrome: Color::Indexed(238),
+        // One step under the bars, two over the ground.
+        tab_strip: Color::Indexed(237),
         on_chrome: Color::Indexed(252),
         on_chrome_dim: Color::Indexed(245),
         popup: Color::Indexed(237),
@@ -356,6 +375,7 @@ fn light() -> Palette {
         on_highlight: Color::Indexed(231),
         title: Color::Indexed(25),
         chrome: Color::Indexed(252),
+        tab_strip: Color::Indexed(251),
         on_chrome: Color::Indexed(236),
         on_chrome_dim: Color::Indexed(243),
         popup: Color::Indexed(253),
@@ -413,6 +433,10 @@ fn dark_simple() -> Palette {
         on_highlight: Color::White,
         title: Color::Blue,
         chrome: Color::DarkGray,
+        // Nothing sits between `DarkGray` and black, so the strip takes the
+        // ground: the tabs are still off the menu bar, which is the boundary
+        // this scheme can afford to keep.
+        tab_strip: Color::Black,
         on_chrome: Color::White,
         on_chrome_dim: Color::Gray,
         // Black, not the bars' grey: a drop-down that is the same colour as
@@ -479,6 +503,8 @@ fn light_simple() -> Palette {
         on_highlight: Color::White,
         title: Color::Blue,
         chrome: Color::Gray,
+        // As in the dark scheme: no tone between `Gray` and white to spend.
+        tab_strip: Color::White,
         on_chrome: Color::Black,
         on_chrome_dim: Color::DarkGray,
         popup: Color::Gray,
@@ -544,6 +570,9 @@ fn retro() -> Palette {
         // 248 is the grey the hardware palette actually had, and the bars,
         // the drop-downs and the dialogs are all cut from it.
         chrome: Color::Indexed(248),
+        // Two steps under the grey of the bars: this scheme's chrome is one
+        // flat tone, and a single step of it does not read as an edge.
+        tab_strip: Color::Indexed(246),
         on_chrome: Color::Indexed(16),
         on_chrome_dim: Color::Indexed(238),
         popup: Color::Indexed(248),
@@ -731,6 +760,8 @@ mod tests {
                 ),
                 (t.foreground, p.background, "a file name in the sidebar"),
                 (t.line_number, p.background, "a line number"),
+                (p.on_chrome, p.tab_strip, "the tab in front"),
+                (p.on_chrome_dim, p.tab_strip, "a tab behind it"),
             ] {
                 assert_ne!(text, ground, "{}: {what} is invisible", kind.label());
             }

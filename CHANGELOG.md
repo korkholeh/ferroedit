@@ -10,7 +10,16 @@ version, so that heading becomes the new version's on the way out (see
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- **The chrome at the top of the window no longer reads as one slab.** The tab strip is
+  drawn in a tone of its own — a shade under the grey the menu bar is cut from, and not the
+  editor's ground either — so both of its edges read; it was most visible on the Retro
+  scheme, where the two rows were the same flat grey. Every tab sits on that strip and is
+  told apart by its text: the file in front is bold and full contrast, the ones behind are
+  dim, and a `│` rule divides one tab from the next. The file tree draws a rule under the
+  menu bar as well, the way the git panel below it always has, with its title on the line
+  (ADR-072).
 
 ## [0.1.5] — 2026-09-09
 

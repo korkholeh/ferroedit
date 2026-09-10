@@ -2324,3 +2324,48 @@ colour for them, which is the one thing the simple themes exist not to do.
 own ground and wins wherever it reaches, so the two never compete for a cell — and the part
 of the caret's line that is *not* selected is exactly the part where the user still wants to
 know where the caret is.
+
+---
+
+## ADR-072: The tab strip is a tone of its own, and its tabs are told apart by their text
+
+**Decision.** The strip between the menu bar and the editor gets a ground of its own —
+`Palette::tab_strip`, a shade darker than the `chrome` the menu bar, the status bar and the
+dialogs are cut from, and not the editor's `background` either. Every tab is drawn on it:
+which one is in front is said by the text — `on_chrome` and bold for the tab in front,
+`on_chrome_dim` for the ones behind — and one tab is divided from the next by a `│` rule,
+which is the seventh cell of ` name ● × │`. The sixteen-colour schemes have no third tone
+to spend and fall back to `background`. Separately, the explorer draws `Borders::TOP` as
+well as `Borders::RIGHT`, so a rule runs under the menu bar across the sidebar with the
+` Files — name ` title on it, and the title now keeps three cells of that rule clear
+instead of eliding the folder name to fill the row.
+
+**Why a third tone.** The menu bar and the tab strip are adjacent rows and were the same
+colour. On the Retro scheme, whose chrome is a flat grey 248 over a blue ground, that read
+as one two-row slab across the top of the window with a couple of tabs punched into it. The
+first fix — painting the strip in the editor's ground — moved the problem rather than
+solving it: the boundary with the menu appeared and the boundary with the pane went, and
+the strip then looked like the top of the document. A row that belongs to neither
+neighbour has to be neither neighbour's colour.
+
+**Why the tabs share it.** Giving the tab in front its own background is the other way to
+mark it, and it is the way that costs a fourth tone and puts a second edge in a one-row
+bar. Text carries it instead: full-contrast and bold against dim is legible in all five
+schemes — the check in `no_theme_draws_text_in_the_colour_underneath_it` covers both
+against the strip — and it leaves the strip reading as one continuous bar, which is what
+lets a rule between tabs do its job.
+
+**Why a rule and not a gap.** Tabs with the same ground and no divider run into each other
+the moment two short names sit side by side. A blank cell would be indistinguishable from
+the padding a tab already has; a `│` is one cell, is already the vocabulary the sidebar's
+borders use, and moves the close button to `tab.right() - 3` rather than changing any of
+the layout arithmetic around it.
+
+**Why the tree gets a rule too.** The sidebar had the same problem with no separator at
+all: the tree's first row sat directly under the menu bar, so the menu looked like the
+tree's header. The row is not free — the sidebar is as tall as the body — but the title
+already reserved it: `Block::inner` takes the top row for a title whether or not a border
+is drawn there. So the rule costs nothing, and it makes the explorer consistent with the
+git panel below it, which has drawn `TOP | RIGHT` all along. Three cells of it are kept
+clear of the title because a title elided to fill the row hides the line it is drawn on.
+

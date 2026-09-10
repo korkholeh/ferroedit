@@ -24,11 +24,16 @@ fn title(app: &App, width: u16) -> String {
     /// ` Files — ` and the trailing space: everything in the title that is
     /// not the folder's name.
     const CHROME: usize = 10;
+    /// Cells of rule kept to the right of the title. The row is the pane's top
+    /// border (ADR-072), and a title elided to fill every cell of it hides the
+    /// line it is drawn on — which is the line that keeps the tree off the menu
+    /// bar.
+    const RULE: usize = 3;
     let name = app.workspace.name();
     // One column of the pane is its right border, and the title is drawn on
     // the row above the rows, so the room it has is the pane less that border.
     let room = (width as usize).saturating_sub(1);
-    let for_name = room.saturating_sub(CHROME);
+    let for_name = room.saturating_sub(CHROME + RULE);
     if for_name == 0 {
         return " Files ".to_string();
     }
@@ -38,7 +43,12 @@ fn title(app: &App, width: u16) -> String {
 pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let focused = app.focus == FocusTarget::Explorer;
     let block = Block::new()
-        .borders(Borders::RIGHT)
+        // A top border as well as the right one, so the tree is not sitting
+        // directly against the menu bar: the pane above it is the menu, and
+        // without the rule the two ran together (ADR-072). The git panel below
+        // has drawn its own top rule all along, so this makes the sidebar
+        // consistent rather than adding a new idea.
+        .borders(Borders::TOP | Borders::RIGHT)
         .border_style(theme.border_for(focused))
         .title(Span::styled(title(app, area.width), theme.panel_title));
     let inner = block.inner(area);

@@ -1420,4 +1420,76 @@ mod tests {
             "one column now, so the whole line is one cell: {screen}"
         );
     }
+
+    /// The strip is a tone of its own: never the menu bar's, and — where the
+    /// palette has the colours to spare — never the editor's either. On the
+    /// Retro scheme, where the strip and the menu were one flat grey, the two
+    /// rows read as a single slab (ADR-072).
+    #[test]
+    fn the_tab_strip_is_neither_the_menu_bar_nor_the_editor() {
+        use crate::config::ThemeKind;
+
+        let app = app();
+        for kind in [
+            ThemeKind::Dark,
+            ThemeKind::Light,
+            ThemeKind::DarkSimple,
+            ThemeKind::LightSimple,
+            ThemeKind::Retro,
+        ] {
+            let theme = Theme::new(kind);
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render(frame, &app, &layout::compute(frame.area(), &app), &theme);
+                })
+                .unwrap();
+            let rects = layout::compute(Rect::new(0, 0, 80, 24), &app);
+            let buffer = terminal.backend().buffer().clone();
+
+            // The last cell of the strip: past every tab the fixture opens.
+            let tail = buffer[(rects.tab_bar.right() - 1, rects.tab_bar.y)].clone();
+            let menu = buffer[(rects.menu_bar.right() - 1, rects.menu_bar.y)].clone();
+            let inactive = buffer[(rects.tabs[1].x + 1, rects.tab_bar.y)].clone();
+            assert_ne!(tail.bg, menu.bg, "{kind:?}: the two bars share a colour");
+            assert_ne!(
+                inactive.bg, menu.bg,
+                "{kind:?}: a tab behind is the colour of the menu bar"
+            );
+            assert_eq!(
+                inactive.bg, tail.bg,
+                "{kind:?}: every tab is drawn on the strip itself"
+            );
+            // The sixteen-colour schemes have no third tone for the strip and
+            // borrow the ground; the rest keep it off both rows.
+            if !matches!(kind, ThemeKind::DarkSimple | ThemeKind::LightSimple) {
+                assert_ne!(
+                    tail.bg, theme.background,
+                    "{kind:?}: the strip is the editor's ground"
+                );
+            }
+        }
+    }
+
+    /// And the tree is not sitting straight on the menu bar either: the pane
+    /// draws a rule under it, the way the git panel below always has.
+    #[test]
+    fn the_file_tree_has_a_rule_between_it_and_the_menu_bar() {
+        let rows = draw(&app(), 80, 24);
+        assert!(
+            rows[1].starts_with('\u{2500}') || rows[1].contains('\u{2500}'),
+            "no rule over the tree: {:?}",
+            rows[1]
+        );
+        assert!(
+            rows[1].contains("Files"),
+            "the title is on it: {:?}",
+            rows[1]
+        );
+        assert!(
+            !rows[2].contains('\u{2500}'),
+            "and the rule is one row, not the pane's whole frame: {:?}",
+            rows[2]
+        );
+    }
 }

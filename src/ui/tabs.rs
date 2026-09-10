@@ -20,9 +20,15 @@ const STALE: &str = "!";
 /// The close button. `×` rather than a heavier glyph because it has to read as
 /// a control at one cell in a 256-colour palette.
 const CLOSE: &str = "×";
+/// The rule between one tab and the next (ADR-072). Tabs share the strip's
+/// ground and are told apart by their text, so a line is what says where one
+/// of them ends.
+const SEPARATOR: &str = "│";
 
 pub fn render(frame: &mut Frame, app: &App, rects: &LayoutRects, theme: &Theme) {
-    frame.render_widget(Block::new().style(theme.tab_inactive), rects.tab_bar);
+    // The strip is a tone of its own — neither the menu's chrome nor the
+    // pane's ground — so both of its edges read (ADR-072).
+    frame.render_widget(Block::new().style(theme.tab_strip), rects.tab_bar);
 
     for (index, tab) in app.tabs.iter().enumerate() {
         let Some(rect) = rects.tabs.get(index) else {
@@ -48,6 +54,7 @@ pub fn render(frame: &mut Frame, app: &App, rects: &LayoutRects, theme: &Theme) 
             Span::styled(" ", style),
             Span::styled(CLOSE, style.fg(theme.tab_close)),
             Span::styled(" ", style),
+            Span::styled(SEPARATOR, style.fg(theme.tab_separator)),
         ];
         // A clipped tab is truncated by the Paragraph rather than by us: the
         // rect is already the visible part of it.
@@ -65,7 +72,7 @@ pub fn render(frame: &mut Frame, app: &App, rects: &LayoutRects, theme: &Theme) 
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     arrow,
-                    theme.tab_inactive.fg(theme.foreground),
+                    theme.tab_strip.fg(theme.foreground),
                 ))),
                 rect,
             );
