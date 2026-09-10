@@ -119,7 +119,7 @@ impl DocumentError {
 /// also preserves the length, which is a narrower gap than reading the file
 /// back on every event to compare it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DiskStamp {
+pub(crate) struct DiskStamp {
     /// `None` on a filesystem that does not report one — the length is then
     /// the whole of the comparison rather than a reason to give up on it.
     modified: Option<SystemTime>,
@@ -132,7 +132,7 @@ impl DiskStamp {
     /// A failure here is not an error to report: it means the next comparison
     /// has nothing to compare against, and a buffer with no stamp is simply one
     /// the editor makes no claim about.
-    fn of(path: &Path) -> Option<Self> {
+    pub(crate) fn of(path: &Path) -> Option<Self> {
         std::fs::metadata(path)
             .ok()
             .map(|metadata| Self::from_metadata(&metadata))
@@ -260,6 +260,22 @@ impl Document {
         // costs a reload of text that is already right.
         let disk = DiskStamp::of(path);
         let bytes = std::fs::read(path).map_err(|err| DocumentError::io(path, err))?;
+        Self::from_bytes(path, bytes, disk, charset)
+    }
+
+    /// The rest of an open, once the file's bytes are in hand: unpack, decode,
+    /// and build the buffer.
+    ///
+    /// Split out of `open_as` because a large file is read a slice at a time
+    /// and arrives here as a `Vec` nobody read in one go (ADR-077). The stamp
+    /// is passed in for the same reason it is taken first above: it belongs to
+    /// the moment the read *started*.
+    pub(crate) fn from_bytes(
+        path: &Path,
+        bytes: Vec<u8>,
+        disk: Option<DiskStamp>,
+        charset: Option<Charset>,
+    ) -> Result<Self, DocumentError> {
         // Unpacking comes first: what a container holds decides nothing about
         // the charset inside it, and the NUL guard below has to look at the
         // text rather than at a compressed stream, which is noise by design

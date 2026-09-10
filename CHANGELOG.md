@@ -12,6 +12,13 @@ version, so that heading becomes the new version's on the way out (see
 
 ### Added
 
+- **A large file now says it is opening.** A file of 4 MB or more is read a slice at a
+  time — 8 ms of reading per frame — and a box in the middle of the editor pane carries a
+  spinner, the file's name and how much has arrived so far (`⠸ Opening big.txt — 43% of
+  188 MB`) over a progress bar. The window keeps drawing throughout instead of going still
+  until the file is in a tab, which on a cold cache or a network share is where the whole
+  wait was. Smaller files open in one go with no box to flicker, and an idle editor is
+  still never woken to redraw (ADR-077).
 - **Gzipped files open on their text.** A file whose bytes say gzip — `dump.sql.gz`, a
   rotated `.log.gz` — is unpacked as it is read, so looking inside one no longer means
   unpacking it to a temporary file first. The grammar comes from the name inside the

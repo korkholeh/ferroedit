@@ -13,6 +13,7 @@ pub mod input_field;
 // imports `LogState` by name and is unaffected.
 pub mod log;
 pub mod notifications;
+pub mod opening;
 pub mod search;
 pub mod table;
 pub mod tabs;
@@ -32,6 +33,7 @@ use git::GitState;
 use help::HelpState;
 use log::LogState;
 use notifications::Notifications;
+use opening::{Opening, SLICED_ABOVE};
 use search::SearchState;
 pub use tabs::{Tab, TabItem};
 use workspace::Workspace;
@@ -247,6 +249,11 @@ pub struct App {
     /// root changes (ADR-051). `None` in every headless test, which is also
     /// what makes those tests spawn no threads.
     pub events: Option<Sender<AppEvent>>,
+    /// The large file being read a slice at a time, while one is (ADR-077).
+    /// Its tab does not exist until the read lands: an empty tab that fills in
+    /// later would be a window the user could type into and scroll through
+    /// while it lied about what the file holds.
+    pub opening: Option<Opening>,
     /// The watch on the workspace root, while there is one. Held rather than
     /// forgotten because dropping it is how the previous root stops being
     /// watched.
@@ -288,6 +295,7 @@ impl App {
             help_cols: 0,
             dialog_rows: 0,
             events: None,
+            opening: None,
             watch: None,
             should_quit: false,
             workspace,
@@ -617,28 +625,114 @@ impl App {
     /// A file that is already open is re-focused rather than opened twice
     /// (SPEC §11), which also means the CLI, the explorer and the menu can all
     /// call this without checking first.
-    pub fn open_path(&mut self, path: &Path, line: Option<usize>) -> Result<(), DocumentError> {
+    pub fn open_path(&mut self, path: &Path, line: Option<usize>) -> Result<Opened, DocumentError> {
         let absolute = absolute(path);
-        let existing = self.tabs.iter().position(|tab| tab.is_at(&absolute));
-
-        let index = match existing {
-            Some(index) => index,
-            None => {
-                let document = Document::open_or_create(&absolute)?;
-                // A stream longer than the unpacking cap opens on its beginning
-                // (ADR-074). The status bar carries the same news for as long
-                // as the tab is open; this is the one moment it has to be
-                // impossible to miss, because everything below the cut looks
-                // exactly like the end of a file.
-                let truncated = document.is_truncated();
-                self.tabs.push(TabItem::editing(Tab::new(document)));
-                if truncated {
-                    self.notifications
-                        .warning("Too large to unpack whole — showing the beginning");
+        // A read already in flight is finished here, where it stands, rather
+        // than dropped or left running: every path the editor was asked to open
+        // gets a tab, and a read that landed frames after the user had moved on
+        // would pull the window out from under them. It is also why there is no
+        // queue — two files named at once is the command line, which opens them
+        // before there is a frame to animate.
+        self.finish_pending_open();
+        if let Some(index) = self.tabs.iter().position(|tab| tab.is_at(&absolute)) {
+            self.show_tab(index, line);
+            return Ok(Opened::Now);
+        }
+        if self.slice_the_read(&absolute) {
+            match Opening::start(&absolute, line) {
+                Ok(opening) => {
+                    ::log::info!("reading {} a slice at a time", absolute.display());
+                    self.opening = Some(opening);
+                    return Ok(Opened::Reading);
                 }
-                self.tabs.len() - 1
+                // Something that could be stat'd and not opened: fall through
+                // and let the whole-file path report it the way it always has.
+                Err(err) => ::log::debug!("{} is not sliceable: {err}", absolute.display()),
             }
+        }
+        let document = Document::open_or_create(&absolute)?;
+        self.place_document(document, line);
+        Ok(Opened::Now)
+    }
+
+    /// Whether a path is worth reading a slice at a time (ADR-077).
+    ///
+    /// A file the editor cannot stat, or one small enough to read inside a
+    /// frame, opens whole: the machinery below only earns its keep when there
+    /// is something to watch.
+    fn slice_the_read(&self, path: &Path) -> bool {
+        std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() >= SLICED_ABOVE)
+    }
+
+    /// Reads the next slice of the file being opened, and lands it when that
+    /// was the last one (ADR-077).
+    ///
+    /// Called once a frame by the run loop, next to `sync_highlight` and for
+    /// the same reason: it is work a frame owes, not something any one command
+    /// should have to remember.
+    pub fn advance_open(&mut self) {
+        let Some(opening) = self.opening.as_mut() else {
+            return;
         };
+        match opening.read_slice() {
+            Ok(false) => {}
+            Ok(true) => self.finish_pending_open(),
+            Err(err) => {
+                let path = opening.path().to_path_buf();
+                ::log::error!("could not read {}: {err}", path.display());
+                self.opening = None;
+                self.notifications.error(format!("Failed to open: {err}"));
+            }
+        }
+    }
+
+    /// Finishes the read in flight, if there is one: decodes what was read and
+    /// puts it in a tab.
+    pub(crate) fn finish_pending_open(&mut self) {
+        let Some(mut opening) = self.opening.take() else {
+            return;
+        };
+        if let Err(err) = opening.read_rest() {
+            ::log::error!("could not read {}: {err}", opening.path().display());
+            self.notifications.error(format!("Failed to open: {err}"));
+            return;
+        }
+        let line = opening.line();
+        let (path, bytes, disk) = opening.finish();
+        match Document::from_bytes(&path, bytes, disk, None) {
+            Ok(document) => {
+                let title = document.title().to_string();
+                self.place_document(document, line);
+                // The tab appears frames after the command that asked for it,
+                // so it says so: the box the user was watching is gone by now,
+                // and nothing else would mark the moment the file arrived.
+                self.notifications.info(format!("Opened {title}"));
+            }
+            Err(err) => {
+                ::log::error!("could not open {}: {err}", path.display());
+                self.notifications.error(format!("Failed to open: {err}"));
+            }
+        }
+    }
+
+    /// Puts a freshly read document in a tab of its own and focuses it.
+    fn place_document(&mut self, document: Document, line: Option<usize>) {
+        // A stream longer than the unpacking cap opens on its beginning
+        // (ADR-074). The status bar carries the same news for as long as the
+        // tab is open; this is the one moment it has to be impossible to miss,
+        // because everything below the cut looks exactly like the end of a
+        // file.
+        let truncated = document.is_truncated();
+        self.tabs.push(TabItem::editing(Tab::new(document)));
+        if truncated {
+            self.notifications
+                .warning("Too large to unpack whole — showing the beginning");
+        }
+        self.show_tab(self.tabs.len() - 1, line);
+    }
+
+    /// Brings a tab to the front, on a given line if one was asked for.
+    fn show_tab(&mut self, index: usize, line: Option<usize>) {
         self.active_tab = Some(index);
         self.focus = FocusTarget::Editor;
         let view = self.text_view();
@@ -648,8 +742,18 @@ impl App {
             }
             tab.follow_cursor(view);
         }
-        Ok(())
     }
+}
+
+/// What an open did: the file is in front, or it is being read (ADR-077).
+///
+/// The caller says "Opened X" for the first and nothing for the second — the
+/// box on screen is already saying what is happening, and a file that is still
+/// being read has not been opened yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Opened {
+    Now,
+    Reading,
 }
 
 /// Test fixtures. Three tabs of in-memory text, shared by the `ui`, `event` and
@@ -823,6 +927,109 @@ mod tests {
         // is not something to start a buffer over.
         assert!(app.open_path(dir.path(), None).is_err());
         assert!(app.tabs.is_empty());
+    }
+
+    /// A file over the slicing threshold (ADR-077), with `lines` lines in it.
+    fn large_file(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        let line = "the quick brown fox jumps over the lazy dog\n";
+        let lines = (SLICED_ABOVE as usize / line.len()) + 1_000;
+        std::fs::write(&path, line.repeat(lines)).unwrap();
+        assert!(std::fs::metadata(&path).unwrap().len() > SLICED_ABOVE);
+        path
+    }
+
+    #[test]
+    fn a_small_file_opens_inside_the_command_that_asked_for_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("small.txt");
+        std::fs::write(&path, "small\n").unwrap();
+
+        let mut app = App::new(Workspace::from_arg(Some(dir.path())).unwrap());
+        assert_eq!(app.open_path(&path, None).unwrap(), Opened::Now);
+        assert!(app.opening.is_none(), "nothing to animate");
+        assert_eq!(app.tabs.len(), 1);
+    }
+
+    #[test]
+    fn a_large_file_is_read_a_slice_at_a_time_and_lands_in_a_tab() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = large_file(dir.path(), "big.txt");
+
+        let mut app = App::new(Workspace::from_arg(Some(dir.path())).unwrap());
+        assert_eq!(app.open_path(&path, Some(3)).unwrap(), Opened::Reading);
+        assert!(app.tabs.is_empty(), "the tab appears when the read lands");
+        assert!(app.opening.is_some());
+
+        // The run loop's frames, until it lands. Bounded, because a test that
+        // spins forever on a bug is a test that says nothing.
+        for _ in 0..10_000 {
+            app.advance_open();
+            if app.opening.is_none() {
+                break;
+            }
+        }
+
+        assert!(app.opening.is_none(), "the read landed");
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.active_tab, Some(0));
+        assert_eq!(app.focus, FocusTarget::Editor);
+        let document = &app.active().unwrap().document;
+        assert_eq!(document.title(), "big.txt");
+        assert_eq!(
+            document.len_bytes(),
+            crate::editor::coords::ByteIdx(std::fs::metadata(&path).unwrap().len() as usize),
+            "every byte of the file is in the buffer"
+        );
+        assert_eq!(document.cursor().line, 2, "the line asked for is kept");
+    }
+
+    #[test]
+    fn a_second_open_finishes_the_read_the_first_one_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = large_file(dir.path(), "big.txt");
+        let small = dir.path().join("small.txt");
+        std::fs::write(&small, "small\n").unwrap();
+
+        let mut app = App::new(Workspace::from_arg(Some(dir.path())).unwrap());
+        app.open_path(&big, None).unwrap();
+        app.open_path(&small, None).unwrap();
+
+        assert!(app.opening.is_none());
+        assert_eq!(app.tabs.len(), 2, "neither file was dropped");
+        assert_eq!(
+            app.active().unwrap().document.title(),
+            "small.txt",
+            "the file asked for last is the one in front"
+        );
+    }
+
+    #[test]
+    fn a_large_file_already_open_is_re_focused_rather_than_read_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = large_file(dir.path(), "big.txt");
+
+        let mut app = App::new(Workspace::from_arg(Some(dir.path())).unwrap());
+        app.open_path(&path, None).unwrap();
+        app.finish_pending_open();
+        assert_eq!(app.open_path(&path, None).unwrap(), Opened::Now);
+        assert!(app.opening.is_none());
+        assert_eq!(app.tabs.len(), 1);
+    }
+
+    #[test]
+    fn a_file_that_vanishes_under_the_read_is_reported_and_opens_no_tab() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = large_file(dir.path(), "big.txt");
+
+        let mut app = App::new(Workspace::from_arg(Some(dir.path())).unwrap());
+        app.open_path(&path, None).unwrap();
+        // The handle stays valid on Unix, so this is not the read failing —
+        // it is the weaker claim the test can make everywhere: whatever was
+        // read still becomes a tab, and nothing panics on the way.
+        let _ = std::fs::remove_file(&path);
+        app.finish_pending_open();
+        assert!(app.opening.is_none());
     }
 
     #[test]

@@ -31,7 +31,7 @@ use simplelog::WriteLogger;
 
 use app::focus::FocusTarget;
 use app::workspace::Workspace;
-use app::{App, EditorView};
+use app::{App, EditorView, Opened};
 use cli::Cli;
 use commands::execute::execute_command;
 use commands::Command;
@@ -143,6 +143,12 @@ fn run(cli: &Cli) -> Result<()> {
     let mut theme = Theme::new(theme_kind);
     while !app.should_quit {
         app.notifications.prune();
+
+        // The next slice of a large file, if one is being read (ADR-077).
+        // Before the draw, like the caches below it: the box on screen is drawn
+        // from what this leaves behind, and a read that lands inside its first
+        // slice therefore never draws one at all.
+        app.advance_open();
 
         // Colour the lines that are about to be drawn. Before the draw and not
         // inside it, because `ui/` only ever reads `App` and a cache has to
@@ -290,11 +296,15 @@ fn open_cli_files(app: &mut App, cli: &Cli) {
         // is the first one.
         let line = (index == 0).then_some(cli.line).flatten();
         match app.open_path(path, line) {
-            Ok(()) => {
+            // A large file is read a slice at a time and lands after the first
+            // frames (ADR-077). It counts as opened here all the same: the
+            // read has started, and the loop below is what carries it.
+            Ok(opened_now) => {
                 opened += 1;
-                if files.len() == 1 && existed {
+                let landed = opened_now == Opened::Now;
+                if landed && files.len() == 1 && existed {
                     app.notifications.info(format!("Opened {}", path.display()));
-                } else if files.len() == 1 {
+                } else if landed && files.len() == 1 {
                     // Nothing is on disk yet: say so, so that an empty screen is
                     // not mistaken for a file that failed to load.
                     app.notifications
@@ -307,8 +317,16 @@ fn open_cli_files(app: &mut App, cli: &Cli) {
             }
         }
     }
-    if files.len() > 1 && opened > 0 {
-        app.notifications.info(format!("Opened {opened} files"));
+    if files.len() > 1 {
+        // Several files named at once are all wanted, and the last of them may
+        // still be being read. Nothing has been drawn yet — the terminal is not
+        // even in raw mode — so there is no animation to keep and the read is
+        // finished here, which is also what keeps the *first* file the one the
+        // editor starts on.
+        app.finish_pending_open();
+        if opened > 0 {
+            app.notifications.info(format!("Opened {opened} files"));
+        }
     }
     // The first file that opened is the one to start on, not the last.
     app.active_tab = (!app.tabs.is_empty()).then_some(0);
@@ -317,13 +335,14 @@ fn open_cli_files(app: &mut App, cli: &Cli) {
 /// Waits for the next event, waking early when a notification is due to expire
 /// so a stale message cannot sit on the status bar of an idle terminal.
 ///
-/// A search still walking the buffer does not wait at all (ADR-076): the next
-/// frame is the one that carries the walk on and draws the next turn of the
-/// spinner, so it is taken as soon as whatever is already queued has been
-/// handled. This is the whole of the editor's animation clock, and it stops the
-/// moment the walk lands — an idle terminal is never woken to draw.
+/// A search still walking the buffer does not wait at all (ADR-076), and
+/// neither does a large file still being read (ADR-077): the next frame is the
+/// one that carries the work on and draws the next turn of the spinner, so it
+/// is taken as soon as whatever is already queued has been handled. This is the
+/// whole of the editor's animation clock, and it stops the moment the last of
+/// them lands — an idle terminal is never woken to draw.
 fn next_event(rx: &mpsc::Receiver<AppEvent>, app: &App) -> Wait {
-    if app.search.is_scanning() {
+    if app.search.is_scanning() || app.opening.is_some() {
         return match rx.try_recv() {
             Ok(event) => Wait::Event(event),
             Err(mpsc::TryRecvError::Empty) => Wait::Idle,

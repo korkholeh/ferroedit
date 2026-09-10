@@ -13,7 +13,7 @@ use crate::app::log::LogState;
 use crate::app::search::SearchField;
 use crate::app::table::{CellEditor, CellStep, TableView};
 use crate::app::tabs::{active_after_close, Stale, TabItem};
-use crate::app::{App, LastClick, SidebarMode};
+use crate::app::{App, LastClick, Opened, SidebarMode};
 use crate::commands::{Command, FileOp, MenuEntry, MENUS};
 use crate::config::ThemeKind;
 use crate::editor::charset::Charset;
@@ -2244,7 +2244,10 @@ fn select_path(app: &mut App, path: Option<&Path>) {
 /// the Open dialog — reporting whatever went wrong.
 fn open_and_report(app: &mut App, path: &Path) {
     match app.open_path(path, None) {
-        Ok(()) => {
+        // A file still being read says so in its own box, and says "Opened"
+        // for itself when it lands (ADR-077).
+        Ok(Opened::Reading) => {}
+        Ok(Opened::Now) => {
             let title = display_name(path);
             app.notifications.info(format!("Opened {title}"));
         }
@@ -2879,7 +2882,8 @@ fn git_open_selected(app: &mut App) {
     };
     let path = root.join(&entry.path);
     match app.open_path(&path, None) {
-        Ok(()) => app.notifications.info(format!("Opened {}", path.display())),
+        Ok(Opened::Reading) => {}
+        Ok(Opened::Now) => app.notifications.info(format!("Opened {}", path.display())),
         Err(err) => {
             log::error!("could not open {}: {err}", path.display());
             app.notifications.error(format!("Failed to open: {err}"));
@@ -3630,7 +3634,8 @@ fn open_git_config(app: &mut App) {
     };
     let path = repo.git_dir().join("config");
     match app.open_path(&path, None) {
-        Ok(()) => app.notifications.info(format!("Opened {}", path.display())),
+        Ok(Opened::Reading) => {}
+        Ok(Opened::Now) => app.notifications.info(format!("Opened {}", path.display())),
         Err(err) => {
             log::error!("could not open {}: {err}", path.display());
             app.notifications.error(format!("Failed to open: {err}"));

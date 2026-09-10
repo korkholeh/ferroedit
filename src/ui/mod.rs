@@ -10,6 +10,7 @@ pub mod help;
 pub mod layout;
 pub mod log;
 pub mod menu;
+pub mod opening;
 pub mod scrollbar;
 pub mod search;
 pub mod statusbar;
@@ -63,6 +64,10 @@ pub fn render(frame: &mut Frame, app: &App, rects: &LayoutRects, theme: &Theme) 
     if let Some(area) = rects.table {
         table::render(frame, app, area, theme);
     }
+    // Over whichever of them is in front: a file being read is about to be a
+    // tab, and the box that says so belongs in the pane it will appear in
+    // (ADR-077).
+    opening::render(frame, app, rects.editor, theme);
     // Over the whole body, sidebar included: it is a screen, not a pane.
     if let Some(area) = rects.help {
         help::render(frame, app, area, theme);
@@ -918,6 +923,30 @@ mod tests {
             bold.contains("README.md"),
             "the active file is the bold one in the sidebar: {bold:?}"
         );
+    }
+
+    #[test]
+    fn a_file_being_read_says_so_over_the_editor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.log");
+        std::fs::write(&path, "x\n".repeat(4_000_000)).unwrap();
+
+        let mut app = App::fixture_in(dir.path());
+        app.opening = Some(crate::app::opening::Opening::start(&path, None).unwrap());
+        let screen = draw(&app, 80, 24).join("\n");
+
+        assert!(screen.contains("Opening big.log"), "{screen}");
+        assert!(
+            screen.contains("0% of"),
+            "the readout is measured: {screen}"
+        );
+        assert!(screen.contains('░'), "the bar is drawn: {screen}");
+    }
+
+    #[test]
+    fn nothing_of_the_reading_box_is_drawn_when_no_file_is_being_read() {
+        let screen = draw(&app(), 80, 24).join("\n");
+        assert!(!screen.contains("Opening"), "{screen}");
     }
 
     /// A quick eyeball of the whole box, so the row order, the trailing `/`

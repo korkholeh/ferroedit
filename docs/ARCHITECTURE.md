@@ -40,7 +40,9 @@ commands/      → Command enum + execute()
    `App::sync_highlight` and `App::sync_search` before each draw, so `ui/` reads colours
    and match positions the same way it reads text — out of `&App`. A renderer that
    parsed or searched as it drew would either break invariant 2 or throw the cache away
-   every frame.
+   every frame. `App::advance_open` sits beside them and is the same kind of thing from
+   the other end: work a frame owes rather than work a command asked for — the next slice
+   of a large file, so the read is spread over frames the window can draw (ADR-077).
 
 ## 2. Module tree
 
@@ -54,10 +56,12 @@ src/
   docs.rs                 # renders docs/SHORTCUTS.md from the tables (ADR-028)
   app/       mod.rs focus.rs tabs.rs dialog.rs diff.rs log.rs input_field.rs
              browser.rs notifications.rs search.rs table.rs workspace.rs
+             opening.rs       # a large file read a slice a frame (ADR-077)
   event/     mod.rs keyboard.rs mouse.rs
   commands/  mod.rs execute.rs
   ui/        mod.rs layout.rs menu.rs tabs.rs editor.rs explorer.rs field.rs
              git.rs search.rs statusbar.rs dialog.rs diff.rs log.rs table.rs theme.rs
+             opening.rs       # the box a large file is read behind (ADR-077)
   editor/    mod.rs document.rs cursor.rs selection.rs history.rs search.rs
              coords.rs viewport.rs wrap.rs clipboard.rs charset.rs csv.rs
              compression.rs   # gzip on the way in, read-only (ADR-074)

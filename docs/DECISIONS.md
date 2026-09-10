@@ -2810,3 +2810,72 @@ editor usable over ssh and on a battery — and any future animation has to earn
 `Document::find_all` is now test-only. Nothing in the editor wants the whole answer at the
 cost of the whole frame, but the tests that assert *what* is found are clearer without a
 deadline threaded through each of them.
+
+---
+
+## ADR-077: A large file is read a slice at a time, and the pane says how far it has got
+
+**Decision.** A file of 4 MB or more is opened by `App::open_path` without being read:
+`Opening` takes the handle, the stamp and the line to land on, and the run loop reads the
+next slice of it once a frame — 8 ms of `read`, then a redraw — until the file is all in
+hand. Only then are the bytes unpacked, decoded and turned into a tab. While a read is in
+flight a box in the middle of the editor pane carries a braille spinner, the file's name
+and how much of it has arrived (`⠸ Opening big.txt — 43% of 188 MB`) over a bar, and
+`next_event` stops blocking so the next frame comes straight away. Anything smaller opens
+whole, inside the command that asked for it, exactly as it always did.
+
+**Why.** Opening a large file was the one action in the editor with no answer to "is it
+working?". The window kept the frame it had, took no input, and gave back nothing until the
+file was in a tab — which on a 189 MB log is 150 ms on a warm cache in a release build, over
+two seconds in a debug one, and an unbounded wait on a cold cache, an NFS mount or a spinning
+disk, where the read is the whole of the cost. A window that has stopped repainting is
+indistinguishable from one that has hung, and the honest fix is the same one the search
+walk needed (ADR-076): stop holding the loop for the length of the work.
+
+**Why the read and not the rest.** An open is four steps — read, unpack, decode, build the
+rope — and only the first of them is unbounded. Measured on a release build over 189 MB:
+39 ms to read a cached file, 23 µs to notice it is not gzip, 38 ms to decode, 70 ms to build
+the rope. The three after the read are proportional to the file and bounded by memory
+bandwidth, so they are slow in the way any large file is slow; the read is slow in the way a
+network share is slow, which is a different thing and the only one worth animating. Slicing
+it also costs nothing to reason about, because a partial read is just a shorter `Vec` — while
+slicing the decode would mean carrying a partial charset decision, and slicing the rope build
+a buffer nothing may look at yet.
+
+**Why 4 MB.** Under it a read is one frame's work even when the cache is cold, so the state,
+the box and the extra frame would all be paid for to show something nobody would see. It is
+also below every file the threshold matters for: the 5 MB the highlighter gives up at and
+the 64 MB an unpacked stream is cut to (ADR-074) are both above it.
+
+**Why no tab until it lands.** An empty tab that filled in later would be a window the user
+could type into, scroll through and search while it told them the file was empty. The tab is
+the file; until the file is there, the box is.
+
+**Why the box and not the status bar.** The status bar has a notification and a readout on
+it already, and this is not news among other news — it is the only thing happening. The box
+is where the file is about to appear, which is where the eye is, and it is the shape a
+terminal has always used to say "working". It takes no input and nothing hit-tests it: it is
+not a dialog, and `Esc` does not close it.
+
+**Why a bar as well as a spinner.** The spinner says the editor is alive; the percentage and
+the bar say the read is going somewhere and roughly when it will get there. A file whose
+length the filesystem will not report — a pipe, something under `/proc` — gets the spinner
+and its name alone, rather than a number that was invented.
+
+**Why no cancel.** `Esc` already means something in every pane the box is drawn over, and a
+read that cannot be cancelled is what the editor did before this change anyway — the
+difference is that the wait is now visible and the window keeps drawing. A cancel is worth
+adding the moment someone opens a file so large that watching it arrive is not enough.
+
+**Why an open finishes the read in flight.** `open_path` starts by draining any pending read
+to its end. Two files were asked for, so two tabs are owed — and a read that landed frames
+after the user had moved on would pull the window out from under them. It is also what keeps
+the command line honest: several paths named at once are opened before the terminal is in raw
+mode, where there is no frame to animate and nothing to gain by waiting.
+
+**Consequence.** The editor's animation clock is now two things rather than one: a search
+walking the buffer, and a large file being read. Both obey the same rule ADR-076 set —
+`next_event` stops blocking only while something is genuinely happening, and blocks again the
+moment it stops — so an idle terminal is still never woken to redraw. `Document::open_as` is
+now a stamp, a read and `Document::from_bytes`, which is the half a sliced read shares with
+it: there is one place that decides what a pile of bytes from a path means, whoever read them.
