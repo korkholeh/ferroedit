@@ -8,7 +8,7 @@ Unreleased work is collected under **Unreleased**; `scripts/release.sh` cuts a
 version, so that heading becomes the new version's on the way out (see
 [README](README.md#cutting-a-release)).
 
-## [Unreleased]
+## [0.1.8] — 2026-09-10
 
 ### Added
 
@@ -220,7 +220,8 @@ The first release: the editor through Phase 14.
   the help screen, and a quit that asks about each unsaved file in turn.
 - Releases are GitHub Releases, built for four targets.
 
-[Unreleased]: https://github.com/korkholeh/ferroedit/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/korkholeh/ferroedit/compare/v0.1.8...HEAD
+[0.1.8]: https://github.com/korkholeh/ferroedit/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/korkholeh/ferroedit/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/korkholeh/ferroedit/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/korkholeh/ferroedit/compare/v0.1.4...v0.1.5
