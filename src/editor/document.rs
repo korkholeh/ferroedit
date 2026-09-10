@@ -10,6 +10,7 @@ use ropey::{Rope, RopeSlice};
 use thiserror::Error;
 
 use crate::editor::charset::Charset;
+use crate::editor::compression::{self, Compression};
 use crate::editor::coords::{self, ByteIdx, CharIdx, GraphemeIdx, VisualCol, DEFAULT_TAB_WIDTH};
 use crate::editor::cursor::{Cursor, Motion};
 use crate::editor::history::{EditOperation, History};
@@ -87,6 +88,13 @@ pub enum DocumentError {
     Unmappable {
         charset: &'static str,
         character: char,
+    },
+    /// A save aimed at a file the editor only ever unpacked (ADR-074). Raised
+    /// before anything is written, so the file on disk is untouched.
+    #[error("{path} is read-only ({compression}) — Save As writes the text out")]
+    ReadOnly {
+        path: String,
+        compression: &'static str,
     },
     #[error("no file name")]
     NoPath,
@@ -187,6 +195,13 @@ pub struct Document {
     /// the moment it was opened, reloaded or saved. `None` for a buffer with no
     /// file behind it yet (ADR-043).
     disk: Option<DiskStamp>,
+    /// What the file's bytes were packed in, when they were (ADR-074). Anything
+    /// but `None` makes the document read-only: the editor unpacks and never
+    /// packs, so there is no honest thing for a save to write back.
+    compression: Compression,
+    /// Whether the unpacked stream was longer than the cap and the buffer holds
+    /// only its beginning (ADR-074).
+    truncated: bool,
     /// Lowest line whose *text* may have changed since the highlight cache
     /// last looked, or `usize::MAX` when nothing has.
     ///
@@ -217,6 +232,8 @@ impl Document {
             history: History::new(),
             revision: 0,
             disk: None,
+            compression: Compression::None,
+            truncated: false,
             // A document nothing has highlighted yet is stale from its first
             // line, which is also what makes a freshly opened file get parsed.
             dirty_from: 0,
@@ -243,17 +260,29 @@ impl Document {
         // costs a reload of text that is already right.
         let disk = DiskStamp::of(path);
         let bytes = std::fs::read(path).map_err(|err| DocumentError::io(path, err))?;
-        let (text, charset) = decode(path, &bytes, charset)?;
+        // Unpacking comes first: what a container holds decides nothing about
+        // the charset inside it, and the NUL guard below has to look at the
+        // text rather than at a compressed stream, which is noise by design
+        // (ADR-074).
+        let unpacked = compression::unpack(bytes).map_err(|err| DocumentError::io(path, err))?;
+        let (text, charset) = decode(path, &unpacked.bytes, charset)?;
         let mut document = Self::from_text(&text, Some(path.to_path_buf()));
         document.charset = charset;
         document.disk = disk;
+        document.compression = unpacked.compression;
+        document.truncated = unpacked.truncated;
         log::info!(
-            "opened {} ({} bytes, {} lines, {}, {})",
+            "opened {} ({} bytes, {} lines, {}, {}{}{})",
             path.display(),
             document.len_bytes(),
             document.line_count(),
             document.line_ending.label(),
-            charset.label
+            charset.label,
+            unpacked
+                .compression
+                .label()
+                .map_or(String::new(), |label| format!(", {label}")),
+            if unpacked.truncated { ", cut" } else { "" }
         );
         Ok(document)
     }
@@ -286,6 +315,12 @@ impl Document {
     /// §44 asks for — which is every file the editor opens by default.
     pub fn save(&mut self) -> Result<(), DocumentError> {
         let path = self.path.clone().ok_or(DocumentError::NoPath)?;
+        if let Some(compression) = self.compression.label() {
+            return Err(DocumentError::ReadOnly {
+                path: self.title().to_string(),
+                compression,
+            });
+        }
         let prepared = self.encode_all()?;
         let file = File::create(&path).map_err(|err| DocumentError::io(&path, err))?;
         let mut writer = BufWriter::new(file);
@@ -360,10 +395,13 @@ impl Document {
         let path = self.path.clone().ok_or(DocumentError::NoPath)?;
         let disk = DiskStamp::of(&path);
         let bytes = std::fs::read(&path).map_err(|err| DocumentError::io(&path, err))?;
+        let unpacked = compression::unpack(bytes).map_err(|err| DocumentError::io(&path, err))?;
         // A plain reload keeps the charset the buffer already has: it may have
         // been chosen by hand, and re-sniffing would quietly undo that choice
-        // on every `F5`.
-        let (text, charset) = decode(&path, &bytes, charset.or(Some(self.charset)))?;
+        // on every `F5`. The container is re-sniffed rather than kept, because
+        // unlike the charset it is a fact about the bytes and the bytes are
+        // what changed (ADR-074).
+        let (text, charset) = decode(&path, &unpacked.bytes, charset.or(Some(self.charset)))?;
         let line_ending = LineEnding::detect(&text);
         let normalised: Cow<'_, str> = match line_ending {
             LineEnding::Lf => Cow::Borrowed(text.as_str()),
@@ -391,18 +429,23 @@ impl Document {
         self.line_ending = line_ending;
         self.charset = charset;
         self.disk = disk;
+        self.compression = unpacked.compression;
+        self.truncated = unpacked.truncated;
         self.restore_cursor(cursor);
         // The buffer is what is on disk again, so this is the save point —
         // which is also what makes an undo of the reload report as dirty.
         self.dirty = false;
         self.history.mark_saved();
         log::info!(
-            "reloaded {} ({} bytes, {} lines, {}, {})",
+            "reloaded {} ({} bytes, {} lines, {}, {}{})",
             path.display(),
             self.len_bytes(),
             self.line_count(),
             line_ending.label(),
-            charset.label
+            charset.label,
+            self.compression
+                .label()
+                .map_or(String::new(), |label| format!(", {label}"))
         );
         Ok(())
     }
@@ -482,6 +525,55 @@ impl Document {
     ///
     /// Only the path changes: the buffer, the history and the save point are
     /// the same work, and a rename is not an edit.
+    /// What the file's bytes were packed in, for the status bar (ADR-074).
+    pub fn compression(&self) -> Compression {
+        self.compression
+    }
+
+    /// Whether the buffer may be changed and saved back.
+    ///
+    /// Only unpacking makes a document read-only today: the text is a *reading*
+    /// of the file rather than the file, and writing one back would mean
+    /// inventing a compression level and a header for it.
+    pub fn is_read_only(&self) -> bool {
+        self.compression != Compression::None
+    }
+
+    /// Whether the buffer is only the beginning of what the file holds
+    /// (ADR-074) — a stream longer than the unpacking cap.
+    pub fn is_truncated(&self) -> bool {
+        self.truncated
+    }
+
+    /// The path the grammar is chosen by, which for a `dump.sql.gz` is
+    /// `dump.sql`.
+    ///
+    /// The container is not the language, and highlighting SQL as plain text
+    /// because it arrived zipped would make the unpacked view worse than the
+    /// unpacked file for no reason (SPEC §21).
+    pub fn syntax_path(&self) -> Option<Cow<'_, Path>> {
+        let path = self.path.as_deref()?;
+        if !self.is_read_only() {
+            return Some(Cow::Borrowed(path));
+        }
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("gz") => Some(Cow::Owned(path.with_extension(""))),
+            _ => Some(Cow::Borrowed(path)),
+        }
+    }
+
+    /// Points the document at a different file *and* forgets that its bytes
+    /// arrived packed — what Save As does to a `.gz` (ADR-074).
+    ///
+    /// A rename in the explorer goes through `set_path` instead and keeps the
+    /// container, because the file it renamed is still compressed. Save As is
+    /// the other case: the text is about to be written out as itself, and from
+    /// then on the buffer *is* the file at the new path.
+    pub fn save_to(&mut self, path: PathBuf) {
+        self.set_path(path);
+        self.compression = Compression::None;
+    }
+
     pub fn set_path(&mut self, path: PathBuf) {
         log::info!(
             "{} is now {}",
@@ -1275,6 +1367,18 @@ impl Document {
     }
 }
 
+/// Fixtures for the tests in other modules that need a document in a state the
+/// filesystem would take a very large file to produce.
+#[cfg(test)]
+impl Document {
+    /// Says the buffer holds only the beginning of its file, without unpacking
+    /// the sixty-four megabytes it would take to mean it (ADR-074).
+    pub fn pretend_truncated(&mut self) {
+        self.compression = Compression::Gzip;
+        self.truncated = true;
+    }
+}
+
 /// How many bytes of a file are looked at to decide whether it is text.
 ///
 /// A NUL in the first eight kilobytes is what every tool that has to make this
@@ -1905,6 +2009,160 @@ next
         document.extend_cursor(Motion::WordRight, pane(10));
         document.save().unwrap();
         assert_eq!(document.selected_text().as_deref(), Some("one "));
+    }
+
+    /// The bytes of `text` as a `.gz`, for the tests below.
+    fn gzipped(text: &str) -> Vec<u8> {
+        use std::io::Write;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(text.as_bytes()).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn a_gzipped_file_opens_on_its_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dump.sql.gz");
+        std::fs::write(&path, gzipped("select 1;\nselect 2;\n")).unwrap();
+
+        let document = Document::open(&path).unwrap();
+        assert_eq!(document.line(0), "select 1;");
+        assert_eq!(document.line(1), "select 2;");
+        assert_eq!(document.compression(), Compression::Gzip);
+        assert!(document.is_read_only());
+        assert!(!document.is_truncated());
+    }
+
+    /// The container says nothing about the encoding inside it, so the charset
+    /// is sniffed from the unpacked bytes exactly as a plain file's are
+    /// (ADR-059, ADR-074).
+    #[test]
+    fn a_gzipped_file_is_decoded_by_its_own_charset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bom.txt.gz");
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice("Привіт".as_bytes());
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        std::fs::write(&path, gzipped(&text)).unwrap();
+
+        let document = Document::open(&path).unwrap();
+        assert_eq!(document.line(0), "Привіт");
+        assert_eq!(document.charset().label, "UTF-8 with BOM");
+    }
+
+    /// A `.tar.gz` unpacks perfectly well and is still not a text file: the NUL
+    /// guard runs on what came out, so it is refused like any other binary.
+    #[test]
+    fn a_gzipped_binary_is_still_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive.tar.gz");
+        std::fs::write(&path, gzipped("head\0\0tail")).unwrap();
+
+        assert!(matches!(
+            Document::open(&path).unwrap_err(),
+            DocumentError::Binary { .. }
+        ));
+    }
+
+    #[test]
+    fn a_gzipped_file_refuses_to_be_saved_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.txt.gz");
+        let packed = gzipped("one\n");
+        std::fs::write(&path, &packed).unwrap();
+
+        let mut document = Document::open(&path).unwrap();
+        assert!(matches!(
+            document.save().unwrap_err(),
+            DocumentError::ReadOnly { .. }
+        ));
+        // Refused before anything was written, so the file is byte for byte
+        // what it was.
+        assert_eq!(std::fs::read(&path).unwrap(), packed);
+    }
+
+    /// Save As is the way out: the text is written as itself, and the buffer
+    /// stops being a reading of a packed file (ADR-074).
+    #[test]
+    fn save_as_writes_the_text_out_and_the_buffer_is_a_plain_file_after_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let packed = dir.path().join("dump.sql.gz");
+        std::fs::write(&packed, gzipped("select 1;\n")).unwrap();
+        let plain = dir.path().join("dump.sql");
+
+        let mut document = Document::open(&packed).unwrap();
+        document.save_to(plain.clone());
+        document.save().unwrap();
+
+        assert_eq!(std::fs::read_to_string(&plain).unwrap(), "select 1;\n");
+        assert!(!document.is_read_only());
+        assert_eq!(document.compression(), Compression::None);
+    }
+
+    /// A rename is not a Save As: the file it renamed is still compressed, so
+    /// the buffer over it is still a reading of one.
+    #[test]
+    fn a_rename_keeps_the_buffer_read_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dump.sql.gz");
+        std::fs::write(&path, gzipped("select 1;\n")).unwrap();
+
+        let mut document = Document::open(&path).unwrap();
+        document.set_path(dir.path().join("backup.sql.gz"));
+        assert!(document.is_read_only());
+    }
+
+    /// `F5` over a `.gz` unpacks again rather than reading the stream as text.
+    #[test]
+    fn reloading_a_gzipped_file_unpacks_it_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.txt.gz");
+        std::fs::write(&path, gzipped("before\n")).unwrap();
+
+        let mut document = Document::open(&path).unwrap();
+        std::fs::write(&path, gzipped("after\n")).unwrap();
+        document.reload().unwrap();
+
+        assert_eq!(document.line(0), "after");
+        assert!(document.is_read_only());
+    }
+
+    /// A file that stops being compressed between two reads stops being
+    /// read-only with it: the container is a fact about the bytes, and the
+    /// bytes are what a reload re-reads.
+    #[test]
+    fn a_reload_that_finds_plain_text_drops_the_container() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.txt.gz");
+        std::fs::write(&path, gzipped("packed\n")).unwrap();
+
+        let mut document = Document::open(&path).unwrap();
+        std::fs::write(&path, "plain\n").unwrap();
+        document.reload().unwrap();
+
+        assert_eq!(document.line(0), "plain");
+        assert!(!document.is_read_only());
+    }
+
+    /// The grammar comes from the name inside the container, so SQL is
+    /// highlighted as SQL (SPEC §21, ADR-074).
+    #[test]
+    fn the_grammar_is_chosen_by_the_name_inside_the_container() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dump.sql.gz");
+        std::fs::write(&path, gzipped("select 1;\n")).unwrap();
+
+        let document = Document::open(&path).unwrap();
+        assert_eq!(
+            document.syntax_path().unwrap().file_name().unwrap(),
+            "dump.sql"
+        );
+        // A plain file's is the path itself, `.gz` or not.
+        let plain = Document::from_text("", Some(dir.path().join("notes.gz")));
+        assert_eq!(
+            plain.syntax_path().unwrap().file_name().unwrap(),
+            "notes.gz"
+        );
     }
 
     #[test]

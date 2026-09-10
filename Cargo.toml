@@ -53,6 +53,13 @@ notify = "7"
 # speed on scripts a text editor writes a few kilobytes of at a time.
 encoding_rs = { version = "0.8.40", default-features = false, features = ["alloc"] }
 
+# Gzip on the way in (ADR-074). Already in the tree under syntect, which reads
+# the grammar dump through it, so the runtime cost of opening a `.sql.gz` is a
+# `use` and not a dependency. `default-features = false` with `rust_backend`
+# names the pure-Rust `miniz_oxide` explicitly rather than by default, so no
+# later default can pull in a C zlib and break a static musl build (ADR-003).
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
 [target.'cfg(unix)'.dependencies]
 # Both are already in the tree under crossterm, so taking them directly costs
 # nothing to build. They are what lets a killed editor put the terminal back

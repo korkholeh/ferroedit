@@ -522,10 +522,18 @@ impl App {
         let index = match existing {
             Some(index) => index,
             None => {
-                self.tabs
-                    .push(TabItem::editing(Tab::new(Document::open_or_create(
-                        &absolute,
-                    )?)));
+                let document = Document::open_or_create(&absolute)?;
+                // A stream longer than the unpacking cap opens on its beginning
+                // (ADR-074). The status bar carries the same news for as long
+                // as the tab is open; this is the one moment it has to be
+                // impossible to miss, because everything below the cut looks
+                // exactly like the end of a file.
+                let truncated = document.is_truncated();
+                self.tabs.push(TabItem::editing(Tab::new(document)));
+                if truncated {
+                    self.notifications
+                        .warning("Too large to unpack whole — showing the beginning");
+                }
                 self.tabs.len() - 1
             }
         };

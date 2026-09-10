@@ -2,6 +2,7 @@
 
 pub mod charset;
 pub mod clipboard;
+pub mod compression;
 pub mod coords;
 pub mod csv;
 pub mod cursor;

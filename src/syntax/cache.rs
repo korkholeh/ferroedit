@@ -148,7 +148,13 @@ impl HighlightCache {
     /// Chooses the grammar for the document's current path and starts over.
     fn detect(&mut self, document: &Document) -> Option<Disabled> {
         self.detected_for = document.path().map(Path::to_path_buf);
-        self.syntax = Some(highlighter::detect(document.path(), &document.line(0)));
+        // The grammar is chosen by the name *inside* the container, so a
+        // `dump.sql.gz` highlights as SQL rather than as an unknown extension
+        // (ADR-074). Everything else here still keys on the real path.
+        self.syntax = Some(highlighter::detect(
+            document.syntax_path().as_deref(),
+            &document.line(0),
+        ));
         self.checkpoints.clear();
         self.window.clear();
         self.fresh = false;

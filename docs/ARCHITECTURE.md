@@ -60,6 +60,7 @@ src/
              git.rs search.rs statusbar.rs dialog.rs diff.rs log.rs table.rs theme.rs
   editor/    mod.rs document.rs cursor.rs selection.rs history.rs search.rs
              coords.rs viewport.rs wrap.rs clipboard.rs charset.rs csv.rs
+             compression.rs   # gzip on the way in, read-only (ADR-074)
   filesystem/ mod.rs tree.rs      # file operations; lazy, ignore-aware tree
   git/       mod.rs service.rs parser.rs models.rs diff.rs log.rs worker.rs
   syntax/    mod.rs highlighter.rs cache.rs

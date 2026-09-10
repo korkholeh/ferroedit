@@ -2589,3 +2589,80 @@ every run after it.
 catch. Nothing can be, which is the other half of why the mending on start-up exists: it is
 what turns a terminal broken by any of them back into a working one the next time the
 editor is opened.
+
+---
+
+## ADR-074: A gzipped file is unpacked on the way in and never on the way out
+
+**Decision.** `Document::open` unpacks a file whose first two bytes are `1F 8B` before it
+decodes it, and a document that was unpacked is read-only: every command that changes the
+text is refused, and `save` fails before it opens the file. Save As is the way out — it
+writes the buffer as itself at the new path and the document stops being a reading of a
+packed file. The unpacking is capped at 64 MB; past that the buffer holds the beginning of
+the stream, the status bar says `gzip · read-only · cut`, and Save As is refused as well.
+
+**Why at all.** A `dump.sql.gz` is the file people most want to look at and least want to
+unpack: `zcat` it and you have a temporary file the size of the dump, or you pipe it into a
+pager and lose search, syntax and the ability to open anything else. Before this the editor
+refused it outright, because a gzip stream is full of NUL bytes and fails the binary guard
+(ADR-059) — the one answer that is worse than either.
+
+**Why read-only.** Writing one back would mean choosing things the file never told us: a
+compression level, whether to keep the original name and timestamp in the header, whether
+to keep the member boundaries of a concatenated stream. Every one of those choices rewrites
+the whole file, so a stray `Ctrl+S` on a backup would replace it with a different — still
+valid, still correct — file, and the diff against what was there is the whole thing. The
+text in the buffer is a *reading* of the file, and the honest thing to do with a reading is
+to refuse to write it back.
+
+What is refused is exactly what changes the text: typing, `Backspace`, `Delete`, Delete
+Line, Cut, Paste, Replace, Save. Everything that reads still works, because reading is the
+point — motion, selection, Copy, Find, wrapping, the grammar, Reopen with Encoding, and
+`F5`, which unpacks again. Undo and Redo are not refused either: the only thing on the
+history of such a buffer is a reload, and ADR-043's reason for making that undoable does
+not weaken because the file was packed.
+
+**Why the magic number and not the extension.** The CSV view keys on the extension on
+purpose (ADR-062), and the opposite rule is right here. A `.csv` guessed wrongly is still
+readable as text and the guess is one key from being undone; a gzip stream guessed wrongly
+is refused as binary and there is no view to toggle back to. The magic number is two bytes
+and is not ambiguous, so it is the better answer — and it also opens the file that was
+named `dump.sql.gz.1` by whatever copied it.
+
+**Why unpacking comes before the charset.** A container says nothing about what is inside
+it, so the two questions are asked in the order the bytes answer them: unpack, then sniff
+the charset of what came out (ADR-059), then run the NUL guard on the decoded text. That
+last step is what still refuses a `.tar.gz` — it unpacks perfectly well and is not a text
+file — and it costs nothing extra to get right, because it is the same guard as before
+reading the same kind of bytes.
+
+The grammar is chosen by the name *inside* the container: `dump.sql.gz` highlights as SQL,
+because `.gz` is not a language and reading a dump as plain text would make the unpacked
+view worse than the unpacked file for no reason (SPEC §21).
+
+**Why there is a cap.** A gzip stream does not say how long it is, and the ratios that make
+the format worth using are what make reading one unbounded a bad idea: eight megabytes of
+SQL dump is comfortably a gigabyte of text, and a stream built to be a bomb is more, on a
+file the user only clicked on. Sixty-four megabytes is past what SPEC §44 asks the editor
+to stay comfortable with and small enough to hold twice while the rope is built. A stream
+longer than that is cut back to its last line break, so the view ends on a whole line rather
+than in the middle of a record, and the cut is announced twice — once as a notification when
+the tab opens, and permanently on the status bar, because everything below a cut looks
+exactly like the end of a file.
+
+Save As is refused while a buffer is cut. It is the one operation that would put a file on
+disk that looks whole and is not, under a name the user chose to make it look ordinary.
+
+**Cost.** None in the binary: `flate2` was already linked, because syntect reads the
+grammar dump through it (ADR-022). It is now a direct dependency with `rust_backend` named
+explicitly, so no later default can pull in a C zlib and break a static musl build
+(ADR-003).
+
+**Consequence.** A rename in the explorer keeps the buffer read-only — the file it renamed
+is still compressed — which is why Save As goes through `Document::save_to` and a rename
+still goes through `set_path`. And a `.gz` whose contents stop being compressed between two
+reads stops being read-only on the reload, because the container is a fact about the bytes
+and the bytes are what was re-read.
+
+Only gzip. `zstd`, `bzip2` and `xz` are all the same shape and each is another decoder in
+the binary; nothing prevents them, and none is here until somebody wants one.

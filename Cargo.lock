@@ -503,6 +503,7 @@ dependencies = [
  "crossterm",
  "directories",
  "encoding_rs",
+ "flate2",
  "ignore",
  "insta",
  "libc",

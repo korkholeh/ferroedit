@@ -25,6 +25,7 @@ use crate::app::table::TableView;
 use crate::app::App;
 use crate::commands::Command;
 use crate::editor::charset::Charset;
+use crate::editor::compression::Compression;
 use crate::editor::document::Document;
 use crate::ui::theme::Theme;
 
@@ -357,6 +358,21 @@ fn readout(app: &App, width: u16, left: u16) -> Vec<Piece> {
     // of short lines.
     if app.settings.word_wrap && table.is_none() {
         pieces.push(piece("Wrap".to_string(), 2));
+    }
+    // What the file was packed in, and whether what is on screen is all of it
+    // (ADR-074). Shown only for a file that was unpacked, and at drop order 1
+    // because it is the piece that says the buffer cannot be saved back — the
+    // one thing about the tab that is not true of every other tab.
+    if let Some(label) = document
+        .map(Document::compression)
+        .and_then(Compression::label)
+    {
+        let cut = if document.is_some_and(Document::is_truncated) {
+            " · cut"
+        } else {
+            ""
+        };
+        pieces.push(piece(format!("{label} · read-only{cut}"), 1));
     }
     // The charset the file was decoded with, which since ADR-059 is not always
     // UTF-8 — and is the piece that opens the picker that changes it.

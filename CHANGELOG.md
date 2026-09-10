@@ -10,7 +10,21 @@ version, so that heading becomes the new version's on the way out (see
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **Gzipped files open on their text.** A file whose bytes say gzip — `dump.sql.gz`, a
+  rotated `.log.gz` — is unpacked as it is read, so looking inside one no longer means
+  unpacking it to a temporary file first. The grammar comes from the name inside the
+  container, so a `.sql.gz` is highlighted as SQL, and the charset is sniffed from what
+  came out rather than assumed (ADR-074).
+- The buffer is **read-only**: the editor unpacks and never packs, so typing, Cut, Paste,
+  Replace and `Ctrl+S` are refused and say so. Everything that reads still works —
+  motion, selection, Copy, Find, wrapping, `F5`, Reopen with Encoding. *Save As* is the
+  way out: it writes the text as an ordinary file, and the tab becomes one.
+- Unpacking stops at 64 MB. A longer stream opens on its beginning, cut back to a whole
+  line, and says so both when the tab opens and on the status bar for as long as it is
+  open; *Save As* is refused while a buffer is cut.
+
 
 ## [0.1.6] — 2026-09-10
 

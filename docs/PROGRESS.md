@@ -816,7 +816,18 @@ the per-file quit walk, the Open browser and green CI done)
   plain comparison fails: macOS puts a temporary directory behind a symbolic link and
   `git rev-parse --show-toplevel` answers with the resolved path, so the root was not a
   prefix of the file.
-- 1015 tests (was 989); the config picker's own tests went with it.
+- **Gzipped files open on their text** (SPEC §70, ADR-074). A file whose first bytes are
+  `1F 8B` is unpacked before it is decoded, so `dump.sql.gz` opens as SQL — the grammar
+  comes from the name inside the container, the charset is sniffed from what came out, and
+  the NUL guard runs on the decoded text, which is what still refuses a `.tar.gz`. The
+  buffer is read-only: `mutate` refuses every command that changes the text and
+  `Document::save` fails before it opens the file, while motion, selection, Copy, Find,
+  `F5` and Reopen with Encoding are untouched. Save As is the way out and goes through
+  `Document::save_to`, which drops the container; a rename still goes through `set_path`,
+  which keeps it. Unpacking stops at 64 MB, cut back to the last line break, announced when
+  the tab opens and on the status bar for as long as it is; Save As is refused while a
+  buffer is cut. `flate2` was already linked under syntect, so the binary gained nothing.
+- 1044 tests (was 1015); the config picker's own tests went with it.
 
 ## Known issues
 

@@ -17,6 +17,7 @@ use crate::app::{App, LastClick, SidebarMode};
 use crate::commands::{Command, FileOp, MenuEntry, MENUS};
 use crate::config::ThemeKind;
 use crate::editor::charset::Charset;
+use crate::editor::compression::Compression;
 use crate::editor::coords::{CharIdx, VisualCol};
 use crate::editor::csv::{Dialect, Record, WriteError};
 use crate::editor::cursor::Motion;
@@ -338,12 +339,12 @@ pub fn execute_command(app: &mut App, command: Command) {
         }
         Command::SelectAll => edit(app, Document::select_all),
 
-        Command::InsertChar(ch) => edit(app, |document| document.insert_char(ch)),
-        Command::InsertText(text) => edit(app, |document| document.insert_text(&text)),
-        Command::InsertNewline => edit(app, Document::insert_newline),
-        Command::Backspace => edit(app, Document::backspace),
-        Command::Delete => edit(app, Document::delete),
-        Command::DeleteLine => edit(app, Document::delete_line),
+        Command::InsertChar(ch) => mutate(app, |document| document.insert_char(ch)),
+        Command::InsertText(text) => mutate(app, |document| document.insert_text(&text)),
+        Command::InsertNewline => mutate(app, Document::insert_newline),
+        Command::Backspace => mutate(app, Document::backspace),
+        Command::Delete => mutate(app, Document::delete),
+        Command::DeleteLine => mutate(app, Document::delete_line),
 
         Command::DialogListMove(delta) => {
             let height = list_height(app);
@@ -616,6 +617,15 @@ fn edit(app: &mut App, operation: impl FnOnce(&mut Document)) {
     let Some(tab) = app.active_mut() else { return };
     operation(&mut tab.document);
     tab.follow_cursor(view);
+}
+
+/// The same for an operation that *changes* the text rather than only the
+/// caret, which is the one thing a read-only buffer refuses (ADR-074).
+fn mutate(app: &mut App, operation: impl FnOnce(&mut Document)) {
+    if refuse_read_only(app) {
+        return;
+    }
+    edit(app, operation);
 }
 
 /// The same for an operation that has to know the shape of the pane: the
@@ -951,6 +961,24 @@ fn refuse_in_table(app: &mut App) -> bool {
     }
     app.notifications
         .info("That works on the text — F4 shows it");
+    true
+}
+
+/// Says why a command that changes the text did nothing over a file the editor
+/// only unpacked, and whether it did (ADR-074).
+///
+/// The message names the way out: the buffer is real text and Save As writes it
+/// out as a file of its own, which is the whole of what "read-only" costs here.
+fn refuse_read_only(app: &mut App) -> bool {
+    let Some(compression) = app
+        .active()
+        .map(|tab| tab.document.compression())
+        .and_then(Compression::label)
+    else {
+        return false;
+    };
+    app.notifications
+        .info(format!("Read-only ({compression}) — Save As writes it out"));
     true
 }
 
@@ -1666,6 +1694,10 @@ fn ready_to_replace(app: &mut App) -> bool {
     if refuse_in_table(app) {
         return false;
     }
+    // And by the same rule again over a file that was only unpacked (ADR-074).
+    if refuse_read_only(app) {
+        return false;
+    }
     if app.search.query.value.is_empty() {
         open_search(app, true);
         return false;
@@ -2048,6 +2080,12 @@ fn undo_redo(app: &mut App, undo: bool) {
 /// that cannot reach the terminal is reported the same way and the editor
 /// carries on — a copy failing must never cost the user their edit (ADR-005).
 fn copy_selection(app: &mut App, cut: bool) {
+    // A cut is an edit, so it is refused over a read-only buffer — but a plain
+    // copy is not, and taking a line out of a `dump.sql.gz` is most of why one
+    // is open (ADR-074).
+    if cut && refuse_read_only(app) {
+        return;
+    }
     let Some(text) = app.active().and_then(|tab| tab.document.selected_text()) else {
         app.notifications.warning("Nothing selected");
         return;
@@ -2557,10 +2595,23 @@ fn save_tab_as(app: &mut App, index: usize, base: &Path, typed: &str) {
             return;
         }
     }
+    // Writing out a buffer that holds only the first part of a very large
+    // stream would put a file on disk that looks whole and is not (ADR-074).
+    if app
+        .editor_at(index)
+        .is_some_and(|tab| tab.document.is_truncated())
+    {
+        app.notifications
+            .warning("Only the first part of this file was read — nothing to write out");
+        return;
+    }
     let Some(tab) = app.editor_at_mut(index) else {
         return;
     };
-    tab.document.set_path(path.clone());
+    // `save_to` and not `set_path`: the text is about to be written out as
+    // itself, so the buffer stops being a reading of a packed file and becomes
+    // the file at the new path (ADR-074).
+    tab.document.save_to(path.clone());
     if save_tab(app, index) {
         // The file may be new, and the explorer is showing the directory it
         // landed in.
@@ -7006,6 +7057,170 @@ five",
             "and nothing was written over it"
         );
         assert_eq!(app.active().unwrap().document.title(), "main.rs");
+    }
+
+    // --- files that arrived packed (ADR-074) --------------------------------
+
+    fn gzipped(text: &str) -> Vec<u8> {
+        use std::io::Write;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(text.as_bytes()).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    /// Opens a `.gz` of `text` in the project at `dir` and focuses it.
+    fn open_packed(app: &mut App, dir: &Path, name: &str, text: &str) {
+        let path = dir.join(name);
+        std::fs::write(&path, gzipped(text)).unwrap();
+        app.open_path(&path, None).unwrap();
+        app.focus = FocusTarget::Editor;
+    }
+
+    #[test]
+    fn typing_into_an_unpacked_file_is_refused_and_says_the_way_out() {
+        let dir = project();
+        let mut app = App::fixture_in(dir.path());
+        open_packed(&mut app, dir.path(), "dump.sql.gz", "select 1;\n");
+
+        execute_command(&mut app, Command::InsertChar('x'));
+
+        assert_eq!(app.active().unwrap().document.line(0), "select 1;");
+        assert!(!app.active().unwrap().document.is_dirty());
+        assert_eq!(
+            app.notifications.current().unwrap().message,
+            "Read-only (gzip) — Save As writes it out"
+        );
+    }
+
+    /// Every other way of changing the text is refused by the same rule.
+    #[test]
+    fn the_other_edits_are_refused_over_an_unpacked_file_too() {
+        let dir = project();
+        for command in [
+            Command::Backspace,
+            Command::Delete,
+            Command::DeleteLine,
+            Command::InsertNewline,
+            Command::InsertText("x".into()),
+        ] {
+            let mut app = App::fixture_in(dir.path());
+            open_packed(&mut app, dir.path(), "dump.sql.gz", "select 1;\n");
+            execute_command(&mut app, command.clone());
+            assert_eq!(
+                app.active().unwrap().document.line(0),
+                "select 1;",
+                "{command:?} changed the buffer"
+            );
+        }
+    }
+
+    /// Reading is the whole point, so everything that only reads still works.
+    #[test]
+    fn moving_and_copying_still_work_over_an_unpacked_file() {
+        let dir = project();
+        let mut app = App::fixture_in(dir.path());
+        open_packed(&mut app, dir.path(), "dump.sql.gz", "select 1;\n");
+
+        execute_command(&mut app, Command::SelectAll);
+        execute_command(&mut app, Command::Copy);
+
+        assert_eq!(app.clipboard.get().unwrap(), "select 1;\n");
+    }
+
+    #[test]
+    fn a_cut_is_refused_over_an_unpacked_file_and_takes_nothing_out() {
+        let dir = project();
+        let mut app = App::fixture_in(dir.path());
+        open_packed(&mut app, dir.path(), "dump.sql.gz", "select 1;\n");
+
+        execute_command(&mut app, Command::SelectAll);
+        execute_command(&mut app, Command::Cut);
+
+        assert_eq!(app.active().unwrap().document.line(0), "select 1;");
+        assert_eq!(
+            app.notifications.current().unwrap().message,
+            "Read-only (gzip) — Save As writes it out"
+        );
+    }
+
+    #[test]
+    fn saving_an_unpacked_file_over_itself_is_refused() {
+        let dir = project();
+        let mut app = App::fixture_in(dir.path());
+        let path = dir.path().join("dump.sql.gz");
+        let packed = gzipped("select 1;\n");
+        std::fs::write(&path, &packed).unwrap();
+        app.open_path(&path, None).unwrap();
+
+        execute_command(&mut app, Command::Save);
+
+        assert!(app
+            .notifications
+            .current()
+            .unwrap()
+            .message
+            .contains("read-only (gzip)"));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            packed,
+            "and the file is byte for byte what it was"
+        );
+    }
+
+    #[test]
+    fn save_as_writes_the_unpacked_text_out_and_the_tab_becomes_a_plain_file() {
+        let dir = project();
+        let mut app = App::fixture_in(dir.path());
+        open_packed(&mut app, dir.path(), "dump.sql.gz", "select 1;\n");
+
+        execute_command(&mut app, Command::SaveAsPrompt);
+        type_into_dialog(&mut app, "dump.sql");
+
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("dump.sql")).unwrap(),
+            "select 1;\n"
+        );
+        assert!(!app.active().unwrap().document.is_read_only());
+        // And the tab is an ordinary one now, so typing lands.
+        app.focus = FocusTarget::Editor;
+        execute_command(&mut app, Command::InsertChar('-'));
+        assert_eq!(app.active().unwrap().document.line(0), "-select 1;");
+    }
+
+    /// A buffer holding only the first part of a stream must not be written
+    /// out under a name that says it is whole (ADR-074).
+    #[test]
+    fn save_as_is_refused_while_only_part_of_the_file_has_been_read() {
+        let dir = project();
+        let mut app = App::fixture_in(dir.path());
+        open_packed(&mut app, dir.path(), "dump.sql.gz", "select 1;\n");
+        app.tab_mut(0).document.pretend_truncated();
+
+        execute_command(&mut app, Command::SaveAsPrompt);
+        type_into_dialog(&mut app, "dump.sql");
+
+        assert!(!dir.path().join("dump.sql").exists());
+        assert_eq!(
+            app.notifications.current().unwrap().message,
+            "Only the first part of this file was read — nothing to write out"
+        );
+    }
+
+    #[test]
+    fn replace_is_refused_over_an_unpacked_file() {
+        let dir = project();
+        let mut app = App::fixture_in(dir.path());
+        open_packed(&mut app, dir.path(), "dump.sql.gz", "select 1;\n");
+        app.search.open(true, Some("select".to_string()));
+        app.search.replacement.value = "update".to_string();
+
+        execute_command(&mut app, Command::ReplaceAll);
+
+        assert_eq!(app.active().unwrap().document.line(0), "select 1;");
+        assert_eq!(
+            app.notifications.current().unwrap().message,
+            "Read-only (gzip) — Save As writes it out"
+        );
     }
 
     #[test]
