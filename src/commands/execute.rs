@@ -1584,6 +1584,19 @@ fn open_search(app: &mut App, replacing: bool) {
     // The hits are found by the next `sync_search`; nothing here has to.
     app.search.invalidate();
     focus_pane(app, FocusTarget::Search);
+    // Said once, when the bar opens, and not again on every letter: the count
+    // reads `Enter` for as long as it applies, and this is the sentence that
+    // explains why (ADR-075).
+    if searching_is_deferred(app) {
+        app.notifications.info("Large file — press Enter to search");
+    }
+}
+
+/// Whether the file in front is past the size the bar answers as you type
+/// (ADR-075).
+fn searching_is_deferred(app: &App) -> bool {
+    app.active()
+        .is_some_and(|tab| tab.document.line_count() > crate::app::search::LIVE_SEARCH_MAX_LINES)
 }
 
 fn close_search(app: &mut App) {
@@ -1608,24 +1621,10 @@ fn step_match(app: &mut App, delta: isize) {
         open_search(app, false);
         return;
     }
-    app.sync_search();
-    let Some(hit) = app.search.step(delta) else {
-        app.notifications
-            .warning(format!("No matches for {}", app.search.query.value));
-        return;
-    };
-    select_match(app, hit);
-    let label = app.search.count_label();
-    app.notifications.info(format!("Match {label}"));
-}
-
-/// Puts the document's selection on a hit and scrolls to it.
-fn select_match(app: &mut App, hit: crate::editor::search::Match) {
-    let view = app.text_view();
-    if let Some(tab) = app.active_mut() {
-        tab.document.select_match(hit);
-        tab.follow_cursor(view);
-    }
+    // Asked for, so it runs whatever the file's size (ADR-075) — and on a file
+    // large enough for the walk to outlive a frame, the step happens when the
+    // walk lands rather than here (ADR-076).
+    app.search_and_step(delta);
 }
 
 /// Rewrites the current hit and steps to the next one.
@@ -1633,7 +1632,7 @@ fn replace_current(app: &mut App) {
     if !ready_to_replace(app) {
         return;
     }
-    app.sync_search();
+    app.search_now();
     let Some(hit) = app.search.current_match() else {
         app.notifications
             .warning(format!("No matches for {}", app.search.query.value));
@@ -1647,7 +1646,7 @@ fn replace_current(app: &mut App) {
     }
     // The hits below the one just rewritten have moved, so the list is found
     // again before anything points into it.
-    app.sync_search();
+    app.search_now();
     app.notifications.info("Replaced 1 match");
 }
 
@@ -1656,7 +1655,7 @@ fn replace_all(app: &mut App) {
     if !ready_to_replace(app) {
         return;
     }
-    app.sync_search();
+    app.search_now();
     if app.search.matches.is_empty() {
         app.notifications
             .warning(format!("No matches for {}", app.search.query.value));
@@ -1669,7 +1668,7 @@ fn replace_all(app: &mut App) {
     let Some(tab) = app.active_mut() else { return };
     let count = tab.document.replace_matches(&matches, &replacement);
     tab.follow_cursor(view);
-    app.sync_search();
+    app.search_now();
     // A truncated list means there are hits this pass did not see. Saying so is
     // the difference between "run it again" and "it silently half worked".
     if truncated {
@@ -6571,7 +6570,34 @@ five",
         for ch in query.chars() {
             execute_command(app, Command::SearchInputChar(ch));
         }
-        app.sync_search();
+        settle_search(app);
+    }
+
+    /// Runs frames until the search stops walking, the way the main loop does
+    /// (ADR-076).
+    ///
+    /// A scan of anything but a small file takes more than one frame's budget,
+    /// so a test that called `sync_search` once would be asserting against a
+    /// walk that had barely started.
+    fn settle_search(app: &mut App) {
+        for _ in 0..10_000 {
+            app.sync_search();
+            if !app.search.is_scanning() {
+                return;
+            }
+        }
+        panic!("the search never landed");
+    }
+
+    /// A one-tab app over a document past `LIVE_SEARCH_MAX_LINES`, with one
+    /// hit on the last line so that finding it means the whole file was walked.
+    fn too_large_to_search_live() -> App {
+        let lines = crate::app::search::LIVE_SEARCH_MAX_LINES + 1;
+        let mut text = "filler\n".repeat(lines - 1);
+        text.push_str("needle\n");
+        let app = searchable(&text);
+        assert!(app.active().unwrap().document.line_count() > lines - 1);
+        app
     }
 
     #[test]
@@ -6605,6 +6631,131 @@ five",
         execute_command(&mut app, Command::SearchToggleCase);
         app.sync_search();
         assert_eq!(app.search.matches.len(), 2);
+    }
+
+    // --- files too large to search as the query is typed (ADR-075) ---------
+
+    #[test]
+    fn a_small_file_is_still_searched_as_the_query_is_typed() {
+        let mut app = searchable("needle\n");
+        execute_command(&mut app, Command::SearchOpen);
+        type_query(&mut app, "needle");
+
+        assert!(!app.search.is_deferred());
+        assert_eq!(app.search.matches.len(), 1);
+    }
+
+    #[test]
+    fn a_large_file_waits_for_enter_instead_of_searching_on_every_letter() {
+        let mut app = too_large_to_search_live();
+        execute_command(&mut app, Command::SearchOpen);
+        type_query(&mut app, "needle");
+
+        assert!(app.search.is_deferred(), "the query has not been run");
+        assert!(app.search.matches.is_empty(), "and nothing is highlighted");
+        assert_eq!(app.search.count_label(), "0/0");
+    }
+
+    #[test]
+    fn enter_runs_the_waiting_query_and_lands_on_its_hit() {
+        let mut app = too_large_to_search_live();
+        execute_command(&mut app, Command::SearchOpen);
+        type_query(&mut app, "needle");
+
+        execute_command(&mut app, Command::FindNext);
+        settle_search(&mut app);
+
+        assert!(!app.search.is_deferred());
+        assert_eq!(app.search.matches.len(), 1);
+        assert_eq!(
+            app.active().unwrap().document.selected_text().as_deref(),
+            Some("needle"),
+            "and the hit is the selection"
+        );
+    }
+
+    /// The next frame must not undo what `Enter` just found.
+    #[test]
+    fn the_hits_survive_the_frame_after_enter() {
+        let mut app = too_large_to_search_live();
+        execute_command(&mut app, Command::SearchOpen);
+        type_query(&mut app, "needle");
+        execute_command(&mut app, Command::FindNext);
+        settle_search(&mut app);
+
+        app.sync_search();
+
+        assert_eq!(app.search.matches.len(), 1);
+        assert!(!app.search.is_deferred());
+    }
+
+    /// Typing again after a search puts the bar back to waiting: the hits on
+    /// hand answer a query the field no longer holds.
+    #[test]
+    fn typing_after_a_search_waits_again() {
+        let mut app = too_large_to_search_live();
+        execute_command(&mut app, Command::SearchOpen);
+        type_query(&mut app, "needle");
+        execute_command(&mut app, Command::FindNext);
+        settle_search(&mut app);
+
+        type_query(&mut app, "s");
+
+        assert!(app.search.is_deferred());
+        assert!(app.search.matches.is_empty());
+    }
+
+    /// Replace asks for an answer the same way `Enter` does, so it must not be
+    /// left holding the empty list the waiting bar has.
+    #[test]
+    fn replace_all_runs_the_search_itself_on_a_large_file() {
+        let mut app = too_large_to_search_live();
+        execute_command(&mut app, Command::ReplaceOpen);
+        type_query(&mut app, "needle");
+        app.search.replacement.value = "found".to_string();
+
+        execute_command(&mut app, Command::ReplaceAll);
+
+        let last = app.active().unwrap().document.line_count() - 2;
+        assert_eq!(app.active().unwrap().document.line(last), "found");
+        assert_eq!(
+            app.notifications.current().unwrap().message,
+            "Replaced 1 matches"
+        );
+    }
+
+    #[test]
+    fn opening_the_bar_on_a_large_file_says_why_it_waits() {
+        let mut app = too_large_to_search_live();
+        execute_command(&mut app, Command::SearchOpen);
+
+        assert_eq!(
+            app.notifications.current().unwrap().message,
+            "Large file — press Enter to search"
+        );
+    }
+
+    #[test]
+    fn opening_the_bar_on_a_small_file_says_nothing() {
+        let mut app = searchable("needle\n");
+        execute_command(&mut app, Command::SearchOpen);
+        assert!(app.notifications.current().is_none());
+    }
+
+    /// The threshold is the last size that still searches live, not the first
+    /// that stops.
+    #[test]
+    fn a_file_exactly_at_the_threshold_is_still_searched_live() {
+        let lines = crate::app::search::LIVE_SEARCH_MAX_LINES;
+        // `n` lines of text is `n` newline-terminated lines plus the empty one
+        // after the last break, so one fewer is written to land on `n`.
+        let mut app = searchable(&"needle\n".repeat(lines - 1));
+        assert_eq!(app.active().unwrap().document.line_count(), lines);
+        execute_command(&mut app, Command::SearchOpen);
+        type_query(&mut app, "needle");
+
+        assert!(!app.search.is_deferred());
+        assert_eq!(app.search.matches.len(), lines - 1);
     }
 
     #[test]
@@ -7185,6 +7336,112 @@ five",
         app.focus = FocusTarget::Editor;
         execute_command(&mut app, Command::InsertChar('-'));
         assert_eq!(app.active().unwrap().document.line(0), "-select 1;");
+    }
+
+    /// The walk of a large file outlives a frame, and the frames it outlives
+    /// are what turn the spinner (ADR-076).
+    #[test]
+    fn a_large_search_animates_over_several_frames() {
+        let mut app = too_large_to_search_live();
+        execute_command(&mut app, Command::SearchOpen);
+        type_query(&mut app, "filler");
+
+        execute_command(&mut app, Command::FindNext);
+        assert!(app.search.is_scanning(), "the walk outlived the keystroke");
+        assert!(
+            !app.search.is_deferred(),
+            "and is no longer waiting to start"
+        );
+
+        let mut labels = Vec::new();
+        for _ in 0..10_000 {
+            if let Some(label) = app.search.scan_label() {
+                labels.push(label);
+            }
+            app.sync_search();
+            if !app.search.is_scanning() {
+                break;
+            }
+        }
+
+        assert!(labels.len() > 1, "more than one frame drew it: {labels:?}");
+        assert!(
+            labels[0] != labels[1],
+            "and the spinner moved between them: {labels:?}"
+        );
+        assert!(
+            labels.iter().all(|l| l.chars().count() <= 8),
+            "each fits the readout: {labels:?}"
+        );
+        assert!(!app.search.is_scanning(), "and the walk landed");
+    }
+
+    /// A small file is walked inside one frame, so no spinner is ever drawn:
+    /// one that appeared for a single frame would be a flicker.
+    #[test]
+    fn a_small_search_never_draws_a_spinner() {
+        let mut app = searchable("needle\n");
+        execute_command(&mut app, Command::SearchOpen);
+        type_query(&mut app, "needle");
+        execute_command(&mut app, Command::FindNext);
+
+        assert!(!app.search.is_scanning());
+        assert_eq!(app.search.scan_label(), None);
+    }
+
+    /// The walk is thrown away when the question changes under it, rather than
+    /// finished and believed.
+    #[test]
+    fn typing_during_a_walk_abandons_it() {
+        let mut app = too_large_to_search_live();
+        execute_command(&mut app, Command::SearchOpen);
+        type_query(&mut app, "filler");
+        execute_command(&mut app, Command::FindNext);
+        assert!(app.search.is_scanning());
+
+        execute_command(&mut app, Command::SearchInputChar('x'));
+        app.sync_search();
+
+        assert!(!app.search.is_scanning(), "the walk was dropped");
+        assert!(
+            app.search.is_deferred(),
+            "and the bar waits to be asked again"
+        );
+        assert!(app.search.matches.is_empty());
+    }
+
+    /// The proof that the walk does not block: `Esc` reaches the editor while
+    /// one is running, and ends it (ADR-076).
+    #[test]
+    fn esc_during_a_walk_closes_the_bar_and_ends_it() {
+        let mut app = too_large_to_search_live();
+        execute_command(&mut app, Command::SearchOpen);
+        type_query(&mut app, "filler");
+        execute_command(&mut app, Command::FindNext);
+        assert!(app.search.is_scanning());
+
+        execute_command(&mut app, Command::SearchClose);
+
+        assert!(!app.search.open);
+        assert!(!app.search.is_scanning(), "and nothing is left walking");
+        assert_eq!(app.focus, FocusTarget::Editor);
+    }
+
+    /// Editing the document under a walk abandons it for the same reason.
+    #[test]
+    fn an_edit_during_a_walk_abandons_it() {
+        let mut app = too_large_to_search_live();
+        execute_command(&mut app, Command::SearchOpen);
+        type_query(&mut app, "filler");
+        execute_command(&mut app, Command::FindNext);
+        assert!(app.search.is_scanning());
+
+        app.focus = FocusTarget::Editor;
+        execute_command(&mut app, Command::InsertChar('z'));
+        app.sync_search();
+
+        assert!(!app.search.is_scanning());
+        assert!(app.search.matches.is_empty());
     }
 
     /// A buffer holding only the first part of a stream must not be written

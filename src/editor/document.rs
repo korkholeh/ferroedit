@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use ropey::{Rope, RopeSlice};
 use thiserror::Error;
@@ -1216,27 +1216,64 @@ impl Document {
 
     // --- search ------------------------------------------------------------
 
-    /// Every occurrence of `query` in the buffer, up to `limit`.
+    /// Every occurrence of `query` in the buffer, up to `limit`, in one go.
     ///
     /// The bool is whether the limit cut the list short: `e` in a five-megabyte
     /// file is half a million hits, and a vector of them is both a memory
     /// spike and a count nobody reads. The bar says `500+` and search still
     /// works — the matches past the limit are simply not offered as
     /// destinations.
+    ///
+    /// Test-only since ADR-076: the bar walks the buffer a frame's worth at a
+    /// time through `find_from`, and nothing in the editor wants the whole
+    /// answer at the cost of the whole frame. It stays because the tests below
+    /// are about *what* is found, and threading a deadline through each of them
+    /// would be noise around the thing they assert.
+    #[cfg(test)]
     pub fn find_all(&self, query: &str, case_sensitive: bool, limit: usize) -> (Vec<Match>, bool) {
         let mut matches = Vec::new();
+        let (_, truncated) = self.find_from(query, case_sensitive, limit, 0, None, &mut matches);
+        (matches, truncated)
+    }
+
+    /// The same walk, started at `from` and allowed to stop early (ADR-076).
+    ///
+    /// `deadline` is what makes the scan of a very large file something a frame
+    /// can do a slice of: hits are appended to `into`, and the line the walk
+    /// stopped at comes back so the next frame can carry on from it. `None` is
+    /// a walk to the end, which is what `find_all` is.
+    ///
+    /// The clock is read every `CLOCK_EVERY` lines rather than on each one. At
+    /// a few hundred nanoseconds a read, one per line would be a measurable
+    /// share of the scan it exists to bound.
+    pub fn find_from(
+        &self,
+        query: &str,
+        case_sensitive: bool,
+        limit: usize,
+        from: usize,
+        deadline: Option<Instant>,
+        into: &mut Vec<Match>,
+    ) -> (usize, bool) {
+        const CLOCK_EVERY: usize = 512;
+        let end = self.line_count();
         if query.is_empty() {
-            return (matches, false);
+            return (end, false);
         }
-        for line in 0..self.line_count() {
+        for line in from..end {
             for (start, end) in search::find_in_line(&self.line(line), query, case_sensitive) {
-                if matches.len() == limit {
-                    return (matches, true);
+                if into.len() == limit {
+                    return (line, true);
                 }
-                matches.push(Match { line, start, end });
+                into.push(Match { line, start, end });
+            }
+            if (line - from) % CLOCK_EVERY == CLOCK_EVERY - 1
+                && deadline.is_some_and(|deadline| Instant::now() >= deadline)
+            {
+                return (line + 1, false);
             }
         }
-        (matches, false)
+        (end, false)
     }
 
     /// Selects a match and leaves the caret at its end.
@@ -1431,6 +1468,8 @@ fn split_terminator(line: RopeSlice<'_>) -> (RopeSlice<'_>, bool) {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::editor::coords::char_len;
 
@@ -2573,6 +2612,51 @@ next
         );
         let (insensitive, _) = document.find_all("foo", false, 100);
         assert_eq!(insensitive.len(), 3, "the third hit is `FOO` on line 3");
+    }
+
+    /// The walk stops when the clock runs out and says where to pick up, and
+    /// picking up from there finds exactly what one pass would have (ADR-076).
+    #[test]
+    fn a_walk_cut_short_resumes_where_it_stopped() {
+        let text = "needle\n".repeat(4_000);
+        let document = Document::from_text(&text, None);
+
+        let mut cut = Vec::new();
+        // A deadline already in the past, so the walk stops at the first check.
+        let (resume, truncated) = document.find_from(
+            "needle",
+            true,
+            1_000_000,
+            0,
+            Some(Instant::now() - Duration::from_millis(1)),
+            &mut cut,
+        );
+        assert!(!truncated, "it ran out of time, not out of room");
+        assert!(resume > 0 && resume < document.line_count(), "at {resume}");
+
+        let (end, _) = document.find_from("needle", true, 1_000_000, resume, None, &mut cut);
+        assert_eq!(end, document.line_count());
+
+        let (whole, _) = document.find_all("needle", true, 1_000_000);
+        assert_eq!(cut, whole, "two passes find what one pass finds");
+    }
+
+    /// A walk started past the end of the buffer lands rather than looping.
+    #[test]
+    fn a_walk_starting_past_the_end_is_over() {
+        let document = Document::from_text("one\ntwo\n", None);
+        let mut into = Vec::new();
+        let (end, truncated) = document.find_from(
+            "o",
+            true,
+            10,
+            document.line_count(),
+            Some(Instant::now()),
+            &mut into,
+        );
+        assert_eq!(end, document.line_count());
+        assert!(!truncated);
+        assert!(into.is_empty());
     }
 
     #[test]

@@ -10,6 +10,8 @@
 //! (`App::sync_search`). Recomputing eagerly at every mutation point would mean
 //! remembering to do it in a dozen commands, and forgetting once.
 
+use std::time::Duration;
+
 use crate::app::input_field::InputField;
 use crate::editor::coords::CharIdx;
 use crate::editor::search::Match;
@@ -21,6 +23,33 @@ use crate::editor::search::Match;
 /// `10000+` and the matches past the limit are simply not offered as
 /// destinations.
 pub const MAX_MATCHES: usize = 10_000;
+
+/// The largest document the bar still searches as the query is typed
+/// (ADR-075).
+///
+/// Finding every hit walks every line and builds a `String` from the rope for
+/// each one, so the cost of a keystroke is the size of the file. Up to a few
+/// thousand lines that is invisible; past it the field goes cold — the letter
+/// appears, then the frame stops for as long as the scan takes, on every
+/// letter. Above this many lines the bar therefore waits to be asked: the query
+/// is answered on `Enter`, and the count reads `Enter` until it is.
+pub const LIVE_SEARCH_MAX_LINES: usize = 5_000;
+
+/// How long one frame may spend walking the buffer for hits (ADR-076).
+///
+/// Eight milliseconds of a sixteen-millisecond frame, so the half that is left
+/// still pays for the highlighter and the draw. A scan longer than this is
+/// picked up again on the next frame, which is what lets the bar animate while
+/// it runs instead of freezing for the length of the file.
+pub const SCAN_BUDGET: Duration = Duration::from_millis(8);
+
+/// The spinner drawn while a scan is spread over frames.
+///
+/// Braille, because every frame of it is one cell wide in every terminal that
+/// draws it at all — a spinner that changes width makes the count beside it
+/// walk left and right, which is the thing the right-aligned readout exists to
+/// prevent.
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// Which of the bar's two fields the caret is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -40,6 +69,64 @@ struct Inputs {
     case_sensitive: bool,
 }
 
+/// A walk of the buffer in progress, carried across frames (ADR-076).
+///
+/// It holds everything the walk needs to be picked up again — where it got to,
+/// what it has found, and what it was looking for — so that a scan whose
+/// question has changed under it can be recognised and thrown away rather than
+/// finished and believed.
+#[derive(Debug)]
+pub(super) struct Scan {
+    inputs: Inputs,
+    /// Where the caret was when the scan was asked for. The current hit is
+    /// chosen against this and not against wherever the caret has since moved,
+    /// so that the answer is to the question that was asked.
+    caret: (usize, CharIdx),
+    /// The next line to look at.
+    line: usize,
+    matches: Vec<Match>,
+    truncated: bool,
+    /// Which frame of the spinner to draw. Advanced once per frame of work, so
+    /// a scan that finishes inside one frame never draws one.
+    tick: usize,
+    /// The step to take when the scan lands — what `Enter` asked for.
+    step: Option<isize>,
+}
+
+impl Scan {
+    /// Where the hits found so far are appended.
+    pub(super) fn matches_mut(&mut self) -> &mut Vec<Match> {
+        &mut self.matches
+    }
+
+    pub(super) fn hits(&self) -> usize {
+        self.matches.len()
+    }
+
+    /// The line the walk is to pick up from.
+    pub(super) fn resume_line(&self) -> usize {
+        self.line
+    }
+
+    /// Records where the walk stopped and advances the spinner.
+    pub(super) fn advance_to(&mut self, line: usize, truncated: bool) {
+        self.line = line;
+        self.truncated = truncated;
+        self.tick += 1;
+    }
+
+    /// Whether there is nothing left to walk: the end of the buffer, or the
+    /// hit limit, which is as much of an answer as the bar ever offers.
+    pub(super) fn has_landed(&self, line_count: usize) -> bool {
+        self.truncated || self.line >= line_count
+    }
+
+    /// The finished walk, taken apart for `set_matches`.
+    pub(super) fn into_result(self) -> (Vec<Match>, bool, (usize, CharIdx), Option<isize>) {
+        (self.matches, self.truncated, self.caret, self.step)
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct SearchState {
     pub open: bool,
@@ -54,6 +141,15 @@ pub struct SearchState {
     pub truncated: bool,
     /// Index into `matches` of the hit the caret is on.
     pub current: Option<usize>,
+    /// Whether the query in the field is waiting for an `Enter` (ADR-075).
+    ///
+    /// Only ever true on a document past `LIVE_SEARCH_MAX_LINES`: everywhere
+    /// else the matches catch up on the next frame and there is nothing to
+    /// wait for.
+    deferred: bool,
+    /// The walk in progress, when the file is large enough for one to take
+    /// more than a frame (ADR-076).
+    scan: Option<Scan>,
     /// Whether `current` was placed by the caret rather than stepped to.
     ///
     /// The difference is what the first `Enter` does: the bar has just pointed
@@ -87,6 +183,128 @@ impl SearchState {
         self.current = None;
         self.truncated = false;
         self.computed = None;
+        self.deferred = false;
+        self.scan = None;
+    }
+
+    /// Drops the hits on hand and waits to be asked again (ADR-075).
+    ///
+    /// The old query's matches are cleared rather than left on screen: they are
+    /// the answer to something the field no longer says, and highlighting
+    /// `sel` while the user has typed `select` is worse than highlighting
+    /// nothing.
+    pub fn defer(&mut self) {
+        self.matches.clear();
+        self.current = None;
+        self.truncated = false;
+        self.computed = None;
+        self.deferred = true;
+        self.scan = None;
+    }
+
+    /// Whether the field holds a query that has not been run yet (ADR-075).
+    pub fn is_deferred(&self) -> bool {
+        self.deferred && !self.query.value.is_empty()
+    }
+
+    /// Whether a walk of the buffer is in flight (ADR-076).
+    ///
+    /// The main loop asks: while this is true it stops blocking for an event,
+    /// so the next frame comes straight away and carries the scan on. It is
+    /// therefore also the whole of the editor's animation clock — nothing else
+    /// wakes an idle terminal, and this stops being true the moment the scan
+    /// lands.
+    pub fn is_scanning(&self) -> bool {
+        self.scan.is_some()
+    }
+
+    /// The spinner and the running count, for the bar's readout (ADR-076).
+    ///
+    /// `None` when nothing is being walked, which on every file small enough to
+    /// search inside one frame is always: a spinner that appears for a single
+    /// frame is a flicker, so one is only ever drawn by a scan that outlived a
+    /// frame and therefore has a second frame to draw it in.
+    pub fn scan_label(&self) -> Option<String> {
+        let scan = self.scan.as_ref()?;
+        Some(format!(
+            "{} {}",
+            SPINNER[scan.tick % SPINNER.len()],
+            scan.matches.len()
+        ))
+    }
+
+    /// Ends any walk in flight — the bar closed, or the answer is already on
+    /// hand.
+    pub fn stop_scan(&mut self) {
+        self.scan = None;
+    }
+
+    /// Drops the hits without asking for them again, for the moments there is
+    /// no document behind the bar to search.
+    pub(super) fn forget_matches(&mut self) {
+        self.matches.clear();
+        self.current = None;
+        self.scan = None;
+    }
+
+    /// Lifts the walk out so the document can be read while it is advanced.
+    pub(super) fn take_scan(&mut self) -> Option<Scan> {
+        self.scan.take()
+    }
+
+    /// Puts a walk that has not landed back for the next frame.
+    pub(super) fn resume_scan(&mut self, scan: Scan) {
+        self.scan = Some(scan);
+    }
+
+    /// Throws away a walk that is no longer the answer to anything — the query,
+    /// the options, the tab or the buffer changed under it.
+    pub(super) fn abandon_stale_scan(&mut self, tab: usize, revision: u64) {
+        let stale = self.scan.as_ref().is_some_and(|scan| {
+            scan.inputs.tab != tab
+                || scan.inputs.revision != revision
+                || scan.inputs.query != self.query.value
+                || scan.inputs.case_sensitive != self.case_sensitive
+        });
+        if stale {
+            self.scan = None;
+        }
+    }
+
+    /// Starts a walk, or hands back the one already going (ADR-076).
+    ///
+    /// `step` is what the caller wants done when it lands, and it is only
+    /// recorded on a *new* scan: a second `Enter` while one is running is a
+    /// user asking again for the answer they are already waiting for, not a
+    /// request to skip a hit they have not been shown.
+    pub(super) fn begin_scan(
+        &mut self,
+        tab: usize,
+        revision: u64,
+        caret: (usize, CharIdx),
+        step: Option<isize>,
+    ) {
+        if self.scan.is_some() {
+            return;
+        }
+        // The query is no longer waiting to be asked for — it is being
+        // answered, and the readout says so with a spinner instead of `Enter`
+        // (ADR-075, ADR-076).
+        self.deferred = false;
+        self.scan = Some(Scan {
+            inputs: Inputs {
+                tab,
+                revision,
+                query: self.query.value.clone(),
+                case_sensitive: self.case_sensitive,
+            },
+            caret,
+            line: 0,
+            matches: Vec::new(),
+            truncated: false,
+            tick: 0,
+            step,
+        });
     }
 
     /// Rows the bar occupies: none, the find row, or find and replace.
@@ -155,6 +373,8 @@ impl SearchState {
         });
         self.current = self.first_at_or_after(caret);
         self.anchored = self.current.is_some();
+        self.deferred = false;
+        self.scan = None;
     }
 
     /// The first hit at or after a caret position, wrapping to the top.

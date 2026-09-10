@@ -25,6 +25,21 @@ version, so that heading becomes the new version's on the way out (see
   line, and says so both when the tab opens and on the status bar for as long as it is
   open; *Save As* is refused while a buffer is cut.
 
+### Changed
+
+- **The find bar waits for `Enter` on files over 5 000 lines.** Finding every hit walks
+  the whole file, which on a 200 000-line log is ~73 ms per keystroke — a field that stops
+  taking input. Above the threshold the query is run when you ask for it: the count reads
+  `Enter` until then, nothing is highlighted, and a line when the bar opens says why.
+  `Enter`, Find Next/Previous and both Replaces work as they always did, whatever the
+  file's size. Smaller files are unchanged (ADR-075).
+- **A search long enough to see now shows a spinner.** The walk is sliced across frames —
+  8 ms of work each, then a redraw — so the editor keeps taking input while it runs and
+  `Esc` still closes the bar. The count's cells show a spinner and the hits found so far
+  (`⠹ 1274`) until it lands, then go back to `3/17`. Measured over a 2 000 000-line log
+  the search drew 106 frames and the window never stopped repainting. A file small enough
+  to search inside one frame shows no spinner at all — a one-frame flicker is worse than
+  nothing — and an idle editor is still never woken to redraw (ADR-076).
 
 ## [0.1.6] — 2026-09-10
 

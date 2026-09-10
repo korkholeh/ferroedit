@@ -1092,6 +1092,65 @@ mod tests {
         assert!(screen.contains(&count), "the readout says {count}");
     }
 
+    /// On a file too large to search as the query is typed, the count's eight
+    /// cells say what the bar is waiting for instead (ADR-075).
+    #[test]
+    fn the_find_bar_asks_for_enter_on_a_file_too_large_to_search_live() {
+        let mut app = app();
+        let lines = crate::app::search::LIVE_SEARCH_MAX_LINES + 1;
+        app.tabs = vec![crate::app::TabItem::editing(crate::app::Tab::scratch(
+            "big.log",
+            &"filler\n".repeat(lines),
+        ))];
+        app.active_tab = Some(0);
+        crate::commands::execute::execute_command(&mut app, crate::commands::Command::SearchOpen);
+        for ch in "filler".chars() {
+            crate::commands::execute::execute_command(
+                &mut app,
+                crate::commands::Command::SearchInputChar(ch),
+            );
+        }
+        app.sync_search();
+
+        let screen = draw(&app, 80, 24).join("\n");
+        assert!(screen.contains("Find:"), "the bar is drawn: {screen}");
+        assert!(
+            screen.contains("Enter"),
+            "the readout asks for it: {screen}"
+        );
+        assert!(!screen.contains("0/0"), "and counts nothing: {screen}");
+    }
+
+    /// While the walk is running, the readout is the spinner and the count of
+    /// what it has found so far (ADR-076).
+    #[test]
+    fn the_find_bar_spins_while_the_search_walks_the_buffer() {
+        let mut app = app();
+        let lines = crate::app::search::LIVE_SEARCH_MAX_LINES + 1;
+        app.tabs = vec![crate::app::TabItem::editing(crate::app::Tab::scratch(
+            "big.log",
+            &"filler\n".repeat(lines),
+        ))];
+        app.active_tab = Some(0);
+        crate::commands::execute::execute_command(&mut app, crate::commands::Command::SearchOpen);
+        for ch in "filler".chars() {
+            crate::commands::execute::execute_command(
+                &mut app,
+                crate::commands::Command::SearchInputChar(ch),
+            );
+        }
+        crate::commands::execute::execute_command(&mut app, crate::commands::Command::FindNext);
+        let label = app.search.scan_label().expect("a walk in flight");
+
+        let rows = draw(&app, 80, 24);
+        let bar = rows
+            .iter()
+            .find(|row| row.contains("Find:"))
+            .expect("the find row");
+        assert!(bar.contains(&label), "the spinner is drawn: {bar}");
+        assert!(!bar.contains("Enter"), "and the waiting hint is not: {bar}");
+    }
+
     #[test]
     fn the_replace_bar_adds_a_row_with_two_buttons() {
         let app = searching("l", true);

@@ -187,10 +187,11 @@ fn run(cli: &Cli) -> Result<()> {
         // Block for the first event, then drain what is already queued, so a
         // paste burst or a fast scroll costs one frame instead of N.
         match next_event(&rx, &app) {
-            Some(event) => handle_event(&mut app, &rects, event),
-            // Timed out waiting for a notification to expire: redraw only.
-            None if !rx_is_alive(&rx) => break,
-            None => {}
+            Wait::Event(event) => handle_event(&mut app, &rects, event),
+            // Woken with nothing queued: a notification due to expire, or a
+            // search with more of the buffer to walk. Redraw only.
+            Wait::Idle => {}
+            Wait::Closed => break,
         }
         while let Ok(event) = rx.try_recv() {
             handle_event(&mut app, &rects, event);
@@ -315,24 +316,48 @@ fn open_cli_files(app: &mut App, cli: &Cli) {
 
 /// Waits for the next event, waking early when a notification is due to expire
 /// so a stale message cannot sit on the status bar of an idle terminal.
-fn next_event(rx: &mpsc::Receiver<AppEvent>, app: &App) -> Option<AppEvent> {
+///
+/// A search still walking the buffer does not wait at all (ADR-076): the next
+/// frame is the one that carries the walk on and draws the next turn of the
+/// spinner, so it is taken as soon as whatever is already queued has been
+/// handled. This is the whole of the editor's animation clock, and it stops the
+/// moment the walk lands — an idle terminal is never woken to draw.
+fn next_event(rx: &mpsc::Receiver<AppEvent>, app: &App) -> Wait {
+    if app.search.is_scanning() {
+        return match rx.try_recv() {
+            Ok(event) => Wait::Event(event),
+            Err(mpsc::TryRecvError::Empty) => Wait::Idle,
+            Err(mpsc::TryRecvError::Disconnected) => Wait::Closed,
+        };
+    }
     match app.notifications.expires_at() {
         Some(deadline) => {
             let timeout = deadline.saturating_duration_since(Instant::now());
             match rx.recv_timeout(timeout) {
-                Ok(event) => Some(event),
-                Err(RecvTimeoutError::Timeout) => None,
-                Err(RecvTimeoutError::Disconnected) => None,
+                Ok(event) => Wait::Event(event),
+                Err(RecvTimeoutError::Timeout) => Wait::Idle,
+                Err(RecvTimeoutError::Disconnected) => Wait::Closed,
             }
         }
-        None => rx.recv().ok(),
+        None => match rx.recv() {
+            Ok(event) => Wait::Event(event),
+            Err(_) => Wait::Closed,
+        },
     }
 }
 
-/// Distinguishes "timed out" from "the input thread is gone" after `next_event`
-/// returns `None`.
-fn rx_is_alive(rx: &mpsc::Receiver<AppEvent>) -> bool {
-    !matches!(rx.try_recv(), Err(mpsc::TryRecvError::Disconnected))
+/// What one turn of the loop got out of the channel.
+///
+/// Three outcomes rather than an `Option`, because "nothing yet" and "the input
+/// thread is gone" are different answers and the only way to tell them apart
+/// used to be a second `try_recv` — which threw away any event that arrived
+/// between the two calls. Rare when the only thing that woke the loop early was
+/// a notification expiring; every frame, once a search is animating.
+enum Wait {
+    Event(AppEvent),
+    /// Woken with nothing to handle: redraw, and go round again.
+    Idle,
+    Closed,
 }
 
 fn handle_event(app: &mut App, rects: &LayoutRects, event: AppEvent) {

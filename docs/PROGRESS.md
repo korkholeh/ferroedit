@@ -827,7 +827,29 @@ the per-file quit walk, the Open browser and green CI done)
   which keeps it. Unpacking stops at 64 MB, cut back to the last line break, announced when
   the tab opens and on the status bar for as long as it is; Save As is refused while a
   buffer is cut. `flate2` was already linked under syntect, so the binary gained nothing.
-- 1044 tests (was 1015); the config picker's own tests went with it.
+- **The find bar waits for `Enter` past 5 000 lines** (SPEC §22, ADR-075). `sync_search`,
+  which runs before every frame, now defers instead of scanning a document over
+  `LIVE_SEARCH_MAX_LINES`; `search_now` is the entry point for the commands that were
+  asked for — `Enter`, Find Next/Previous, Replace, Replace All — and ignores the limit.
+  Measured on a release build with a query that hits nothing: 2.9 ms at 5 000 lines,
+  73 ms at 200 000. While a query waits the hits are dropped rather than left stale, the
+  count reads `Enter` in the warning colour, and opening the bar over a large file says
+  why once.
+- **The find bar spins while it searches** (SPEC §22, ADR-076). `Document::find_from`
+  walks from a line until a deadline; `App::advance_search` keeps an unfinished walk on
+  `SearchState` and the next frame picks it up. `next_event` stops blocking while one is
+  in flight — the editor's only animation clock, and it stops the moment the walk lands.
+  The readout draws a braille spinner and the running hit count; a walk that finishes
+  inside its first budget never reaches a frame, so small files show no spinner. The step
+  `Enter` asked for is carried by the walk and taken on landing, and a walk whose query,
+  options, tab or revision changed under it is dropped rather than finished. Measured on a
+  release build over 2 000 000 lines: 106 spinner frames, input accepted throughout.
+  - Fixed on the way past: the loop told "timed out" from "input thread gone" with a
+    second `try_recv` whose result it discarded, dropping any event that arrived between
+    the two calls. `next_event` now returns `Wait::Event` / `Idle` / `Closed`.
+  - `Document::find_all` is `#[cfg(test)]` now; nothing in the editor wants the whole
+    answer at the cost of the whole frame.
+- 1062 tests (was 1015); the config picker's own tests went with it.
 
 ## Known issues
 

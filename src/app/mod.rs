@@ -20,6 +20,7 @@ pub mod workspace;
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
+use std::time::{Duration, Instant};
 
 use crate::config::Settings;
 use crate::event::AppEvent;
@@ -441,37 +442,138 @@ impl App {
     /// here means none of them has to remember to.
     pub fn sync_search(&mut self) {
         if !self.search.open {
+            self.search.stop_scan();
             return;
+        }
+        self.advance_search(Some(search::SCAN_BUDGET), None, true);
+    }
+
+    /// Runs the search to the end, here and now — Replace and Replace All,
+    /// which act on the whole list and cannot be given a part of it.
+    ///
+    /// This is the one that ignores both `LIVE_SEARCH_MAX_LINES` (ADR-075) and
+    /// the per-frame budget (ADR-076): a large file is why the bar stopped
+    /// answering as the query was typed, and it is not a reason to refuse to
+    /// answer at all.
+    pub fn search_now(&mut self) {
+        self.advance_search(None, None, false);
+    }
+
+    /// Runs the search and steps to a hit when it lands — `Enter`, Find Next,
+    /// Find Previous.
+    ///
+    /// On a file small enough to walk inside one frame this is over before it
+    /// returns and is indistinguishable from doing the work here. On a larger
+    /// one it starts a walk the following frames carry on and animate, and the
+    /// caret moves when the walk lands (ADR-076).
+    pub fn search_and_step(&mut self, delta: isize) {
+        self.advance_search(Some(search::SCAN_BUDGET), Some(delta), false);
+    }
+
+    /// Carries the walk forward by at most `budget`, starting one if there is
+    /// none, and returns whether it landed (ADR-076).
+    ///
+    /// `budget` of `None` is a walk to the end in this call. `step` is what to
+    /// do when it lands, and is recorded only on a walk this call started.
+    fn advance_search(
+        &mut self,
+        budget: Option<Duration>,
+        step: Option<isize>,
+        defer_large: bool,
+    ) -> bool {
+        if !self.search.open {
+            return false;
         }
         let Some(index) = self.active_tab.filter(|i| *i < self.tabs.len()) else {
-            self.search.matches.clear();
-            self.search.current = None;
-            return;
+            self.search.forget_matches();
+            return false;
         };
         let Some(tab) = self.editor_at(index) else {
-            self.search.matches.clear();
-            self.search.current = None;
-            return;
+            self.search.forget_matches();
+            return false;
         };
+        // Copied out rather than held, so the borrow of the tab ends here and
+        // the walk below can be lifted out of `self.search` and put back.
         let revision = tab.document.revision();
-        if self.search.is_current(index, revision) {
-            return;
-        }
+        let line_count = tab.document.line_count();
         let cursor = tab.document.cursor();
-        let caret = (cursor.line, cursor.column);
-        let (matches, truncated) = tab.document.find_all(
-            &self.search.query.value,
-            self.search.case_sensitive,
-            search::MAX_MATCHES,
-        );
+
+        // Already answered. A step asked for now is taken against the hits on
+        // hand, which is what makes a second `Enter` cost nothing.
+        if self.search.is_current(index, revision) {
+            self.search.stop_scan();
+            if let Some(delta) = step {
+                self.step_to_match(delta);
+            }
+            return true;
+        }
+        // A walk whose question changed under it — the query, the options, the
+        // buffer — is thrown away before anything is decided about it, so what
+        // follows sees either a walk that is still the right one or none.
+        self.search.abandon_stale_scan(index, revision);
+        // Past this size the walk is too slow to *start* on a keystroke, so the
+        // query waits to be asked for and the bar says so (ADR-075). Asked
+        // after the answer on hand has been checked, so a frame drawn over a
+        // large file with its hits already found does not throw them away — and
+        // asked only of a file with no walk in flight, because one already
+        // running is the answer the user asked for and these are the frames
+        // that turn its spinner (ADR-076).
+        if defer_large && !self.search.is_scanning() && line_count > search::LIVE_SEARCH_MAX_LINES {
+            self.search.defer();
+            return false;
+        }
+        self.search
+            .begin_scan(index, revision, (cursor.line, cursor.column), step);
+        let Some(mut scan) = self.search.take_scan() else {
+            return false;
+        };
+
+        let deadline = budget.map(|budget| Instant::now() + budget);
+        let (line, truncated) = match self.editor_at(index) {
+            Some(tab) => tab.document.find_from(
+                &self.search.query.value,
+                self.search.case_sensitive,
+                search::MAX_MATCHES,
+                scan.resume_line(),
+                deadline,
+                scan.matches_mut(),
+            ),
+            None => return false,
+        };
+        scan.advance_to(line, truncated);
+        if !scan.has_landed(line_count) {
+            self.search.resume_scan(scan);
+            return false;
+        }
         ::log::debug!(
             "search {:?}: {} hits{}",
             self.search.query.value,
-            matches.len(),
+            scan.hits(),
             if truncated { " (truncated)" } else { "" }
         );
+        let (matches, truncated, caret, step) = scan.into_result();
         self.search
             .set_matches(index, revision, matches, truncated, caret);
+        if let Some(delta) = step {
+            self.step_to_match(delta);
+        }
+        true
+    }
+
+    /// Moves the caret onto the next or previous hit and says where it landed.
+    fn step_to_match(&mut self, delta: isize) {
+        let Some(hit) = self.search.step(delta) else {
+            self.notifications
+                .warning(format!("No matches for {}", self.search.query.value));
+            return;
+        };
+        let view = self.text_view();
+        if let Some(tab) = self.active_mut() {
+            tab.document.select_match(hit);
+            tab.follow_cursor(view);
+        }
+        let label = self.search.count_label();
+        self.notifications.info(format!("Match {label}"));
     }
 
     /// Makes `root` the workspace: the explorer, the git panel and the

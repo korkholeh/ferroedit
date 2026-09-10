@@ -2666,3 +2666,147 @@ and the bytes are what was re-read.
 
 Only gzip. `zstd`, `bzip2` and `xz` are all the same shape and each is another decoder in
 the binary; nothing prevents them, and none is here until somebody wants one.
+
+---
+
+## ADR-075: Past five thousand lines the find bar waits to be asked
+
+**Decision.** `App::sync_search` — the one that runs before every frame — refuses to search
+a document of more than `LIVE_SEARCH_MAX_LINES` (5 000) lines. The query typed into the bar
+is instead *deferred*: the hits on hand are dropped, the count readout says `Enter` in the
+warning colour, and nothing is highlighted until the user asks. `Enter`, Find Next, Find
+Previous, Replace and Replace All all go through a second entry point, `App::search_now`,
+which ignores the limit — a large file is why the bar stopped answering as the query was
+typed, and it is not a reason to refuse to answer at all.
+
+**The cost being avoided.** `Document::find_all` walks every line and builds a `String` from
+the rope for each one, so a keystroke costs the size of the file. Measured on a release
+build, with a query that hits nothing — the worst case, because a query with hits stops
+early at `MAX_MATCHES`:
+
+```text
+  1 000 lines   0.9 ms
+  5 000 lines   2.9 ms
+ 50 000 lines    25 ms
+200 000 lines    73 ms
+```
+
+Seventy-three milliseconds is not a pause, it is a field that stops taking input: the
+letter appears, the frame freezes, the next letter is already queued behind it. Held keys
+and fast typing make it worse, because each keystroke pays the whole cost again for a query
+that is one character further from what the user meant to type.
+
+**Why five thousand.** It is where the scan is still comfortably inside a frame — 2.9 ms
+against the ~16 ms a 60 Hz frame has — with enough room left for the highlighter and the
+draw that share it. It is also, roughly, the size above which a person stops reading a file
+and starts searching it, so the files that lose live search are largely the ones where
+`Enter` was going to be pressed anyway. Note that the debug build is some forty times
+slower at this, which is why the threshold is set from release numbers and not from how the
+editor feels under `cargo run`.
+
+**Why the old hits are dropped rather than left on screen.** They answer a query the field
+no longer holds. Highlighting `sel` while the user has typed `select` is worse than
+highlighting nothing: the marks look like results, and there is no way to tell from the
+screen that they are one keystroke stale. Dropping them makes the bar's state unambiguous —
+either what is highlighted is what the field says, or nothing is highlighted and the count
+says `Enter`.
+
+**Why the readout and not a dialog.** Eight cells were already reserved for `3/17`, and
+`Enter` fits in them. A count of `0/0` in that space would be a lie the user acts on — it
+says "searched, found nothing" when the truth is "not searched yet". The sentence that
+explains *why* is a notification shown once, when the bar opens over a large file, rather
+than on every letter: the readout is the standing reminder and the notification is the
+explanation, which is the same division the status bar and the notifications have
+everywhere else.
+
+**Consequence.** An edit to a large document also defers the search, because the matches
+are addressed by line and column and an edit moves them. That is the same cost being
+avoided from the other side — re-scanning on every keystroke *in the document* is no
+cheaper than re-scanning on every keystroke in the bar — and the bar says `Enter` for the
+same reason and in the same words.
+
+The limit is a constant and not a setting. A setting would need a name, a place in
+`config.json` and a way to explain what it trades, for a number whose right value is
+"wherever the scan stops fitting in a frame" — which is not a judgement the user has the
+information to make. `MAX_MATCHES` in `app/search.rs` is the other half of the same
+guard — the cap on how many hits are collected — and has always been a constant for the
+same reason.
+
+The two-speed field is the log viewer's shape (ADR-068), arrived at from the opposite
+direction: there, typing narrows what is already loaded and `Enter` reaches past it; here,
+typing reaches nothing and `Enter` does the work. Both keep the field's own typing free of
+the expensive answer.
+
+---
+
+## ADR-076: The search walks the buffer a frame at a time, and the bar spins while it does
+
+**Decision.** `Document::find_from` walks the buffer from a given line until a deadline
+passes, and hands back the line it stopped at. `App::advance_search` drives it: a walk that
+does not finish inside a frame's budget — `SCAN_BUDGET`, 8 ms — is kept on `SearchState` and
+picked up by the next frame. While one is in flight the count readout draws a braille
+spinner and the number of hits found so far, `next_event` stops blocking so the next frame
+comes straight away, and the walk lands by putting its matches in place and taking the step
+`Enter` asked for.
+
+**Why.** The bar had no way to say it was working. ADR-075 stopped the search running on
+every keystroke, which fixed the field going cold, but the scan `Enter` starts is the same
+scan — 73 ms over 200 000 lines, and 700 ms over the two million the largest log I tested
+has. A window that stops repainting for most of a second is indistinguishable from one that
+has hung, and the only honest way to show otherwise is to keep drawing, which means not
+holding the loop for the length of the file.
+
+**Why not a worker thread.** It is the obvious answer and it is the wrong shape here. The
+git worker exists because `git` is a subprocess that takes seconds and can be cancelled
+(ADR-030); a search is a read of a buffer the main thread already owns. Handing it to a
+thread would mean either sharing the rope or copying it, a channel and a job id for the
+result, and a rule for what a finished search means when the buffer moved under it — all to
+avoid a walk that is only long because nobody was slicing it. Slicing it costs a line
+number.
+
+**Why 8 ms.** Half a 16 ms frame, so the other half still pays for the highlighter and the
+draw that share it. It also sets the animation's rate: a frame of work plus a frame of
+drawing is a spinner turning about every 10 ms, which reads as motion rather than as a
+stutter. Measured on a release build over 2 000 000 lines, the walk drew 106 spinner frames
+and the editor took input throughout.
+
+**Why the clock reads every 512 lines.** `Instant::now` is a few hundred nanoseconds. One
+read per line over 200 000 lines is a measurable share of the scan the clock exists to
+bound, and no slice needs to be accurate to better than a fraction of a millisecond.
+
+**Why a spinner only ever appears on the second frame.** It is drawn from the walk in
+flight, and a walk that finishes inside its first budget is never in flight when a frame is
+drawn. So every file small enough to search at once — which is every file below the ADR-075
+threshold, and any query that fills `MAX_MATCHES` early — shows no spinner at all, rather
+than a one-frame flicker. The same reason the count is the *running* count: the two together
+say "working, and here is how it is going", which a bare spinner does not.
+
+**Why the step is carried by the walk.** `Enter` cannot step to a hit that has not been
+found yet, and asking the user to press it twice — once to search, once to go — would be the
+implementation showing through. So the walk carries the step it was started for and takes it
+on landing. A second `Enter` while one is running does not add a second step: it is someone
+asking again for the answer they are already waiting for, not asking to skip a hit they have
+not been shown.
+
+**Why a stale walk is thrown away and not finished.** A walk carries the query, the options,
+the tab and the revision it was started under. Any of them changing makes what it is
+building an answer to a question nobody asked, so it is dropped before anything else is
+decided — which is what lets a keystroke during a long search put the bar straight back to
+waiting for `Enter` (ADR-075) instead of finishing a scan of the previous query and
+believing it.
+
+**What this fixed on the way past.** The loop used to tell "timed out" from "the input
+thread is gone" with a second `try_recv` whose result it discarded — so an event that
+arrived between the two calls was dropped. Rare when the only early wake-up was a
+notification expiring; every frame, once a search is animating. `next_event` now returns
+`Wait::Event`, `Wait::Idle` or `Wait::Closed`, and nothing reads from the channel twice.
+
+**Consequence.** The editor's animation clock is exactly this and nothing else: `next_event`
+stops blocking only while a walk is in flight, and starts blocking again the moment it
+lands. An idle terminal is never woken to redraw, which is the property that makes the
+editor usable over ssh and on a battery — and any future animation has to earn the same
+"only while something is genuinely happening" rule rather than adding a frame timer.
+
+`Document::find_all` is now test-only. Nothing in the editor wants the whole answer at the
+cost of the whole frame, but the tests that assert *what* is found are clearer without a
+deadline threaded through each of them.

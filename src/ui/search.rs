@@ -45,8 +45,23 @@ fn render_find_row(
     );
 
     // Right-aligned so the number does not walk left and right as it changes.
-    let count = app.search.count_label();
-    let count_style = if app.search.matches.is_empty() && !app.search.query.value.is_empty() {
+    // On a file too large to search as the query is typed, the same eight cells
+    // say what the bar is waiting for instead of counting nothing (ADR-075):
+    // there is no count until the search has been run, and a `0/0` that means
+    // "not asked yet" is a lie the user would act on.
+    // A walk still running takes the same cells for its spinner and its running
+    // count: the only moving thing on the bar, and the only sign that a long
+    // search is working rather than wedged (ADR-076).
+    let scanning = app.search.scan_label();
+    let deferred = app.search.is_deferred();
+    let count = match (&scanning, deferred) {
+        (Some(label), _) => label.clone(),
+        (None, true) => "Enter".to_string(),
+        (None, false) => app.search.count_label(),
+    };
+    let count_style = if scanning.is_some() {
+        theme.search_bar.fg(theme.search_label)
+    } else if deferred || (app.search.matches.is_empty() && !app.search.query.value.is_empty()) {
         theme.search_bar.fg(theme.warning)
     } else {
         theme.search_bar.fg(theme.chrome_dim)
