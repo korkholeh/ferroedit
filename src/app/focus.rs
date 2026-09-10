@@ -27,6 +27,10 @@ pub enum FocusTarget {
     /// pane, showing a history instead of a document — so the cycle key treats
     /// the three as one stop.
     Log,
+    /// An image tab (ADR-078). It stands where `Editor`, `Diff` and `Log` do —
+    /// the same pane, showing a picture instead of a document — so the cycle
+    /// key treats them all as one stop.
+    Image,
     /// The log's search field, while it has the caret.
     ///
     /// A focus of its own rather than a flag, for the reason the find bar is
@@ -47,7 +51,7 @@ impl FocusTarget {
         // what the editor pane is showing (SPEC §36). Without this the cycle
         // key could not leave a diff: `App::normalize_focus` would put focus
         // straight back on it.
-        let from = if matches!(self, Self::Diff | Self::Log | Self::LogSearch) {
+        let from = if matches!(self, Self::Diff | Self::Log | Self::LogSearch | Self::Image) {
             Self::Editor
         } else {
             self
@@ -69,6 +73,7 @@ impl FocusTarget {
             Self::Search => "Search",
             Self::Diff => "Diff",
             Self::Log => "Log",
+            Self::Image => "Image",
             Self::LogSearch => "Log search",
             Self::Help => "Help",
         }
@@ -111,5 +116,6 @@ mod tests {
         assert_eq!(FocusTarget::Diff.next(), FocusTarget::Explorer);
         assert_eq!(FocusTarget::Log.next(), FocusTarget::Explorer);
         assert_eq!(FocusTarget::LogSearch.next(), FocusTarget::Explorer);
+        assert_eq!(FocusTarget::Image.next(), FocusTarget::Explorer);
     }
 }

@@ -59,6 +59,13 @@ encoding_rs = { version = "0.8.40", default-features = false, features = ["alloc
 # names the pure-Rust `miniz_oxide` explicitly rather than by default, so no
 # later default can pull in a C zlib and break a static musl build (ADR-003).
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# PNG and JPEG on the way in (ADR-078). Decoders only: the editor shows an
+# image and never writes one back, so nothing here encodes. Both are pure Rust,
+# which is what keeps a static musl build working (ADR-003), and `jpeg-decoder`
+# is taken without default features to leave `rayon` out — a thread pool to fill
+# one terminal pane is a dependency tree bought for nothing.
+png = "0.17"
+jpeg-decoder = { version = "0.3", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 # Both are already in the tree under crossterm, so taking them directly costs

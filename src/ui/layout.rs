@@ -130,6 +130,18 @@ pub struct LayoutRects {
     /// the field is open. Read back out of the frame the way `dialog_rows` is,
     /// because how far a list scrolls depends on how much of the pane it got.
     pub log_rows: Option<Rect>,
+    /// The image viewer, when the tab in front is one (ADR-078). The whole
+    /// editor pane, for the reason the diff takes it, and hit-tested before
+    /// the editor's own for the same reason.
+    pub image: Option<Rect>,
+    /// The metadata column inside the viewer's frame, when there is room for
+    /// it. `None` when the column is switched off or the pane is too narrow to
+    /// give it twenty-six columns and still show a picture.
+    pub image_meta: Option<Rect>,
+    /// Where the blocks go: the rest of the viewer's frame. Read back out of
+    /// the frame the way `log_rows` is, because the zoom, the pan and the
+    /// resampling are all measured against it.
+    pub image_canvas: Option<Rect>,
     /// The CSV table, when the tab in front is being read as one (SPEC §65).
     /// The whole editor pane, for the same reason the diff takes it: the view
     /// covers the pane rather than splitting it, and a hit test that finds it
@@ -258,6 +270,9 @@ pub fn compute(area: Rect, app: &App) -> LayoutRects {
         diff: app.diff().map(|_| pane),
         log: app.log().map(|_| pane),
         log_rows: app.log().map(|_| log_rows(app, pane)),
+        image: app.image().map(|_| pane),
+        image_meta: app.image().and_then(|image| image_meta(image, pane)),
+        image_canvas: app.image().map(|image| image_canvas(image, pane)),
         table: app.active().filter(|tab| tab.shows_table()).map(|_| pane),
         search,
         status_bar,
@@ -266,6 +281,33 @@ pub fn compute(area: Rect, app: &App) -> LayoutRects {
         dialog_buttons,
         dialog_list,
         dialog_list_frame,
+    }
+}
+
+/// The metadata column of the image viewer: the left edge of the frame's
+/// inside, when the pane is wide enough to spare it (ADR-078).
+fn image_meta(image: &crate::app::image::ImageState, pane: Rect) -> Option<Rect> {
+    let inner = inset(pane);
+    if !image.meta_fits(inner.width) {
+        return None;
+    }
+    Some(Rect {
+        width: crate::app::image::META_WIDTH,
+        ..inner
+    })
+}
+
+/// What is left of the viewer's frame once the metadata column has had its
+/// share: the cells the picture is drawn into.
+fn image_canvas(image: &crate::app::image::ImageState, pane: Rect) -> Rect {
+    let inner = inset(pane);
+    match image_meta(image, pane) {
+        Some(meta) => Rect {
+            x: inner.x + meta.width,
+            width: inner.width.saturating_sub(meta.width),
+            ..inner
+        },
+        None => inner,
     }
 }
 

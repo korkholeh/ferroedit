@@ -44,7 +44,24 @@ pub fn hit_test(app: &App, rects: &LayoutRects, event: MouseEvent) -> Option<Com
     }
 
     match event.kind {
+        // `Ctrl` and the wheel is zoom wherever a desktop has a zoom, so it is
+        // zoom here. Tested before the plain wheel below, and only over the
+        // picture: everywhere else `Ctrl` changes nothing about a scroll.
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+            if event.modifiers.contains(KeyModifiers::CONTROL)
+                && rects.image.is_some_and(|image| image.contains(at)) =>
+        {
+            let delta = if event.kind == MouseEventKind::ScrollUp {
+                1
+            } else {
+                -1
+            };
+            Some(Command::ImageZoom(delta))
+        }
         MouseEventKind::Down(MouseButton::Left) => left_click(app, rects, at),
+        MouseEventKind::Up(MouseButton::Left) if app.focus == FocusTarget::Image => {
+            Some(Command::ImageRelease)
+        }
         MouseEventKind::Down(MouseButton::Middle) => middle_click(rects, at),
         MouseEventKind::Drag(MouseButton::Left) => drag(app, rects, at),
         // Shift turns the wheel sideways, which is the gesture a terminal
@@ -199,6 +216,15 @@ fn left_click(app: &App, rects: &LayoutRects, at: Position) -> Option<Command> {
         }
         return Some(Command::FocusPane(FocusTarget::Log));
     }
+    // The picture covers the editor pane the same way. A press on it is the
+    // start of a drag rather than only a focus change, because dragging is how
+    // a picture larger than the pane is moved (ADR-078).
+    if let Some(area) = rects.image_canvas.filter(|canvas| canvas.contains(at)) {
+        return Some(Command::ImageGrab(at.x - area.x, at.y - area.y));
+    }
+    if rects.image.is_some_and(|image| image.contains(at)) {
+        return Some(Command::FocusPane(FocusTarget::Image));
+    }
     // The table covers the editor pane the same way, and for the same reason
     // has to be tested before it: a click on a cell must not put a caret in the
     // text behind it (SPEC §65).
@@ -309,7 +335,25 @@ fn editor_click(app: &App, editor: Rect, at: Position) -> Command {
 /// pointer leaves it: a drag that runs off the edge keeps selecting to the edge,
 /// which is what the same gesture does everywhere else.
 fn drag(app: &App, rects: &LayoutRects, at: Position) -> Option<Command> {
-    if rects.menu_popup.is_some() || app.focus != FocusTarget::Editor {
+    if rects.menu_popup.is_some() {
+        return None;
+    }
+    // Dragging a picture moves the picture, so it is clamped into the canvas
+    // rather than abandoned at the edge: a pointer that ran off the pane should
+    // keep panning to the edge, which is what a drag over the editor's text
+    // does too.
+    if app.focus == FocusTarget::Image {
+        let area = rects.image_canvas?;
+        if area.width == 0 || area.height == 0 {
+            return None;
+        }
+        let clamped = Position::new(
+            at.x.clamp(area.x, area.right() - 1),
+            at.y.clamp(area.y, area.bottom() - 1),
+        );
+        return Some(Command::ImageDragTo(clamped.x - area.x, clamped.y - area.y));
+    }
+    if app.focus != FocusTarget::Editor {
         return None;
     }
     // Over a table the drag makes a block of cells rather than a run of
@@ -397,6 +441,12 @@ fn scroll(rects: &LayoutRects, at: Position, delta: i16) -> Option<Command> {
     if rects.log.is_some_and(|log| log.contains(at)) {
         return Some(Command::LogScroll(delta));
     }
+    // The wheel over a picture pans it, in the same eighths the arrows use:
+    // a viewer where the wheel moved by pixels would crawl at 6% and fly at
+    // 800%.
+    if rects.image.is_some_and(|image| image.contains(at)) {
+        return Some(Command::ImagePan(0, delta.signum()));
+    }
     if rects.table.is_some_and(|table| table.contains(at)) {
         return Some(Command::ScrollTable(delta));
     }
@@ -426,6 +476,9 @@ fn scroll(rects: &LayoutRects, at: Position, delta: i16) -> Option<Command> {
 fn scroll_sideways(rects: &LayoutRects, at: Position, delta: i16) -> Option<Command> {
     if rects.diff.is_some_and(|diff| diff.contains(at)) {
         return Some(Command::DiffScrollHorizontal(delta));
+    }
+    if rects.image.is_some_and(|image| image.contains(at)) {
+        return Some(Command::ImagePan(delta.signum(), 0));
     }
     if rects.table.is_some_and(|table| table.contains(at)) {
         return Some(Command::ScrollTableHorizontal(delta));

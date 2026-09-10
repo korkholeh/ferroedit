@@ -7,6 +7,7 @@ pub mod explorer;
 pub mod field;
 pub mod git;
 pub mod help;
+pub mod image;
 pub mod layout;
 pub mod log;
 pub mod menu;
@@ -60,6 +61,8 @@ pub fn render(frame: &mut Frame, app: &App, rects: &LayoutRects, theme: &Theme) 
     if let Some(area) = rects.log {
         log::render(frame, app, area, theme);
     }
+    // The same, for a tab that holds a picture rather than any kind of text.
+    image::render(frame, app, rects, theme);
     // The same, for a file being read as columns rather than as lines.
     if let Some(area) = rects.table {
         table::render(frame, app, area, theme);
@@ -1324,6 +1327,111 @@ mod tests {
             "narrowed: {screen}"
         );
         assert!(screen.contains("fix: a bug"), "{screen}");
+    }
+
+    // --- image viewer (ADR-078) -------------------------------------------
+
+    /// A tab over a picture built in memory: red rows and blue rows,
+    /// alternating, so at one pixel per half-cell the two halves of a rendered
+    /// cell are two different colours.
+    fn app_with_image(width: u32, height: u32) -> App {
+        use crate::app::image::ImageState;
+        use crate::image::{Format, Image};
+
+        let mut rgb = Vec::new();
+        for y in 0..height {
+            for _ in 0..width {
+                if y % 2 == 0 {
+                    rgb.extend_from_slice(&[255, 0, 0]);
+                } else {
+                    rgb.extend_from_slice(&[0, 0, 255]);
+                }
+            }
+        }
+        let image = Image::from_raw(Format::Png, width, height, "RGB 8-bit".into(), false, rgb);
+        let view = ImageState::new(std::path::Path::new("/tmp/flag.png"), image, 4096);
+        let mut app = app();
+        app.tabs.push(crate::app::TabItem::showing(view));
+        app.active_tab = Some(app.tabs.len() - 1);
+        app.focus = FocusTarget::Image;
+        app
+    }
+
+    /// Renders one frame and hands back the buffer, for the tests that are
+    /// about colour rather than about text.
+    fn draw_buffer(app: &App, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let theme = Theme::default();
+        terminal
+            .draw(|frame| {
+                let rects = layout::compute(frame.area(), app);
+                render(frame, app, &rects, &theme);
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn the_viewer_names_the_picture_and_lists_what_it_is() {
+        let mut app = app_with_image(64, 64);
+        app.sync_image();
+        let screen = draw(&app, 100, 24).join("\n");
+        assert!(screen.contains("flag.png — PNG 64×64"), "{screen}");
+        for label in ["Format", "Width", "Height", "Aspect", "Colour", "Zoom"] {
+            assert!(screen.contains(label), "no {label} row: {screen}");
+        }
+    }
+
+    /// The canvas is half blocks and nothing else: every cell carries two
+    /// pixels, so there is no character in it to read (ADR-078).
+    #[test]
+    fn the_picture_is_drawn_in_half_blocks_of_the_colours_it_holds() {
+        let mut app = app_with_image(64, 64);
+        let rects = layout::compute(Rect::new(0, 0, 100, 24), &app);
+        let canvas = rects.image_canvas.expect("the picture has a canvas");
+        app.image_canvas = crate::app::image::Canvas {
+            width: canvas.width,
+            height: canvas.height,
+        };
+        // One image pixel per half-cell, so a cell is one red row over one
+        // blue one.
+        app.image_mut().unwrap().zoom_actual();
+        app.sync_image();
+
+        let buffer = draw_buffer(&app, 100, 24);
+        let cell = &buffer[(canvas.x, canvas.y)];
+        assert_eq!(cell.symbol(), "▀", "the canvas is half blocks");
+        assert_ne!(cell.fg, cell.bg, "two pixel rows, two colours");
+    }
+
+    /// The metadata column goes when the pane cannot spare it, and the picture
+    /// keeps the whole frame.
+    #[test]
+    fn a_narrow_pane_drops_the_metadata_column_rather_than_the_picture() {
+        let mut app = app_with_image(64, 64);
+        app.sync_image();
+        let wide = layout::compute(Rect::new(0, 0, 120, 24), &app);
+        assert!(wide.image_meta.is_some());
+        let narrow = layout::compute(Rect::new(0, 0, 44, 24), &app);
+        assert!(
+            narrow.image_meta.is_none(),
+            "the labels went, not the picture"
+        );
+        assert_eq!(
+            narrow.image_canvas.unwrap().width,
+            narrow.image.unwrap().width - 2,
+            "the canvas is the whole inside of the frame"
+        );
+    }
+
+    #[test]
+    fn the_status_bar_says_where_the_window_is_and_how_big_the_picture_is() {
+        let mut app = app_with_image(1920, 1080);
+        app.sync_image();
+        let screen = draw(&app, 120, 24).join("\n");
+        let bar = screen.lines().last().unwrap().to_string();
+        assert!(bar.contains("PNG 1920×1080"), "{bar}");
+        assert!(bar.contains('%'), "the zoom is on the bar: {bar}");
     }
 
     // --- diff viewer (SPEC §36) -------------------------------------------

@@ -849,7 +849,29 @@ the per-file quit walk, the Open browser and green CI done)
     the two calls. `next_event` now returns `Wait::Event` / `Idle` / `Closed`.
   - `Document::find_all` is `#[cfg(test)]` now; nothing in the editor wants the whole
     answer at the cost of the whole frame.
-- 1062 tests (was 1015); the config picker's own tests went with it.
+- **PNG and JPEG open on the picture** (SPEC §71, ADR-078). A `.png`, `.jpg` or `.jpeg`
+  becomes a `TabItem::Image` — read-only by construction, like the diff and the log, and
+  the second variant `is_at` answers for, so opening one twice re-focuses its tab. The
+  format is sniffed from the first bytes, not the extension; the extension only routes the
+  open, and a file over 64 megapixels is refused on its header. A large image goes down
+  ADR-077's sliced read and parts company with a large log in `finish_pending_open`.
+  `src/image/` is the decoders and nothing else — `png` and `jpeg-decoder`, both pure Rust,
+  the latter without `rayon` — with alpha composited onto a checkerboard on the way out.
+  `app::image::ImageState` is the window: fixed zoom steps from 1/16 to 16×, `Fit` kept as
+  a rule so a resize re-fits, a pan measured in eighths of the visible span, and a block
+  grid resampled by `App::sync_image` once a frame beside `sync_highlight` — averaged when
+  shrinking, nearest when magnifying, and strided past eight pixels an axis so a frame's
+  cost follows the pane rather than the picture (~0.5 ms for a 200×55 pane, whatever the
+  photograph). `ui::image` paints `▀` per cell, two pixels to a cell, in `Color::Rgb` when
+  `COLORTERM` says truecolor and the nearest xterm-256 colour otherwise — the cube and the
+  grey ramp compared, because the cube's own greys are six levels apart. The metadata
+  column is 26 cells and drops itself when under 24 would be left for the picture. The
+  mouse pans with the wheel and a drag and zooms with `Ctrl`+wheel; `Ctrl+S` on a picture
+  says "No file to save".
+  - No View menu entries: five more rows pushed `Theme: Retro` off a 30-row terminal,
+    which the menu test caught. Nothing here is `Alt`-only, so ADR-008 does not ask for
+    them.
+- 1110 tests (was 1015); the config picker's own tests went with it.
 
 ## Known issues
 

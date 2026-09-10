@@ -287,6 +287,26 @@ fn readout(app: &App, width: u16, left: u16) -> Vec<Piece> {
         ];
         return trim(pieces, budget(width, left));
     }
+    // A picture has no cursor and no charset either. What it has is a place in
+    // a raster and a scale, which is what the diff's `position` is for lines
+    // (ADR-078).
+    if let Some(image) = app.image() {
+        let pieces = vec![
+            piece(image.position().trim().to_string(), 0),
+            piece(image.zoom_label(), 0),
+            piece(
+                format!(
+                    "{} {}×{}",
+                    image.image.format.label(),
+                    image.image.width,
+                    image.image.height
+                ),
+                1,
+            ),
+            piece(app.focus.label().to_string(), 2),
+        ];
+        return trim(pieces, budget(width, left));
+    }
     let document = app.active().map(|t| &t.document);
     // One-based, and counted in user-perceived characters rather than in chars
     // or cells, because that is the number a human arrives at (SPEC §38).

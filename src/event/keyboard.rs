@@ -472,6 +472,34 @@ pub static BINDINGS: &[Binding] = &[
     // `s` is the one key that changes what is being shown rather than where in
     // it we are: the staged diff and the unstaged one are different answers.
     diff(NONE, KeyCode::Char('s'), Command::GitDiffToggleSide, "s"),
+    // --- image viewer -----------------------------------------------------
+    // A window over a picture (ADR-078), so the arrows move the window and the
+    // zoom keys are the ones every image viewer has had for thirty years.
+    // Nothing here types.
+    image(KeyCode::Esc, Command::ImageClose, "Esc"),
+    image(KeyCode::Up, Command::ImagePan(0, -1), "Up"),
+    image(KeyCode::Down, Command::ImagePan(0, 1), "Down"),
+    image(KeyCode::Left, Command::ImagePan(-1, 0), "Left"),
+    image(KeyCode::Right, Command::ImagePan(1, 0), "Right"),
+    image(KeyCode::PageUp, Command::ImagePanPage(-1), "PageUp"),
+    image(KeyCode::PageDown, Command::ImagePanPage(1), "PageDown"),
+    image(KeyCode::Char(' '), Command::ImagePanPage(1), "Space"),
+    // `Home` centres rather than going to the top-left corner: the corner of a
+    // photograph is not a place anybody asked to be, and "put it back in the
+    // middle" is what a reader who has panned too far actually wants.
+    image(KeyCode::Home, Command::ImageCentre, "Home"),
+    // `+` and `-`, with `=` beside `+` because that is the unshifted key it
+    // shares, and `_` beside `-` for the same reason.
+    image(KeyCode::Char('+'), Command::ImageZoom(1), "+"),
+    image(KeyCode::Char('='), Command::ImageZoom(1), "="),
+    image(KeyCode::Char('-'), Command::ImageZoom(-1), "-"),
+    image(KeyCode::Char('_'), Command::ImageZoom(-1), "_"),
+    // `0` fits and `1` is actual size — the pair every image viewer and every
+    // browser binds them to.
+    image(KeyCode::Char('0'), Command::ImageZoomFit, "0"),
+    image(KeyCode::Char('1'), Command::ImageZoomActual, "1"),
+    image(KeyCode::Char('m'), Command::ImageToggleMeta, "m"),
+    image(KeyCode::F(5), Command::ImageReload, "F5"),
     // --- log viewer -------------------------------------------------------
     // A list rather than a pager, so the arrows move a selection and not a
     // window — the git panel's axis, in the editor's pane (ADR-068).
@@ -565,6 +593,10 @@ const fn search(
 
 const fn diff(mods: KeyModifiers, code: KeyCode, command: Command, label: &'static str) -> Binding {
     binding(mods, code, Some(FocusTarget::Diff), command, label)
+}
+
+const fn image(code: KeyCode, command: Command, label: &'static str) -> Binding {
+    binding(NONE, code, Some(FocusTarget::Image), command, label)
 }
 
 const fn log_view(code: KeyCode, command: Command, label: &'static str) -> Binding {

@@ -8,6 +8,7 @@
 use std::path::Path;
 
 use crate::app::diff::DiffState;
+use crate::app::image::ImageState;
 use crate::app::log::LogState;
 use crate::app::table::TableView;
 use crate::app::TextView;
@@ -53,6 +54,11 @@ pub enum TabItem {
     /// reason: `App::active` answers `None` for it, so no editing command can
     /// reach it.
     Log(Box<LogState>),
+    /// A picture being looked at (ADR-078). A tab for the reason the three
+    /// above are, and — unlike them — one with a *file* behind it, so `is_at`
+    /// answers for it and opening the same PNG twice re-focuses the tab that
+    /// is already showing it.
+    Image(Box<ImageState>),
 }
 
 impl TabItem {
@@ -112,6 +118,25 @@ impl TabItem {
         Self::Log(Box::new(log))
     }
 
+    pub fn image(&self) -> Option<&ImageState> {
+        match self {
+            Self::Image(image) => Some(image),
+            _ => None,
+        }
+    }
+
+    pub fn image_mut(&mut self) -> Option<&mut ImageState> {
+        match self {
+            Self::Image(image) => Some(image),
+            _ => None,
+        }
+    }
+
+    /// A tab over a picture.
+    pub fn showing(image: ImageState) -> Self {
+        Self::Image(Box::new(image))
+    }
+
     /// What the tab bar draws. A diff says whose diff it is: two tabs called
     /// `main.rs` — one being edited and one being read — would be a strip the
     /// user has to guess at.
@@ -120,6 +145,7 @@ impl TabItem {
             Self::Editor(tab) => tab.document.title().to_string(),
             Self::Diff(diff) => format!("Diff: {}", diff.name()),
             Self::Log(log) => log.name(),
+            Self::Image(image) => image.name(),
         }
     }
 
@@ -134,11 +160,16 @@ impl TabItem {
         self.editor().and_then(|tab| tab.stale)
     }
 
-    /// Whether this is the tab that file is *edited* in. A diff of the same
-    /// file is deliberately not a match: opening the file has to reach the
-    /// buffer, not the diff beside it.
+    /// Whether this is the tab that file is shown in. A diff of the same file
+    /// is deliberately not a match: opening the file has to reach the buffer,
+    /// not the diff beside it. A picture *is* a match, because a picture's tab
+    /// is the only way that file is ever open (ADR-078).
     pub fn is_at(&self, path: &Path) -> bool {
-        self.editor().is_some_and(|tab| tab.is_at(path))
+        match self {
+            Self::Editor(tab) => tab.is_at(path),
+            Self::Image(image) => image.is_at(path),
+            _ => false,
+        }
     }
 }
 

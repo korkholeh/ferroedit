@@ -8,6 +8,35 @@ Unreleased work is collected under **Unreleased**; `scripts/release.sh` cuts a
 version, so that heading becomes the new version's on the way out (see
 [README](README.md#cutting-a-release)).
 
+## [Unreleased]
+
+### Added
+
+- **PNG and JPEG files open on the picture.** A `.png`, `.jpg` or `.jpeg` opens in an image
+  viewer — a read-only tab beside the diffs and the histories — instead of being refused as
+  a binary file. The picture is drawn in coloured half-block characters, so a terminal cell
+  carries two pixels and the picture is not stretched to double height: truecolor where the
+  terminal advertises it, and the nearest xterm-256 colour everywhere else (ADR-078).
+- A **metadata column** down the left of the pane: the file's name and size, the format,
+  the dimensions in pixels and megapixels, the aspect ratio, the colour layout, whether
+  there is an alpha channel, how many bytes on disk each pixel cost, and where the window
+  currently sits. `m` shows and hides it, and a pane too narrow to spare the room drops it
+  rather than the picture.
+- **Zoom and pan.** `+` and `-` step through fixed levels from 1/16 to 16×, `0` fits the
+  whole picture in the pane and keeps it fitted across a resize, `1` is actual size, and
+  the zoom holds the middle of the pane still. The arrows pan by an eighth of what is on
+  screen — the same distance at every scale — `PageUp`/`PageDown` by a whole pane and
+  `Home` recentres. With a mouse: the wheel pans, `Shift`+wheel pans sideways,
+  `Ctrl`+wheel zooms, and dragging moves the picture under the pointer. `F5` re-reads the
+  file and keeps the zoom and the position.
+- Shrinking averages the pixels each half-cell covers and magnifying takes the nearest one,
+  so a photograph reduced forty-fold still looks like the photograph and an icon at 800%
+  shows square pixels. Transparency is composited onto a checkerboard.
+- The format is decided by the file's first bytes, not its name, so a `.png` that is really
+  a JPEG opens as the JPEG it is. A large image is read a slice at a time with the same
+  progress box a large text file gets. Anything over 64 megapixels is refused with a
+  sentence saying so, before anything is allocated on the strength of the header.
+
 ## [0.1.7] — 2026-09-10
 
 ### Added

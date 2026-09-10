@@ -2879,3 +2879,122 @@ walking the buffer, and a large file being read. Both obey the same rule ADR-076
 moment it stops — so an idle terminal is still never woken to redraw. `Document::open_as` is
 now a stamp, a read and `Document::from_bytes`, which is the half a sliced read shares with
 it: there is one place that decides what a pile of bytes from a path means, whoever read them.
+
+---
+
+## ADR-078: A picture is a tab, and a terminal cell holds two pixels
+
+**Decision.** A `.png`, `.jpg` or `.jpeg` opens in an image viewer — a read-only tab beside
+the diffs and the histories (ADR-053, ADR-068). The pane is a metadata column and a picture
+drawn in upper-half-block characters, `▀`, whose foreground is one row of pixels and whose
+background is the next. The window over the picture zooms in fixed steps from 1/16 to 16×
+and pans with the arrows, the wheel and a drag. Two pure-Rust decoders come into the tree —
+`png` and `jpeg-decoder`, the latter without `rayon` — and nothing in the editor ever
+encodes an image.
+
+**Why a tab and not a preview.** Every read-only pane the editor has is a tab, for the
+reason ADR-037 gave for the diff: opening, keeping, switching away from and closing all had
+answers for tabs already, and none of them had answers for a fourth kind of overlay. It also
+settles read-only by construction rather than by a guard in forty commands — `App::active`
+answers `None` for a picture, so no editing command can reach one — and it is what makes a
+double-click in the explorer work on a PNG without the explorer knowing what a PNG is.
+
+**Why it is worth having at all.** A repository is full of images: screenshots in `assets/`,
+icons, a diagram beside a design document, a fixture a test compares against. Before this
+the editor's answer to every one of them was `not a text file` (ADR-059) — correct, and
+useless. The user then leaves the terminal, which over SSH means they do not see the file at
+all.
+
+**Why half blocks.** A terminal cell is about twice as tall as it is wide, so one character
+per pixel is a picture stretched to double height. `▀` splits the cell exactly, and the two
+colours a cell already carries — foreground and background — become two pixels, which makes
+the cell roughly square and doubles the vertical resolution for nothing. Quarter blocks
+would address four pixels and still only have two colours to paint them with, which is a
+texture rather than a picture; braille has eight and only one colour, which is worse again.
+Sixel and the Kitty and iTerm2 graphics protocols would be exact — and would work on a
+minority of the terminals the editor supports, need a fallback anyway, and put a second
+renderer in the tree. The blocks work everywhere, tmux and plain ssh included.
+
+**Why RGB here and indexed everywhere else.** ADR-007 keeps the *theme* to the 256-colour
+palette because Terminal.app approximates RGB badly and a theme has to look the same in
+every terminal. A photograph is the one thing in the editor where fidelity is the point, so
+`COLORTERM=truecolor` gets `Color::Rgb` and everything else gets the nearest xterm-256
+colour — chosen between the 6×6×6 cube and the 24-step grey ramp, because the cube's own
+greys are six levels apart and a grey photograph quantised to six levels is a poster. That
+is the same picture a little coarser, which is what a fallback should be. No setting: the
+variable is the terminal's own claim about itself, and a user who has to configure their
+way to a correct picture has been handed the editor's problem.
+
+**Why averaging down and nearest up.** They are answers to different questions. A 12 MP
+photo in an 80-column pane covers about six hundred pixels per half-cell; nearest-neighbour
+picks one of them and produces a field of stray dots with none of the picture in it, so the
+box is averaged. Magnified, the user is looking *at* the pixels — checking an icon's edge,
+reading a screenshot's text — and an interpolated blur would be hiding the thing they zoomed
+in to see.
+
+**Why the averaging is capped at 64 samples a cell.** At "fit" the box each half-cell covers
+grows with the picture, so without a cap a 64-megapixel photo would cost twenty times what a
+3-megapixel one costs to fill a pane of exactly the same size — and a held arrow key would
+drop below a frame a press. Striding a box larger than eight pixels an axis makes the cost
+follow the *pane* instead: measured on a release build, a 2.8 MP photo in a 200×55 pane
+resamples in ~0.5 ms and a 64 MP one in the same. Sixty-four pixels spread evenly across a
+box of six hundred average to within a shade of all six hundred, which is a difference
+nobody can see and a frame rate everybody can.
+
+**Why the grid is cached in `app` and not built in `ui`.** `ui/` is read-only over `&App`
+(ARCHITECTURE §1) and averaging a twelve-megapixel photo down to a pane is not free.
+`App::sync_image` runs once a frame beside `sync_highlight` and does nothing unless the
+zoom, the pan or the pane has moved — so a picture nobody is touching costs one comparison a
+frame. It is also why `sync_editor_view` now returns true when the canvas changes: the grid
+is built against the pane, and a frame drawn before the pane was known would be a picture at
+the wrong scale.
+
+**Why fixed zoom steps.** `+` then `-` has to land exactly where it started, and `100%` has
+to be a stop the user passes through rather than a value they have to hit. The steps are the
+ones every image viewer offers, which is what makes the percentage beside them mean what it
+means everywhere else. `Fit` is kept as a *rule* rather than resolved to a number, so a
+resized terminal re-fits the picture instead of leaving it at what the old pane needed.
+
+**Why the pan is measured in eighths of the view.** A pan in pixels crawls at 6% and flies
+at 800%. An eighth of what is on screen is the same gesture at every scale, and eight
+presses cross the pane.
+
+**Why the format comes from the bytes.** A `.png` holding a JPEG is what cameras, download
+folders and export scripts produce, and refusing it would be the editor believing a label
+over the file. The extension still decides *which viewer* opens, because that has to be
+answered before the file has been read.
+
+**Why the metadata column.** The questions a picture raises are not the ones a document
+raises — how big, what colour depth, is there transparency, how hard was it compressed — and
+none of them fit on a status bar that already carries a notification and a readout. The
+column is 26 columns wide and drops itself when that would leave under 24 for the picture: a
+viewer that gave the labels more room than the photograph is showing the wrong thing.
+
+**Why alpha is composited at decode time.** The checkerboard is what every image viewer uses
+to say "this is transparent", and 8-pixel squares average to a flat grey when the picture is
+zoomed out, so it never becomes a moiré over the photograph. Compositing once, into the
+raster, keeps the sampler to one code path; the metadata column says the file has an alpha
+channel, so the checkerboard is explained rather than mysterious.
+
+**Why no menu entries.** The View menu is already as tall as a 30-row terminal allows — five
+more rows pushed `Theme: Retro` off the bottom, which the menu test caught. The viewer's keys
+are unmodified single letters, so ADR-008's rule does not apply to them: nothing here is
+reachable only through `Alt`. A mouse alone is still enough — `Ctrl`+wheel zooms, the wheel
+and a drag pan — and both halves are in `docs/SHORTCUTS.md` and on the help screen.
+
+**Why 64 megapixels.** Above every camera and every screenshot — a 50 MP phone photo fits,
+an 8K frame eight times over — and it is what stops a malformed header from turning `Ctrl+O`
+into a twelve-gigabyte allocation. The raster is three bytes a pixel, so the cap is 192 MB.
+The check runs on the header, before anything is allocated on the strength of it.
+
+**Why no EXIF orientation.** `jpeg-decoder` does not parse EXIF, and a viewer that rotated
+some pictures and not others would be harder to reason about than one that always shows the
+pixels as they lie. It is worth adding the first time somebody opens a phone photo sideways.
+
+**Consequence.** `TabItem::is_at` now answers for two variants rather than one: a picture is
+the only way its file is ever open, so opening the same PNG twice re-focuses the tab, exactly
+as it does for a document (SPEC §11) — a diff of a file is still deliberately not a match.
+`DocumentError` gains an `Image` variant, because "the file arrived intact and the decoder
+had something to say about it" is not an I/O failure and reads badly as one. And the sliced
+read (ADR-077) now feeds two destinations: it reads bytes, and `finish_pending_open` is where
+a large PNG and a large log part company.

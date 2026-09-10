@@ -154,6 +154,27 @@ A commit history — the repository's, one file's, or one range of lines' (ADR-0
 | `F5` | Re-read the history |
 | `/` | Search the history |
 
+## Image viewer
+
+A PNG or a JPEG, drawn in coloured half-block characters — two rows of pixels to a terminal cell (ADR-078). It opens in a tab of its own beside the files being edited, and it is a *window*: the arrows move the window over the picture and the zoom keys change how much of it fits.
+
+| Keys | Action |
+|---|---|
+| `Esc` | Close the image tab |
+| `Up` | Pan up |
+| `Down` | Pan down |
+| `Left` | Pan left |
+| `Right` | Pan right |
+| `PageUp` | Pan up a pane |
+| `PageDown` / `Space` | Pan down a pane |
+| `Home` | Centre the image |
+| `+` / `=` | Zoom in |
+| `-` / `_` | Zoom out |
+| `0` | Fit the whole image in the pane |
+| `1` | Zoom to actual size |
+| `m` | Show or hide the metadata column |
+| `F5` | Re-read the image from disk |
+
 ## Log search field
 
 The field `/` opens over a history. Typing narrows the commits already read, which is instant; `Enter` hands the text to `git log --grep`, which searches the whole message and the whole history.
@@ -343,7 +364,7 @@ Every item is a command, and the *Shortcut* column is the same lookup the menu i
 
 ## Mouse
 
-Clicking a row of a dialog's list selects it without choosing it — unlike the explorer's rows (ADR-020), the confirm button is right there and choosing a branch by accident is a checkout. The Open browser is the exception: a click on the row that is *already* selected walks into it, so browsing costs one click a step, and the wheel over its rows moves the selection through them (ADR-051). Clicking in the editor places the cursor, dragging selects, and a double-click selects the word under the pointer. Over a table (SPEC §65) a click selects the cell instead, dragging selects a block of cells, a click on a column's name takes the whole column and one on a record's number takes the whole record; clicking away from a cell being typed into saves it, and the wheel scrolls the grid while `Shift`+wheel moves it sideways. The wheel scrolls the pane under the pointer without moving the cursor. Clicking a tab switches to it; clicking its `×`, or middle-clicking it, closes it. When there are more tabs than fit, the wheel over the tab strip scrolls it sideways and its `‹` and `›` arrows step it one tab at a time. Clicking a row in the explorer opens the file or folds the directory in one click (ADR-020). Clicking a row of the find bar puts the caret in that row's field, and its `[Aa]`, `[Replace]` and `[All]` are clickable — the fallback for terminals that swallow `Alt`. On the status bar, most of the right-hand readout is questions (ADR-058): `Ln 12, Col 8` opens Go to Line, the charset name the encoding picker (ADR-059), `LF` / `CRLF` the line-ending picker, the grammar's name the syntax picker, the branch name the branch picker, and — while a table is showing — `Delim` and `Quote` the two pickers that say how the file is split into columns. Each is a menu entry too, so none of them needs a mouse. What is left — the notification, the focus label, the selection count — reports where you already are and stays inert.
+Clicking a row of a dialog's list selects it without choosing it — unlike the explorer's rows (ADR-020), the confirm button is right there and choosing a branch by accident is a checkout. The Open browser is the exception: a click on the row that is *already* selected walks into it, so browsing costs one click a step, and the wheel over its rows moves the selection through them (ADR-051). Clicking in the editor places the cursor, dragging selects, and a double-click selects the word under the pointer. Over a table (SPEC §65) a click selects the cell instead, dragging selects a block of cells, a click on a column's name takes the whole column and one on a record's number takes the whole record; clicking away from a cell being typed into saves it, and the wheel scrolls the grid while `Shift`+wheel moves it sideways. Over a picture (ADR-078) the wheel pans it, `Shift`+wheel pans it sideways, `Ctrl`+wheel zooms about the middle of the pane, and dragging moves the picture under the pointer. The wheel scrolls the pane under the pointer without moving the cursor. Clicking a tab switches to it; clicking its `×`, or middle-clicking it, closes it. When there are more tabs than fit, the wheel over the tab strip scrolls it sideways and its `‹` and `›` arrows step it one tab at a time. Clicking a row in the explorer opens the file or folds the directory in one click (ADR-020). Clicking a row of the find bar puts the caret in that row's field, and its `[Aa]`, `[Replace]` and `[All]` are clickable — the fallback for terminals that swallow `Alt`. On the status bar, most of the right-hand readout is questions (ADR-058): `Ln 12, Col 8` opens Go to Line, the charset name the encoding picker (ADR-059), `LF` / `CRLF` the line-ending picker, the grammar's name the syntax picker, the branch name the branch picker, and — while a table is showing — `Delim` and `Quote` the two pickers that say how the file is split into columns. Each is a menu entry too, so none of them needs a mouse. What is left — the notification, the focus label, the selection count — reports where you already are and stays inert.
 
 ## Terminal limits
 

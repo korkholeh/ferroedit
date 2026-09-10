@@ -82,6 +82,13 @@ pub enum DocumentError {
     /// six hundred kilobytes of line noise.
     #[error("{path}: not a text file")]
     Binary { path: String },
+    /// A PNG or a JPEG the editor read and could not show (ADR-078).
+    ///
+    /// Its own variant rather than an `Io`, because nothing went wrong with the
+    /// file: it arrived intact and the decoder had something to say about it,
+    /// and that sentence is the whole of what the user needs.
+    #[error("{path}: {reason}")]
+    Image { path: String, reason: String },
     /// A character the file's charset cannot hold, found before anything was
     /// written. The buffer and the file are both untouched.
     #[error("{charset} cannot hold {character:?} — save as UTF-8, or convert")]

@@ -7,6 +7,7 @@ pub mod diff;
 pub mod focus;
 pub mod git;
 pub mod help;
+pub mod image;
 pub mod input_field;
 // Shadows the `log` *crate* inside this file, and only inside this file: the
 // three logging calls below therefore spell it `::log::`. Every other module
@@ -31,6 +32,7 @@ use diff::DiffState;
 use focus::FocusTarget;
 use git::GitState;
 use help::HelpState;
+use image::{Canvas, ImageState};
 use log::LogState;
 use notifications::Notifications;
 use opening::{Opening, SLICED_ABOVE};
@@ -235,6 +237,11 @@ pub struct App {
     /// diff's: the log's search field takes a row off the top of the pane, so
     /// the two are different heights whenever it is open.
     pub log_rows: u16,
+    /// The pane the picture in front was drawn into in the last frame, in
+    /// cells (ADR-078). Geometry like `diff_rows`, and read for the same
+    /// reason: the zoom, the pan and the block grid are all measured against
+    /// the pane, and only a laid-out frame knows how big it is.
+    pub image_canvas: Canvas,
     /// Rows and columns the help screen could show in the last drawn frame.
     /// The width matters as well as the height here, because a note wraps: the
     /// lines are laid out against it, and so is the scroll.
@@ -291,6 +298,7 @@ impl App {
             git_rows: 0,
             diff_rows: 0,
             log_rows: 0,
+            image_canvas: Canvas::default(),
             help_rows: 0,
             help_cols: 0,
             dialog_rows: 0,
@@ -385,6 +393,35 @@ impl App {
         }
     }
 
+    /// The picture in front, when the tab in front is one (ADR-078).
+    pub fn image(&self) -> Option<&ImageState> {
+        self.active_tab
+            .and_then(|i| self.tabs.get(i))
+            .and_then(TabItem::image)
+    }
+
+    pub fn image_mut(&mut self) -> Option<&mut ImageState> {
+        match self.active_tab {
+            Some(index) => self.tabs.get_mut(index).and_then(TabItem::image_mut),
+            None => None,
+        }
+    }
+
+    /// Re-samples the picture in front into the blocks the pane draws
+    /// (ADR-078).
+    ///
+    /// Called once a frame from the run loop, beside `sync_highlight` and for
+    /// the same reason: `ui/` is read-only over `&App`, and averaging a
+    /// twelve-megapixel photo down to a pane is a cache that has to write. It
+    /// is a no-op on every frame where neither the zoom, the pan nor the pane
+    /// has moved.
+    pub fn sync_image(&mut self) {
+        let canvas = self.image_canvas;
+        if let Some(image) = self.image_mut() {
+            image.sync(canvas);
+        }
+    }
+
     /// Keeps focus and the tab in front in step (SPEC §26).
     ///
     /// The two read-only panes are one focus target each, and which of them the
@@ -396,14 +433,17 @@ impl App {
         let front = self.active_tab.and_then(|i| self.tabs.get(i));
         let showing_diff = front.is_some_and(|item| item.diff().is_some());
         let showing_log = front.is_some_and(|item| item.log().is_some());
+        let showing_image = front.is_some_and(|item| item.image().is_some());
         self.focus = match self.focus {
             FocusTarget::Editor if showing_diff => FocusTarget::Diff,
             FocusTarget::Editor if showing_log => FocusTarget::Log,
+            FocusTarget::Editor if showing_image => FocusTarget::Image,
             FocusTarget::Diff if !showing_diff => FocusTarget::Editor,
             // The search field goes with its own tab: switching away from a
             // history has to leave the field as well, or the next pane's keys
             // would be typing into a list that is not on screen.
             FocusTarget::Log | FocusTarget::LogSearch if !showing_log => FocusTarget::Editor,
+            FocusTarget::Image if !showing_image => FocusTarget::Editor,
             other => other,
         };
     }
@@ -650,9 +690,37 @@ impl App {
                 Err(err) => ::log::debug!("{} is not sliceable: {err}", absolute.display()),
             }
         }
+        if is_image_path(&absolute) {
+            let bytes = std::fs::read(&absolute).map_err(|source| DocumentError::Io {
+                path: absolute.display().to_string(),
+                source,
+            })?;
+            self.place_image(&absolute, bytes)?;
+            return Ok(Opened::Now);
+        }
         let document = Document::open_or_create(&absolute)?;
         self.place_document(document, line);
         Ok(Opened::Now)
+    }
+
+    /// Decodes bytes already read and puts the picture in a tab (ADR-078).
+    fn place_image(&mut self, path: &Path, bytes: Vec<u8>) -> Result<(), DocumentError> {
+        let file_bytes = bytes.len() as u64;
+        let image = crate::image::decode(&bytes).map_err(|err| DocumentError::Image {
+            path: path.display().to_string(),
+            reason: err.to_string(),
+        })?;
+        ::log::info!(
+            "{} is a {} {}x{}",
+            path.display(),
+            image.format.label(),
+            image.width,
+            image.height
+        );
+        self.tabs
+            .push(TabItem::showing(ImageState::new(path, image, file_bytes)));
+        self.show_tab(self.tabs.len() - 1, None);
+        Ok(())
     }
 
     /// Whether a path is worth reading a slice at a time (ADR-077).
@@ -699,6 +767,24 @@ impl App {
         }
         let line = opening.line();
         let (path, bytes, disk) = opening.finish();
+        // A large PNG went down the same sliced read as a large log, because
+        // the slow part of opening either of them is the read (ADR-077). It is
+        // here, with the bytes in hand, that the two part company.
+        if is_image_path(&path) {
+            let title = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("image")
+                .to_string();
+            match self.place_image(&path, bytes) {
+                Ok(()) => self.notifications.info(format!("Opened {title}")),
+                Err(err) => {
+                    ::log::error!("could not open {}: {err}", path.display());
+                    self.notifications.error(format!("Failed to open: {err}"));
+                }
+            }
+            return;
+        }
         match Document::from_bytes(&path, bytes, disk, None) {
             Ok(document) => {
                 let title = document.title().to_string();
@@ -743,6 +829,23 @@ impl App {
             tab.follow_cursor(view);
         }
     }
+}
+
+/// Whether a path is one the image viewer opens (ADR-078).
+///
+/// The extension and nothing else, which is the rule the CSV view already
+/// follows (ADR-062): it is what decides *which viewer* a double-click lands
+/// in, and it has to answer before the file has been read. What the file
+/// actually is still decides how it is decoded — a `.png` holding a JPEG opens
+/// as the JPEG it is — so the extension is a route and never a claim.
+pub fn is_image_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            ext.eq_ignore_ascii_case("png")
+                || ext.eq_ignore_ascii_case("jpg")
+                || ext.eq_ignore_ascii_case("jpeg")
+        })
 }
 
 /// What an open did: the file is in front, or it is being read (ADR-077).
@@ -1030,6 +1133,99 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         app.finish_pending_open();
         assert!(app.opening.is_none());
+    }
+
+    /// A one-by-one PNG, so the open path can be tested without a fixture
+    /// file in the repository.
+    #[cfg(test)]
+    fn tiny_png() -> Vec<u8> {
+        use std::io::Write as _;
+        fn crc(bytes: &[u8]) -> u32 {
+            let mut c = 0xFFFF_FFFFu32;
+            for byte in bytes {
+                c ^= u32::from(*byte);
+                for _ in 0..8 {
+                    c = if c & 1 != 0 {
+                        0xEDB8_8320 ^ (c >> 1)
+                    } else {
+                        c >> 1
+                    };
+                }
+            }
+            c ^ 0xFFFF_FFFF
+        }
+        fn chunk(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+            let mut out = (body.len() as u32).to_be_bytes().to_vec();
+            out.extend_from_slice(kind);
+            out.extend_from_slice(body);
+            let mut all = kind.to_vec();
+            all.extend_from_slice(body);
+            out.extend_from_slice(&crc(&all).to_be_bytes());
+            out
+        }
+        let mut ihdr = 1u32.to_be_bytes().to_vec();
+        ihdr.extend_from_slice(&1u32.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&[0, 1, 2, 3]).unwrap();
+        let idat = encoder.finish().unwrap();
+        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+        out.extend(chunk(b"IHDR", &ihdr));
+        out.extend(chunk(b"IDAT", &idat));
+        out.extend(chunk(b"IEND", &[]));
+        out
+    }
+
+    #[test]
+    fn a_png_opens_in_a_viewer_rather_than_as_a_buffer_of_line_noise() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dot.png");
+        std::fs::write(&path, tiny_png()).unwrap();
+
+        let mut app = App::new(Workspace::from_arg(Some(dir.path())).unwrap());
+        assert_eq!(app.open_path(&path, None).unwrap(), Opened::Now);
+        assert_eq!(app.tabs.len(), 1);
+        let image = app.image().expect("the tab in front is a picture");
+        assert_eq!((image.image.width, image.image.height), (1, 1));
+        assert!(app.active().is_none(), "and nothing editable is in front");
+    }
+
+    /// The same file twice is the same tab, exactly as it is for a document
+    /// (SPEC §11) — which is what `TabItem::is_at` answers for a picture.
+    #[test]
+    fn a_picture_already_open_is_re_focused_rather_than_decoded_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dot.png");
+        std::fs::write(&path, tiny_png()).unwrap();
+
+        let mut app = App::new(Workspace::from_arg(Some(dir.path())).unwrap());
+        app.open_path(&path, None).unwrap();
+        app.open_path(&path, None).unwrap();
+        assert_eq!(app.tabs.len(), 1);
+    }
+
+    /// A `.png` that is not one is refused with a sentence about the file, not
+    /// opened as six hundred kilobytes of mojibake.
+    #[test]
+    fn a_file_named_png_that_is_not_one_is_reported_as_such() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lie.png");
+        std::fs::write(&path, b"GIF89a...").unwrap();
+
+        let mut app = App::new(Workspace::from_arg(Some(dir.path())).unwrap());
+        let err = app.open_path(&path, None).unwrap_err();
+        assert!(err.to_string().contains("not a PNG or a JPEG"), "{err}");
+        assert!(app.tabs.is_empty());
+    }
+
+    #[test]
+    fn the_viewer_is_chosen_by_extension_whatever_its_case() {
+        assert!(is_image_path(Path::new("a.png")));
+        assert!(is_image_path(Path::new("a.JPG")));
+        assert!(is_image_path(Path::new("a.jpeg")));
+        assert!(!is_image_path(Path::new("a.png.gz")));
+        assert!(!is_image_path(Path::new("png")));
     }
 
     #[test]

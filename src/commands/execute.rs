@@ -8,6 +8,7 @@ use crate::app::diff::{DiffSource, DiffState, HORIZONTAL_STEP};
 use crate::app::focus::FocusTarget;
 use crate::app::git::NotStarted;
 use crate::app::help::HelpState;
+use crate::app::image::ImageState;
 use crate::app::input_field::InputField;
 use crate::app::log::LogState;
 use crate::app::search::SearchField;
@@ -182,6 +183,27 @@ pub fn execute_command(app: &mut App, command: Command) {
             }
         }
         Command::LogSearchSubmit => search_log(app),
+
+        Command::ImageClose => close_image(app),
+        Command::ImageReload => reload_image(app),
+        Command::ImageZoom(delta) => with_image(app, |image| image.zoom_by(delta)),
+        Command::ImageZoomActual => with_image(app, ImageState::zoom_actual),
+        Command::ImageZoomFit => with_image(app, ImageState::zoom_fit),
+        Command::ImagePan(dx, dy) => with_image(app, |image| image.pan(dx, dy)),
+        Command::ImagePanPage(delta) => with_image(app, |image| image.pan_page(delta)),
+        Command::ImageCentre => with_image(app, ImageState::centre),
+        Command::ImageToggleMeta => with_image(app, |image| image.show_meta = !image.show_meta),
+        // A press on the picture takes the pane's focus as well as the drag:
+        // a click that only focused, and had to be repeated to move anything,
+        // is the thing the git panel's one-click rule exists to avoid.
+        Command::ImageGrab(x, y) => {
+            if app.image().is_some() {
+                app.focus = FocusTarget::Image;
+            }
+            with_image(app, |image| image.grab((x, y)));
+        }
+        Command::ImageDragTo(x, y) => with_image(app, |image| image.drag_to((x, y))),
+        Command::ImageRelease => with_image(app, ImageState::release),
 
         Command::GitOpenConfig => open_git_config(app),
         Command::GitJobFinished(outcome) => finish_git_job(app, &outcome),
@@ -3293,6 +3315,59 @@ fn close_diff(app: &mut App) {
     let Some(index) = app.active_tab else { return };
     if app.tabs[index].diff().is_some() {
         remove_tab(app, index);
+    }
+}
+
+// --- image viewer ----------------------------------------------------------
+
+/// Runs `change` against the picture in front, if that is what is in front.
+///
+/// One helper rather than a `let else` per arm: every one of the viewer's
+/// commands is "do this to the image tab, or do nothing", and eleven copies of
+/// that sentence would be eleven chances to write the ninth one differently.
+fn with_image(app: &mut App, change: impl FnOnce(&mut ImageState)) {
+    if let Some(image) = app.image_mut() {
+        change(image);
+    }
+}
+
+fn close_image(app: &mut App) {
+    let Some(index) = app.active_tab else { return };
+    if app.tabs[index].image().is_some() {
+        remove_tab(app, index);
+    }
+}
+
+/// Re-reads the file and puts the new pixels in the same view (ADR-078).
+///
+/// The zoom and the pan survive, because `F5` here is aimed at a file another
+/// program is rewriting — an export being re-run, a screenshot being retaken —
+/// and the user is looking at one corner of it to see what changed.
+fn reload_image(app: &mut App) {
+    let Some(path) = app.image().map(|image| image.path().to_path_buf()) else {
+        return;
+    };
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            log::error!("could not re-read {}: {err}", path.display());
+            app.notifications.error(format!("Reload failed: {err}"));
+            return;
+        }
+    };
+    let file_bytes = bytes.len() as u64;
+    match crate::image::decode(&bytes) {
+        Ok(image) => {
+            if let Some(view) = app.image_mut() {
+                view.replace(image, file_bytes);
+            }
+            let name = app.image().map(ImageState::name).unwrap_or_default();
+            app.notifications.info(format!("Reloaded {name}"));
+        }
+        Err(err) => {
+            log::error!("could not decode {}: {err}", path.display());
+            app.notifications.error(format!("Reload failed: {err}"));
+        }
     }
 }
 

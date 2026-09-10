@@ -205,6 +205,34 @@ pub enum Command {
     LogSearchEnd,
     LogSearchSubmit,
 
+    // --- image viewer (ADR-078) ------------------------------------------
+    /// Closes the picture and gives the pane behind it its focus back.
+    ImageClose,
+    /// Re-reads the file from disk, keeping the zoom and the pan.
+    ImageReload,
+    /// Steps the zoom, holding the middle of the pane still.
+    ImageZoom(i16),
+    /// Goes to one image pixel per half-cell.
+    ImageZoomActual,
+    /// Goes back to the whole picture in the pane, and stays fitted across a
+    /// resize.
+    ImageZoomFit,
+    /// Moves the window over the picture, in eighths of what it can see.
+    ImagePan(i16, i16),
+    /// A whole pane down or up — `PageDown` and `PageUp`.
+    ImagePanPage(i16),
+    /// Puts the middle of the picture in the middle of the pane.
+    ImageCentre,
+    /// Shows or hides the metadata column.
+    ImageToggleMeta,
+    /// A button pressed over the picture: where the drag that may follow is
+    /// measured from.
+    ImageGrab(u16, u16),
+    /// The pointer moved with the button down — the pixel grabbed follows it.
+    ImageDragTo(u16, u16),
+    /// The button came back up, so the next drag starts from its own press.
+    ImageRelease,
+
     /// Opens `.git/config` in an editor tab (ADR-070).
     GitOpenConfig,
 
@@ -614,6 +642,24 @@ impl Command {
             Self::LogSearchEnd => "Move the caret to the end".into(),
             Self::LogSearchSubmit => "Ask git to search the whole history".into(),
 
+            Self::ImageClose => "Close the image tab".into(),
+            Self::ImageReload => "Re-read the image from disk".into(),
+            Self::ImageZoom(delta) => step(*delta, "Zoom in", "Zoom out"),
+            Self::ImageZoomActual => "Zoom to actual size".into(),
+            Self::ImageZoomFit => "Fit the whole image in the pane".into(),
+            Self::ImagePan(dx, dy) => match (dx, dy) {
+                (0, d) if *d < 0 => "Pan up".into(),
+                (0, _) => "Pan down".into(),
+                (d, _) if *d < 0 => "Pan left".into(),
+                _ => "Pan right".into(),
+            },
+            Self::ImagePanPage(delta) => step(*delta, "Pan down a pane", "Pan up a pane"),
+            Self::ImageCentre => "Centre the image".into(),
+            Self::ImageToggleMeta => "Show or hide the metadata column".into(),
+            Self::ImageGrab(_, _) => "Take hold of the image".into(),
+            Self::ImageDragTo(_, _) => "Drag the image".into(),
+            Self::ImageRelease => "Let go of the image".into(),
+
             Self::GitOpenConfig => "Open .git/config in a tab".into(),
 
             Self::NewFilePrompt => "New file — asks for a name".into(),
@@ -799,6 +845,7 @@ fn pane_name(target: FocusTarget) -> &'static str {
         FocusTarget::Search => "find bar",
         FocusTarget::Diff => "diff viewer",
         FocusTarget::Log => "log viewer",
+        FocusTarget::Image => "image viewer",
         FocusTarget::LogSearch => "log search field",
         FocusTarget::Help => "help screen",
     }

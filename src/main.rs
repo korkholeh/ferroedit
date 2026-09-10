@@ -13,6 +13,7 @@ mod editor;
 mod event;
 mod filesystem;
 mod git;
+mod image;
 mod syntax;
 mod terminal;
 mod ui;
@@ -30,6 +31,7 @@ use log::LevelFilter;
 use simplelog::WriteLogger;
 
 use app::focus::FocusTarget;
+use app::image::Canvas;
 use app::workspace::Workspace;
 use app::{App, EditorView, Opened};
 use cli::Cli;
@@ -155,6 +157,7 @@ fn run(cli: &Cli) -> Result<()> {
         // write (ARCHITECTURE §1). It is a no-op unless the viewport moved or
         // the document changed.
         app.sync_highlight();
+        app.sync_image();
         app.sync_table();
         app.sync_search();
 
@@ -245,6 +248,18 @@ fn sync_editor_view(app: &mut App, rects: &LayoutRects) -> bool {
     // Already the inside of the log's frame, less its field's row, so nothing
     // is subtracted here (ADR-068).
     app.log_rows = rects.log_rows.map_or(0, |rows| rows.height);
+    // The picture's pane, already inside the frame and beside the metadata
+    // column. Unlike the rows above it this one is *returned*: the zoom, the
+    // pan and the block grid are all built against it, so a frame drawn before
+    // it was known would be a picture at the wrong scale (ADR-078).
+    let canvas = rects
+        .image_canvas
+        .map_or(Canvas::default(), |canvas| Canvas {
+            width: canvas.width,
+            height: canvas.height,
+        });
+    let canvas_moved = canvas != app.image_canvas;
+    app.image_canvas = canvas;
     // The help screen wraps its notes, so its width is geometry the scroll
     // depends on as much as its height is (ADR-038).
     app.help_rows = rects.help.map_or(0, |help| help.height.saturating_sub(2));
@@ -258,7 +273,7 @@ fn sync_editor_view(app: &mut App, rects: &LayoutRects) -> bool {
         height: rects.editor.height,
     };
     if view == app.editor_view {
-        return false;
+        return canvas_moved;
     }
     app.editor_view = view;
     let text_view = app.text_view();

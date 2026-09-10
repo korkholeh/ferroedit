@@ -69,6 +69,15 @@ const SECTIONS: &[(Option<FocusTarget>, &str, &str)] = &[
          on as a diff.",
     ),
     (
+        Some(FocusTarget::Image),
+        "Image viewer",
+        "A PNG or a JPEG, drawn in coloured half-block characters — two rows of \
+         pixels to a terminal cell (ADR-078). It opens in a tab of its own \
+         beside the files being edited, and it is a *window*: the arrows move \
+         the window over the picture and the zoom keys change how much of it \
+         fits.",
+    ),
+    (
         Some(FocusTarget::LogSearch),
         "Log search field",
         "The field `/` opens over a history. Typing narrows the commits already \
@@ -198,7 +207,9 @@ moves the selection through them (ADR-051). Clicking in the editor places the cu
 the word under the pointer. Over a table (SPEC §65) a click selects the cell instead, dragging selects a block of \
 cells, a click on a column's name takes the whole column and one on a record's number \
 takes the whole record; clicking away from a cell being typed into saves it, and the \
-wheel scrolls the grid while `Shift`+wheel moves it sideways. The wheel scrolls the pane \
+wheel scrolls the grid while `Shift`+wheel moves it sideways. Over a picture (ADR-078) \
+the wheel pans it, `Shift`+wheel pans it sideways, `Ctrl`+wheel zooms about the middle of \
+the pane, and dragging moves the picture under the pointer. The wheel scrolls the pane \
 under the pointer without moving the cursor. Clicking a tab switches to it; clicking its `×`, or middle-clicking it, \
 closes it. When there are more tabs than fit, the wheel over the tab strip scrolls it \
 sideways and its `‹` and `›` arrows step it one tab at a time. Clicking a row in the explorer opens the file or folds the directory in one \
