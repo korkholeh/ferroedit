@@ -8,6 +8,66 @@ Unreleased work is collected under **Unreleased**; `scripts/release.sh` cuts a
 version, so that heading becomes the new version's on the way out (see
 [README](README.md#cutting-a-release)).
 
+## [0.1.9] — 2026-09-11
+
+### Added
+
+- **A diff says which part of a replaced line changed.** Where a run of removed lines is
+  followed by a run of added lines of the same length, the two are paired off and the part
+  each one does *not* share with its partner is marked with a background — deep green on
+  the addition, deep red on the removal. The `+`/`−` colours and prefixes are unchanged, an
+  unpaired line keeps the whole-line colouring it had, and very long lines and very large
+  blocks fall back to it as well (ADR-082).
+- **The whole message of a commit**, with `m` in the log viewer. The subject column is cut
+  to whatever the pane had room for; this is where the rest of it and the body are read.
+  `Enter` still opens the diff. `c` hides the hash, date and author outright and gives the
+  subject the pane (ADR-080).
+- **Numbers in a table line up on their last digit.** A CSV column whose every non-blank
+  value is a plain number is right-aligned. Versions, dates, times, grouped numbers,
+  percentages and identifiers written with a leading zero are all left alone — the check is
+  deliberately narrow, because right-aligning an identifier lines up the wrong end of it
+  (ADR-081). The name of the column the cursor is in is lifted out of the header's dim.
+- **The image viewer says what its keys are**, on its bottom border, the way the log viewer
+  has since ADR-071.
+
+### Changed
+
+- **Secondary text is readable.** Comments, panel titles, line numbers, menu shortcuts and
+  the status readout were between 2.8:1 and 3.3:1 against what they were drawn on; they are
+  now held to 4:1 by a test that computes the ratio rather than merely checking that two
+  colours differ (ADR-083). In the Retro theme a selected file in an unfocused git panel
+  was a yellow letter on a light grey at 2.2:1, and its notification colours were as low as
+  1.3:1.
+- **The find and replace bar reads as a bar.** It has a ground of its own — neither the
+  editor's above it nor the status bar's below — the two fields are wells on it rather than
+  more rows of the file, and the row being typed into is marked by its label sitting on the
+  highlight bar. `[Aa]` says which way it is pointing with a mark inside the brackets as
+  well as with a colour, `[All]` is now `[Replace all]`, and the two buttons have room
+  between them.
+- **A selected row in the sidebar is marked to the pane's edge**, in both panels, instead of
+  stopping where the name does.
+- **The View menu is eighteen rows instead of twenty-seven**, and so fits a 24-row
+  terminal, where the bottom of it used to be cut off and unreachable. The five theme
+  entries are `Theme…`, the three focus entries are `Focus Pane…`, and the delimiter and
+  the quote character are behind `Table Format…`, which shows what they currently are.
+  Every command they stood for is still there (ADR-079).
+- **The log viewer gives its width to the subjects.** The author column shrinks first, then
+  the date is dropped, then the author, and the abbreviated name last — the subject keeps
+  thirty cells for as long as anything can be given up for it (ADR-080).
+- **A picture opens on the picture.** The metadata column starts closed and `m` opens it;
+  the compact set — the name, the format, the size and the scale — is the frame's own
+  title, which it always was. The column is now three groups under headings, the status bar
+  stops repeating the format and the dimensions, and the readouts say `whole image` where
+  they used to report a corner the window was not at and a region larger than the file
+  (ADR-080).
+
+### Fixed
+
+- The first key pressed in a diff, a history or a picture opened from the command line was
+  swallowed: focus followed the tab in front only after a command had run, and opening a
+  file from the command line is not one. `m` on `ferroedit photo.png` is what found it
+  (ADR-080).
+
 ## [0.1.8] — 2026-09-10
 
 ### Added
@@ -220,7 +280,8 @@ The first release: the editor through Phase 14.
   the help screen, and a quit that asks about each unsaved file in turn.
 - Releases are GitHub Releases, built for four targets.
 
-[Unreleased]: https://github.com/korkholeh/ferroedit/compare/v0.1.8...HEAD
+[Unreleased]: https://github.com/korkholeh/ferroedit/compare/v0.1.9...HEAD
+[0.1.9]: https://github.com/korkholeh/ferroedit/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/korkholeh/ferroedit/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/korkholeh/ferroedit/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/korkholeh/ferroedit/compare/v0.1.5...v0.1.6
