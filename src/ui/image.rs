@@ -12,16 +12,19 @@
 use std::sync::OnceLock;
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::app::focus::FocusTarget;
-use crate::app::image::ImageState;
+use crate::app::image::{ImageState, MetaRow};
 use crate::app::App;
+use crate::commands::Command;
+use crate::event::keyboard;
 use crate::ui::layout::LayoutRects;
 use crate::ui::theme::Theme;
+use unicode_width::UnicodeWidthStr;
 
 /// The glyph the picture is made of: the top half of the cell, so its
 /// foreground is the upper pixel row and its background the lower one.
@@ -44,14 +47,24 @@ pub fn render(frame: &mut Frame, app: &App, rects: &LayoutRects, theme: &Theme) 
     let focused = app.focus == FocusTarget::Image;
     // The editor is drawn underneath, so the ground is taken back first.
     frame.render_widget(Clear, area);
-    let block = Block::new()
+    let position = view.position();
+    let mut block = Block::new()
         .borders(Borders::ALL)
         .border_style(theme.border_for(focused))
         .style(Style::new().bg(theme.background))
         .title(Span::styled(view.title(), theme.panel_title))
         .title_bottom(
-            Line::from(Span::styled(view.position(), Style::new().fg(theme.dim))).right_aligned(),
+            Line::from(Span::styled(position.clone(), Style::new().fg(theme.dim))).right_aligned(),
         );
+    // The keys, on the bottom border beside the readout, as the log viewer's
+    // are (ADR-071). This pane's keys are bare letters too, and one of them is
+    // now what opens the metadata the column used to show unasked (ADR-080) —
+    // a panel nobody knows the key for is a panel that is gone.
+    let room = (area.width as usize).saturating_sub(position.width() + 2);
+    let keys = legend(view, room, theme);
+    if !keys.is_empty() {
+        block = block.title_bottom(Line::from(keys).left_aligned());
+    }
     frame.render_widget(block, area);
 
     if let Some(meta) = rects.image_meta {
@@ -62,34 +75,62 @@ pub fn render(frame: &mut Frame, app: &App, rects: &LayoutRects, theme: &Theme) 
     }
 }
 
+/// The keys of the pane, as spans for its bottom border (ADR-071, ADR-080).
+///
+/// The arrows and the zoom pair are written rather than looked up: `+ / -` is
+/// three keys bound to two commands, and a legend that listed each binding
+/// would be four cells of key for one cell of meaning. Everything else comes
+/// out of the keymap, so it cannot advertise a key that is not bound.
+fn legend(view: &ImageState, room: usize, theme: &Theme) -> Vec<Span<'static>> {
+    let key = |command: &Command| keyboard::binding_for(command).map(|b| b.label);
+    let pieces = [
+        ("↑↓←→", "pan"),
+        ("+ -", "zoom"),
+        (key(&Command::ImageZoomFit).unwrap_or(""), "fit"),
+        (key(&Command::ImageZoomActual).unwrap_or(""), "1:1"),
+        (
+            key(&Command::ImageToggleMeta).unwrap_or(""),
+            if view.show_meta { "hide info" } else { "info" },
+        ),
+        (key(&Command::ImageReload).unwrap_or(""), "reload"),
+        (key(&Command::ImageClose).unwrap_or(""), "close"),
+    ];
+    crate::ui::legend::spans(&pieces, room, theme)
+}
+
 /// The labelled values down the left: what the file is, what the picture is,
-/// and where in it the window sits.
+/// and where in it the window sits (ADR-080).
 ///
 /// The label is dim and the value is not, so the column is read down the values
-/// and the labels are there when one of them needs naming.
+/// and the labels are there when one of them needs naming. A group's heading is
+/// drawn in the panel-title style, which is what the pane's own title is drawn
+/// in: the three groups then read as three, without a rule costing a row each.
 fn render_meta(frame: &mut Frame, view: &ImageState, area: Rect, theme: &Theme) {
     let width = area.width as usize;
     let lines: Vec<Line> = view
         .meta_rows()
         .into_iter()
         .take(area.height as usize)
-        .map(|(label, value)| {
-            if label.is_empty() {
-                return Line::default();
-            }
+        .map(|row| match row {
+            MetaRow::Heading(name) => Line::from(Span::styled(
+                truncate(name, width),
+                theme.panel_title.add_modifier(Modifier::BOLD),
+            )),
             // A fixed label column, so the values line up down the panel; a
             // value too long for what is left is cut rather than wrapped,
             // because a wrapped value would push the row below it off the
             // bottom and take a different one away.
-            let label_width = 9.min(width);
-            let room = width.saturating_sub(label_width + 1);
-            Line::from(vec![
-                Span::styled(
-                    format!("{label:<label_width$} "),
-                    Style::new().fg(theme.dim),
-                ),
-                Span::styled(truncate(&value, room), Style::new().fg(theme.foreground)),
-            ])
+            MetaRow::Value { label, value } => {
+                let label_width = 9.min(width);
+                let room = width.saturating_sub(label_width + 1);
+                Line::from(vec![
+                    Span::styled(
+                        format!("{label:<label_width$} "),
+                        Style::new().fg(theme.dim),
+                    ),
+                    Span::styled(truncate(&value, room), Style::new().fg(theme.foreground)),
+                ])
+            }
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), area);

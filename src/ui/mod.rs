@@ -9,6 +9,7 @@ pub mod git;
 pub mod help;
 pub mod image;
 pub mod layout;
+pub mod legend;
 pub mod log;
 pub mod menu;
 pub mod opening;
@@ -42,7 +43,10 @@ pub fn render(frame: &mut Frame, app: &App, rects: &LayoutRects, theme: &Theme) 
             "Terminal too small\n{}x{} — need at least {MIN_WIDTH}x{MIN_HEIGHT}",
             area.width, area.height
         ))
-        .style(Style::new().fg(theme.warning))
+        // On the chrome, not on the editor's ground: the three notification
+        // colours are bar colours (see `Palette::warning`), and this notice is
+        // the one place one of them was drawn on the pane.
+        .style(theme.status_bar.fg(theme.warning))
         .wrap(Wrap { trim: true });
         frame.render_widget(notice, area);
         return;
@@ -1118,10 +1122,26 @@ mod tests {
         let app = searching("l", false);
         let screen = draw(&app, 80, 24).join("\n");
         assert!(screen.contains("Find:"), "the bar is drawn: {screen}");
-        assert!(screen.contains("[Aa]"), "and its case toggle");
+        // Off, and saying so with the mark inside the brackets rather than
+        // with a colour the screen dump cannot show.
+        assert!(screen.contains("[Aa ]"), "and its case toggle: {screen}");
+        assert!(!screen.contains("[Aa✓]"), "which is off: {screen}");
         // `l` appears four times in `println!("hello")` plus none elsewhere.
         let count = app.search.count_label();
         assert!(screen.contains(&count), "the readout says {count}");
+    }
+
+    /// The toggle's two states differ in what they *say*, not only in what
+    /// colour they are (SPEC §22).
+    #[test]
+    fn the_case_toggle_is_marked_while_it_is_on() {
+        let mut app = searching("l", false);
+        crate::commands::execute::execute_command(
+            &mut app,
+            crate::commands::Command::SearchToggleCase,
+        );
+        let screen = draw(&app, 80, 24).join("\n");
+        assert!(screen.contains("[Aa✓]"), "{screen}");
     }
 
     /// On a file too large to search as the query is typed, the count's eight
@@ -1189,7 +1209,9 @@ mod tests {
         let screen = draw(&app, 80, 24).join("\n");
         assert!(screen.contains("Repl:"));
         assert!(screen.contains("[Replace]"));
-        assert!(screen.contains("[All]"));
+        assert!(screen.contains("[Replace all]"));
+        // Two blank columns between them, so the pair does not read as one.
+        assert!(screen.contains("[Replace]  [Replace all]"), "{screen}");
     }
 
     #[test]
@@ -1273,6 +1295,7 @@ mod tests {
                 author: "Ada".into(),
                 date: "2026-09-10".into(),
                 subject: "feat: the newest thing".into(),
+                body: String::new(),
             },
             Commit {
                 oid: "b".repeat(40),
@@ -1280,6 +1303,7 @@ mod tests {
                 author: "Grace".into(),
                 date: "2026-09-09".into(),
                 subject: "fix: a bug".into(),
+                body: String::new(),
             },
         ];
         let mut log = LogState::new(LogScope::Repository, commits, None);
@@ -1371,13 +1395,27 @@ mod tests {
         terminal.backend().buffer().clone()
     }
 
+    /// A picture opens on the picture: the frame's own title is the compact
+    /// readout — the name, the format, the size and the scale — and the panel
+    /// of labelled values is what `m` asks for (ADR-080).
     #[test]
-    fn the_viewer_names_the_picture_and_lists_what_it_is() {
+    fn the_viewer_names_the_picture_and_opens_on_it() {
         let mut app = app_with_image(64, 64);
         app.sync_image();
         let screen = draw(&app, 100, 24).join("\n");
         assert!(screen.contains("flag.png — PNG 64×64"), "{screen}");
-        for label in ["Format", "Width", "Height", "Aspect", "Colour", "Zoom"] {
+        assert!(!screen.contains("Aspect"), "the panel is closed: {screen}");
+        // And the key that opens it is on the pane's bottom border.
+        assert!(screen.contains("m info"), "{screen}");
+    }
+
+    #[test]
+    fn the_metadata_panel_lists_what_the_picture_is_when_it_is_asked_for() {
+        let mut app = app_with_image(64, 64);
+        app.image_mut().unwrap().show_meta = true;
+        app.sync_image();
+        let screen = draw(&app, 100, 24).join("\n");
+        for label in ["File", "Image", "Aspect", "Colour", "Zoom", "Showing"] {
             assert!(screen.contains(label), "no {label} row: {screen}");
         }
     }
@@ -1409,6 +1447,7 @@ mod tests {
     #[test]
     fn a_narrow_pane_drops_the_metadata_column_rather_than_the_picture() {
         let mut app = app_with_image(64, 64);
+        app.image_mut().unwrap().show_meta = true;
         app.sync_image();
         let wide = layout::compute(Rect::new(0, 0, 120, 24), &app);
         assert!(wide.image_meta.is_some());
@@ -1424,14 +1463,23 @@ mod tests {
         );
     }
 
+    /// The bar says what the pane's own title does not: where in the picture
+    /// the window is, and at what scale (ADR-080).
+    ///
+    /// It used to repeat `PNG 1920×1080`, which is on the frame's title one
+    /// row above it and was in the metadata column beside it as well.
     #[test]
-    fn the_status_bar_says_where_the_window_is_and_how_big_the_picture_is() {
+    fn the_status_bar_says_where_the_window_is_rather_than_repeating_the_title() {
         let mut app = app_with_image(1920, 1080);
         app.sync_image();
         let screen = draw(&app, 120, 24).join("\n");
         let bar = screen.lines().last().unwrap().to_string();
-        assert!(bar.contains("PNG 1920×1080"), "{bar}");
+        assert!(!bar.contains("PNG 1920×1080"), "{bar}");
         assert!(bar.contains('%'), "the zoom is on the bar: {bar}");
+        assert!(
+            bar.contains("whole image") || bar.contains("px"),
+            "and where the window is: {bar}"
+        );
     }
 
     // --- diff viewer (SPEC §36) -------------------------------------------

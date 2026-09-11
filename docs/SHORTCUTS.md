@@ -151,6 +151,8 @@ A commit history — the repository's, one file's, or one range of lines' (ADR-0
 | `Home` | Select the newest commit |
 | `End` | Select the oldest commit listed |
 | `Enter` / `d` | Show the selected commit as a diff |
+| `m` | Read the selected commit's whole message |
+| `c` | Show or hide the hash, date and author |
 | `F5` | Re-read the history |
 | `/` | Search the history |
 
@@ -324,22 +326,15 @@ Every item is a command, and the *Shortcut* column is the same lookup the menu i
 | View | Refresh Explorer | `F5` | Explorer |
 | View | Hidden and Ignored Files | — | — |
 | View | Word Wrap | `Alt+Z` | anywhere |
+| View | Table View | `F4` | Editor |
+| View | Table Format… | — | — |
 | View | Syntax Mode… | — | — |
 | View | Line Endings… | — | — |
 | View | Encoding… | — | — |
-| View | Table View | `F4` | Editor |
-| View | Column Delimiter… | — | — |
-| View | Quote Character… | — | — |
 | View | Scroll Left | `Alt+Left` | Editor |
 | View | Scroll Right | `Alt+Right` | Editor |
-| View | Focus Explorer | — | — |
-| View | Focus Git | — | — |
-| View | Focus Editor | — | — |
-| View | Theme: Dark | — | — |
-| View | Theme: Light | — | — |
-| View | Theme: Dark Simple | — | — |
-| View | Theme: Light Simple | — | — |
-| View | Theme: Retro | — | — |
+| View | Focus Pane… | — | — |
+| View | Theme… | — | — |
 | Git | Refresh | `F5` | Git panel |
 | Git | Stage | — | — |
 | Git | Unstage | — | — |

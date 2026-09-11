@@ -192,6 +192,12 @@ pub enum Command {
     LogScroll(i16),
     /// Opens the diff of the commit the selection is on (ADR-069).
     LogShowCommit,
+    /// Opens the full message of the commit the selection is on (ADR-080).
+    /// The subject column is cut to whatever the pane had left; this is where
+    /// the rest of it — and the body, which never had a column — is read.
+    LogShowMessage,
+    /// Shows or hides the three columns in front of the subject (ADR-080).
+    LogToggleColumns,
     /// Opens the log's search field, and its editing keys. Typing narrows what
     /// was read; `LogSearchSubmit` is what asks git for the whole history.
     LogSearchOpen,
@@ -355,8 +361,13 @@ pub enum Command {
 
     /// Swaps the active tab between the text and the CSV table (SPEC §65).
     ToggleTableView,
+    /// Asks which of the table's two format questions to answer (ADR-079).
+    /// The View menu's one entry for the pair; each row opens the picker that
+    /// was on the menu before.
+    TableFormatPrompt,
     /// Asks what separates the table's columns, and what quotes its fields
-    /// (ADR-062). Both are opened from the status bar as well as the menu.
+    /// (ADR-062). Both are opened from the status bar as well as the menu, and
+    /// now from `TableFormatPrompt` too.
     CsvDelimiterPrompt,
     CsvQuotePrompt,
     /// Reads the file again with a different delimiter or quote character.
@@ -503,6 +514,12 @@ pub enum Command {
     /// (SPEC §43). Re-selecting the theme already on screen is a no-op, so the
     /// file is not rewritten on every visit to the View menu.
     SetTheme(ThemeKind),
+    /// Asks which theme to use (ADR-079): the five `SetTheme` entries that
+    /// used to be the bottom third of the View menu, as one picker.
+    ThemePrompt,
+    /// Asks which pane to give focus to — the three `FocusPane` entries, as
+    /// one picker, for the same reason (ADR-079).
+    FocusPanePrompt,
 
     /// The Help menu's About entry: a message dialog with the version in it.
     ShowAbout,
@@ -629,6 +646,8 @@ impl Command {
             Self::LogShowRow(_) => "Show a commit as a diff".into(),
             Self::LogScroll(delta) => step(*delta, "Scroll down", "Scroll up"),
             Self::LogShowCommit => "Show the selected commit as a diff".into(),
+            Self::LogShowMessage => "Read the selected commit's whole message".into(),
+            Self::LogToggleColumns => "Show or hide the hash, date and author".into(),
             Self::LogSearchOpen => "Search the history".into(),
             Self::LogSearchClose => "Close the search field and show everything".into(),
             Self::LogSearchChar(_) => "Type it into the search field".into(),
@@ -718,6 +737,7 @@ impl Command {
             Self::SetLanguage(name) => format!("Highlight this file as {name}"),
 
             Self::ToggleTableView => "Show this file as a table, or as text".into(),
+            Self::TableFormatPrompt => "Choose how the table is read".into(),
             Self::CsvDelimiterPrompt => "Choose what separates the table's columns".into(),
             Self::CsvQuotePrompt => "Choose what quotes the table's fields".into(),
             Self::SetCsvDelimiter(ch) => format!("Split the columns on {ch:?}"),
@@ -806,6 +826,8 @@ impl Command {
 
             Self::Save => "Save the active file".into(),
             Self::SetTheme(kind) => format!("Use the {} theme", kind.label()),
+            Self::ThemePrompt => "Choose the colour scheme".into(),
+            Self::FocusPanePrompt => "Choose which pane has focus".into(),
             Self::ShowAbout => "About FerroEdit".into(),
             Self::CheckForUpdates => "Ask GitHub whether there is a newer release".into(),
             Self::ToggleUpdateChecks => {
@@ -1000,6 +1022,12 @@ pub static MENUS: &[MenuDef] = &[
             item("Hidden and Ignored Files", Command::ToggleHiddenFiles),
             item("Word Wrap", Command::ToggleWordWrap),
             SEP,
+            // The CSV view stays on the top level — it is the switch that is
+            // actually reached for, and it has a key — while the two questions
+            // about *how* the file is parsed sit behind one entry (ADR-079).
+            item("Table View", Command::ToggleTableView),
+            item("Table Format…", Command::TableFormatPrompt),
+            SEP,
             // The three readouts on the status bar that are now questions
             // (ADR-058). They are here as well as there because a feature that
             // can only be reached with a mouse is a feature a terminal user
@@ -1008,14 +1036,6 @@ pub static MENUS: &[MenuDef] = &[
             item("Line Endings…", Command::LineEndingPrompt),
             item("Encoding…", Command::EncodingPrompt),
             SEP,
-            // The CSV view and the two questions it puts on the status bar
-            // (SPEC §65). Here for the same reason the three above are: the
-            // readouts are only there while the table is showing, and turning
-            // it on has to be reachable from somewhere that always is.
-            item("Table View", Command::ToggleTableView),
-            item("Column Delimiter…", Command::CsvDelimiterPrompt),
-            item("Quote Character…", Command::CsvQuotePrompt),
-            SEP,
             // The sideways window needs entries of its own for the same reason
             // Word Wrap does: `Alt` is a modifier several terminals never
             // deliver, and a command reachable only through one is a command
@@ -1023,21 +1043,8 @@ pub static MENUS: &[MenuDef] = &[
             item("Scroll Left", Command::ScrollEditorHorizontal(-1)),
             item("Scroll Right", Command::ScrollEditorHorizontal(1)),
             SEP,
-            item("Focus Explorer", Command::FocusPane(FocusTarget::Explorer)),
-            item("Focus Git", Command::FocusPane(FocusTarget::GitPanel)),
-            item("Focus Editor", Command::FocusPane(FocusTarget::Editor)),
-            SEP,
-            item("Theme: Dark", Command::SetTheme(ThemeKind::Dark)),
-            item("Theme: Light", Command::SetTheme(ThemeKind::Light)),
-            item(
-                "Theme: Dark Simple",
-                Command::SetTheme(ThemeKind::DarkSimple),
-            ),
-            item(
-                "Theme: Light Simple",
-                Command::SetTheme(ThemeKind::LightSimple),
-            ),
-            item("Theme: Retro", Command::SetTheme(ThemeKind::Retro)),
+            item("Focus Pane…", Command::FocusPanePrompt),
+            item("Theme…", Command::ThemePrompt),
         ],
     },
     MenuDef {
@@ -1118,22 +1125,104 @@ const SEP: MenuEntry = MenuEntry::Separator;
 mod tests {
     use super::*;
 
-    /// A theme nobody can reach is a theme that does not exist: every one of
-    /// them has to be in the View menu.
+    /// A theme nobody can reach is a theme that does not exist.
+    ///
+    /// It used to be five entries at the bottom of the View menu; it is one
+    /// entry and a picker now (ADR-079), so the check is that the entry is
+    /// there and that the picker it opens offers every theme.
     #[test]
-    fn every_theme_has_a_menu_entry() {
+    fn every_theme_can_be_reached_from_the_view_menu() {
         let view = MENUS
             .iter()
             .find(|menu| menu.title == "View")
             .expect("a View menu");
+        assert!(
+            view.entries()
+                .any(|item| item.command == Command::ThemePrompt),
+            "no way into the theme picker"
+        );
+        let dialog = crate::app::dialog::DialogState::theme(
+            ThemeKind::Retro,
+            crate::app::focus::FocusTarget::Editor,
+        );
         for kind in ThemeKind::ALL {
             assert!(
-                view.entries()
-                    .any(|item| item.command == Command::SetTheme(kind)),
-                "no entry for the {} theme",
+                dialog
+                    .rows()
+                    .any(|row| row.command == Command::SetTheme(kind)),
+                "the picker has no row for the {} theme",
                 kind.label()
             );
         }
+    }
+
+    /// The same for the panes: the three `Focus …` entries became one picker,
+    /// which still has to offer all three.
+    #[test]
+    fn every_pane_can_be_reached_from_the_view_menu() {
+        let view = MENUS
+            .iter()
+            .find(|menu| menu.title == "View")
+            .expect("a View menu");
+        assert!(
+            view.entries()
+                .any(|item| item.command == Command::FocusPanePrompt),
+            "no way into the pane picker"
+        );
+        let dialog =
+            crate::app::dialog::DialogState::focus_pane(FocusTarget::Editor, FocusTarget::Editor);
+        for target in [
+            FocusTarget::Explorer,
+            FocusTarget::GitPanel,
+            FocusTarget::Editor,
+        ] {
+            assert!(
+                dialog
+                    .rows()
+                    .any(|row| row.command == Command::FocusPane(target)),
+                "the picker has no row for {target:?}"
+            );
+        }
+    }
+
+    /// The two questions that left the top level are still asked by something
+    /// the menu offers (ADR-079).
+    #[test]
+    fn the_tables_format_questions_are_behind_one_entry() {
+        let view = MENUS
+            .iter()
+            .find(|menu| menu.title == "View")
+            .expect("a View menu");
+        assert!(view
+            .entries()
+            .any(|item| item.command == Command::TableFormatPrompt));
+        let dialog = crate::app::dialog::DialogState::table_format(
+            crate::editor::csv::Dialect::default(),
+            FocusTarget::Editor,
+        );
+        for command in [Command::CsvDelimiterPrompt, Command::CsvQuotePrompt] {
+            assert!(
+                dialog.rows().any(|row| row.command == command),
+                "the picker cannot ask {command:?}"
+            );
+        }
+    }
+
+    /// A menu taller than the terminal loses its bottom rows, so the View menu
+    /// — the longest one — has to fit a short terminal.
+    ///
+    /// Twenty-four rows less the menu bar, the tab strip and the status bar is
+    /// what a drop-down hanging from the bar actually has. It was twenty-seven
+    /// rows tall before the pickers (ADR-079).
+    #[test]
+    fn the_view_menu_fits_a_short_terminal() {
+        let view = MENUS
+            .iter()
+            .find(|menu| menu.title == "View")
+            .expect("a View menu");
+        // Its own two border rows on top of one row per entry.
+        let height = view.items.len() + 2;
+        assert!(height <= 23, "the View menu is {height} rows tall");
     }
 
     /// `Alt` is the modifier several terminals never deliver — macOS

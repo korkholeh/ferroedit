@@ -13,6 +13,8 @@
 //! state per file — how many columns there are, and whether a hunk has begun —
 //! rather than reading one byte in isolation.
 
+use unicode_segmentation::UnicodeSegmentation;
+
 use crate::editor::coords::{line_width, DEFAULT_TAB_WIDTH};
 
 /// The most lines a viewer holds. Past it the diff is cut and the title says
@@ -75,6 +77,15 @@ pub enum DiffLineKind {
 pub struct DiffLine {
     pub text: String,
     pub kind: DiffLineKind,
+    /// The bytes of `text` that this line does *not* share with the line it
+    /// replaced, when it was paired with one (ADR-082).
+    ///
+    /// `None` for every line that has no partner and for every pair whose two
+    /// lines have nothing in common: a mark on the whole line says the same
+    /// thing the line's own colour already said, and a diff where everything is
+    /// marked has marked nothing. The range includes neither the `+`/`-`
+    /// prefix nor the common head and tail around the change.
+    pub changed: Option<(usize, usize)>,
 }
 
 /// One file's diff, classified and counted.
@@ -123,9 +134,47 @@ impl Diff {
             diff.lines.push(DiffLine {
                 text: line.to_string(),
                 kind,
+                changed: None,
             });
         }
+        diff.mark_changed_words();
         diff
+    }
+
+    /// Finds, for each replaced line, the part of it that actually changed
+    /// (ADR-082).
+    ///
+    /// A hunk is a run of removals followed by a run of additions, so the two
+    /// runs are paired off in order — but only when they are the same length.
+    /// An unequal pair is not a line-for-line replacement: three lines becoming
+    /// one is a rewrite, and pairing the first of each would mark two lines
+    /// that have nothing to do with each other.
+    fn mark_changed_words(&mut self) {
+        let mut index = 0;
+        while index < self.lines.len() {
+            let removed = run_of(&self.lines, index, DiffLineKind::Removed);
+            if removed == 0 {
+                index += 1;
+                continue;
+            }
+            let added = run_of(&self.lines, index + removed, DiffLineKind::Added);
+            index += removed + added;
+            if removed != added || removed > MAX_PAIRED_RUN {
+                continue;
+            }
+            let first_added = index - added;
+            for offset in 0..removed {
+                let (before, after) = (
+                    self.lines[first_added - removed + offset].text.clone(),
+                    self.lines[first_added + offset].text.clone(),
+                );
+                let Some((old_range, new_range)) = changed_words(&before, &after) else {
+                    continue;
+                };
+                self.lines[first_added - removed + offset].changed = Some(old_range);
+                self.lines[first_added + offset].changed = Some(new_range);
+            }
+        }
     }
 
     /// Whether this is a combined diff — the shape `git diff` takes for an
@@ -151,6 +200,120 @@ impl Diff {
     pub fn summary(&self) -> String {
         format!("+{} −{}", self.added, self.removed)
     }
+}
+
+/// The longest run of replaced lines whose words are compared.
+///
+/// Beyond it the pair is left with the whole-line colouring it had before
+/// (ADR-082). The comparison is linear in the length of a line and this bounds
+/// how many of them one hunk can ask for, which is what keeps a diff of a
+/// generated file — thousands of lines replaced at once — from spending a
+/// visible fraction of the read on marking changes nobody is going to look at
+/// one by one.
+const MAX_PAIRED_RUN: usize = 200;
+
+/// How much of the shorter of two lines has to be common to them before the
+/// difference between them is worth marking, as a reciprocal: four is a
+/// quarter (ADR-082).
+const MIN_SHARED_FRACTION: usize = 4;
+
+/// The longest line whose words are compared.
+///
+/// A minified bundle is one line of half a megabyte, and the common prefix of
+/// two of them is most of that: the walk is cheap per cluster but there is no
+/// reading such a mark anyway, so past this the line keeps its whole-line
+/// colour.
+const MAX_PAIRED_LINE: usize = 2000;
+
+/// How many lines of `kind` there are in a row, starting at `from`.
+fn run_of(lines: &[DiffLine], from: usize, kind: DiffLineKind) -> usize {
+    lines[from.min(lines.len())..]
+        .iter()
+        .take_while(|line| line.kind == kind)
+        .count()
+}
+
+/// The middles of two lines that replaced one another: what is left of each
+/// once the head and the tail they share have been taken off.
+///
+/// Grapheme clusters and not bytes, so a mark can never start or end inside a
+/// character — a combining accent left on the wrong side of the boundary would
+/// be drawn as its own glyph. The returned ranges are byte ranges into the
+/// lines *including* their `+`/`-` prefix, because that is what the renderer
+/// has; the prefix itself is never in one, since the two lines differ there and
+/// the common-prefix walk therefore starts after it.
+///
+/// `None` when there is nothing useful to say: the lines share no head and no
+/// tail, or one of them is longer than `MAX_PAIRED_LINE`.
+fn changed_words(before: &str, after: &str) -> Option<((usize, usize), (usize, usize))> {
+    if before.len() > MAX_PAIRED_LINE || after.len() > MAX_PAIRED_LINE {
+        return None;
+    }
+    // The marker column is not part of the text: `-x` and `+x` are the same
+    // line, and comparing the columns would find every pair different at
+    // byte 0 and every pair identical after it.
+    let (old_body, new_body) = (skip_marker(before), skip_marker(after));
+    let old_text = &before[old_body..];
+    let new_text = &after[new_body..];
+    if old_text == new_text {
+        return None;
+    }
+
+    let head = common_prefix(old_text, new_text);
+    let tail = common_suffix(&old_text[head..], &new_text[head..]);
+    // Two lines that share almost nothing are two different lines, not one
+    // line edited: `alpha` and `omega` have a final `a` in common, and marking
+    // `alph` and `omeg` says nothing the two colours did not already say. A
+    // quarter of the shorter line is the line between "this was edited" and
+    // "these happen to share a letter".
+    let shared = head + tail;
+    let shortest = old_text.len().min(new_text.len());
+    if shared * MIN_SHARED_FRACTION < shortest {
+        return None;
+    }
+    Some((
+        (old_body + head, before.len() - tail),
+        (new_body + head, after.len() - tail),
+    ))
+}
+
+/// How many bytes of the marker column a diff line begins with.
+///
+/// One for an ordinary diff and one per parent for a combined one — but the
+/// count is taken from the line itself rather than from `parents`, because a
+/// pair is compared line by line and this is the only thing that has to agree
+/// between the two of them.
+fn skip_marker(line: &str) -> usize {
+    line.bytes()
+        .take_while(|byte| matches!(byte, b'+' | b'-' | b' '))
+        .count()
+        .min(1)
+}
+
+/// The bytes two strings share at the front, on a cluster boundary.
+fn common_prefix(a: &str, b: &str) -> usize {
+    let mut shared = 0;
+    for ((at, left), (_, right)) in a.grapheme_indices(true).zip(b.grapheme_indices(true)) {
+        if left != right {
+            return at;
+        }
+        shared = at + left.len();
+    }
+    shared
+}
+
+/// The bytes two strings share at the back, on a cluster boundary.
+fn common_suffix(a: &str, b: &str) -> usize {
+    let left: Vec<&str> = a.graphemes(true).collect();
+    let right: Vec<&str> = b.graphemes(true).collect();
+    let mut shared = 0;
+    for (x, y) in left.iter().rev().zip(right.iter().rev()) {
+        if x != y {
+            break;
+        }
+        shared += x.len();
+    }
+    shared
 }
 
 /// The three spellings of the line that opens a file's diff. Each one resets
@@ -522,5 +685,125 @@ diff --git b.txt b.txt
         assert_eq!(DiffSide::Worktree.other(), DiffSide::Staged);
         assert_eq!(DiffSide::Staged.other(), DiffSide::Worktree);
         assert!(DiffSide::Staged.nothing().starts_with("Nothing staged"));
+    }
+    /// The example from the task: one call gains `.saturating_sub(GAP)`, and
+    /// the mark is that and nothing else (ADR-082).
+    #[test]
+    fn a_small_change_inside_a_long_line_is_marked_on_its_own() {
+        let diff = Diff::parse(concat!(
+            "@@ -1,3 +1,3 @@\n",
+            " fn budget(width: u16, left: u16) -> usize {\n",
+            "-    width.saturating_sub(left.max(MIN_LEFT)) as usize\n",
+            "+    width.saturating_sub(left.max(MIN_LEFT)).saturating_sub(GAP) as usize\n",
+            " }\n",
+        ));
+        let removed = diff
+            .lines
+            .iter()
+            .find(|line| line.kind == DiffLineKind::Removed)
+            .unwrap();
+        let added = diff
+            .lines
+            .iter()
+            .find(|line| line.kind == DiffLineKind::Added)
+            .unwrap();
+        let (from, to) = added.changed.expect("the added line is marked");
+        assert_eq!(&added.text[from..to], ".saturating_sub(GAP)");
+        // Nothing was taken out of the removed line, so its own range is
+        // empty — and it sits exactly where the insertion went in.
+        let (from, to) = removed.changed.expect("its partner is marked too");
+        assert_eq!(&removed.text[from..to], "");
+        assert_eq!(
+            &removed.text[..from],
+            "-    width.saturating_sub(left.max(MIN_LEFT))"
+        );
+    }
+
+    /// A run of removals and a run of additions of different lengths is a
+    /// rewrite and not a line-for-line replacement: nothing is paired.
+    #[test]
+    fn an_unbalanced_run_is_left_with_its_whole_line_colour() {
+        let diff = Diff::parse(concat!(
+            "@@ -1,3 +1,1 @@\n",
+            "-one\n",
+            "-two\n",
+            "-three\n",
+            "+one two three\n",
+        ));
+        assert!(diff.lines.iter().all(|line| line.changed.is_none()));
+    }
+
+    /// Two lines with nothing in common at either end are two different lines,
+    /// and marking all of both would say what the colours already say.
+    #[test]
+    fn a_pair_with_nothing_in_common_is_not_marked() {
+        let diff = Diff::parse("@@ -1 +1 @@\n-alpha\n+omega\n");
+        assert!(diff.lines.iter().all(|line| line.changed.is_none()));
+    }
+
+    /// Every line of a balanced run is paired with the line at the same place
+    /// in the other run, not with the first one.
+    #[test]
+    fn a_balanced_run_is_paired_off_in_order() {
+        let diff = Diff::parse(concat!(
+            "@@ -1,2 +1,2 @@\n",
+            "-let a = 1;\n",
+            "-let b = 2;\n",
+            "+let a = 11;\n",
+            "+let b = 22;\n",
+        ));
+        let marked: Vec<&str> = diff
+            .lines
+            .iter()
+            .filter(|line| line.kind == DiffLineKind::Added)
+            .map(|line| {
+                let (from, to) = line.changed.expect("marked");
+                &line.text[from..to]
+            })
+            .collect();
+        assert_eq!(marked, vec!["1", "2"]);
+    }
+
+    /// A mark never starts or ends inside a character: the walk is over
+    /// grapheme clusters, so a combining accent cannot be split off its letter.
+    #[test]
+    fn a_mark_falls_on_character_boundaries() {
+        let diff = Diff::parse("@@ -1 +1 @@\n-日本語 text\n+日本 text\n");
+        for line in &diff.lines {
+            let Some((from, to)) = line.changed else {
+                continue;
+            };
+            assert!(line.text.is_char_boundary(from), "{}", line.text);
+            assert!(line.text.is_char_boundary(to), "{}", line.text);
+            // Slicing it must not panic, which is the point of the assertions
+            // above.
+            let _ = &line.text[from..to];
+        }
+    }
+
+    /// A line long enough to be a bundle keeps its whole-line colour: the
+    /// comparison is bounded so a generated file cannot make a diff slow to
+    /// read (ADR-082).
+    #[test]
+    fn a_very_long_line_is_not_compared() {
+        let long = "x".repeat(MAX_PAIRED_LINE + 10);
+        let diff = Diff::parse(&format!("@@ -1 +1 @@\n-{long}a\n+{long}b\n"));
+        assert!(diff.lines.iter().all(|line| line.changed.is_none()));
+    }
+
+    /// And so does a replacement of more lines at once than anybody reads word
+    /// by word.
+    #[test]
+    fn a_very_long_run_is_not_compared() {
+        let mut text = String::from("@@ -1 +1 @@\n");
+        let lines = MAX_PAIRED_RUN + 1;
+        for i in 0..lines {
+            text.push_str(&format!("-line {i} old\n"));
+        }
+        for i in 0..lines {
+            text.push_str(&format!("+line {i} new\n"));
+        }
+        let diff = Diff::parse(&text);
+        assert!(diff.lines.iter().all(|line| line.changed.is_none()));
     }
 }

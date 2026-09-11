@@ -159,6 +159,12 @@ pub fn execute_command(app: &mut App, command: Command) {
         Command::LogShowRow(row) => show_log_row(app, row),
         Command::LogScroll(delta) => move_log(app, delta as isize),
         Command::LogShowCommit => show_selected_commit(app),
+        Command::LogShowMessage => show_selected_message(app),
+        Command::LogToggleColumns => {
+            if let Some(log) = app.log_mut() {
+                log.show_columns = !log.show_columns;
+            }
+        }
         Command::LogSearchOpen => open_log_search(app),
         Command::LogSearchClose => close_log_search(app),
         Command::LogSearchChar(ch) => edit_log_search(app, |field| field.insert(ch)),
@@ -276,6 +282,7 @@ pub fn execute_command(app: &mut App, command: Command) {
         Command::SetLanguage(name) => set_language(app, &name),
 
         Command::ToggleTableView => toggle_table_view(app),
+        Command::TableFormatPrompt => prompt_table_format(app),
         Command::CsvDelimiterPrompt => prompt_csv(app, true),
         Command::CsvQuotePrompt => prompt_csv(app, false),
         Command::SetCsvDelimiter(delimiter) => {
@@ -454,6 +461,14 @@ pub fn execute_command(app: &mut App, command: Command) {
         },
 
         Command::SetTheme(kind) => set_theme(app, kind),
+        Command::ThemePrompt => {
+            let return_focus = dialog_return_focus(app);
+            open_dialog(app, DialogState::theme(app.settings.theme, return_focus));
+        }
+        Command::FocusPanePrompt => {
+            let return_focus = dialog_return_focus(app);
+            open_dialog(app, DialogState::focus_pane(return_focus, return_focus));
+        }
 
         Command::ShowAbout => show_about(app),
 
@@ -1040,6 +1055,26 @@ fn toggle_table_view(app: &mut App) {
 /// Both refuse over a file that is not being read as a table: the pickers
 /// change how a table is parsed, and the answer to "what separates the columns"
 /// of a file with no columns on screen is not one the user can check.
+/// Opens the picker that asks which of the table's two format questions to
+/// answer (ADR-079).
+///
+/// The same guard `prompt_csv` has, and for the same reason: neither question
+/// has an answer for a file that is not being read as a table, and the menu
+/// entry is on the top level whether or not one is open.
+fn prompt_table_format(app: &mut App) {
+    let Some(dialect) = app
+        .active()
+        .and_then(|tab| tab.table.as_ref())
+        .map(|t| t.dialect)
+    else {
+        app.notifications
+            .warning("Not a table — View → Table View shows one");
+        return;
+    };
+    let return_focus = dialog_return_focus(app);
+    open_dialog(app, DialogState::table_format(dialect, return_focus));
+}
+
 fn prompt_csv(app: &mut App, delimiter: bool) {
     let Some(dialect) = app
         .active()
@@ -3665,6 +3700,20 @@ fn reread_logs(app: &mut App) {
 /// Narrowed to the file when the history being read is one file's: a commit
 /// that touched forty files, reached from `src/main.rs`'s own history, is being
 /// asked about `src/main.rs`.
+/// Opens the selected commit's whole message in a box (ADR-080).
+///
+/// It reads what the list already holds rather than asking git again: `%b`
+/// came down with the rest of the record, so the box opens on the frame the
+/// key was pressed in and a repository over a slow link is no different.
+fn show_selected_message(app: &mut App) {
+    let Some(commit) = app.log().and_then(|log| log.selected_commit().cloned()) else {
+        app.notifications.warning("No commit selected");
+        return;
+    };
+    let return_focus = dialog_return_focus(app);
+    open_dialog(app, DialogState::commit_message(&commit, return_focus));
+}
+
 fn show_selected_commit(app: &mut App) {
     let Some(log) = app.log() else { return };
     let Some(commit) = log.selected_commit().cloned() else {

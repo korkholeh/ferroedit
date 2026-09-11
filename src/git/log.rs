@@ -27,7 +27,10 @@ pub const MAX_COMMITS: usize = 2000;
 /// The fields are separated by U+001F and the records by NUL (`-z`), because
 /// both are bytes a commit message cannot contain — a subject with a `|` in it
 /// is ordinary, and one with a newline in it is what `%s` already collapses.
-pub const FORMAT: &str = "--format=%H%x1f%h%x1f%an%x1f%ad%x1f%s";
+/// The body is last on purpose: it is the one field that can contain anything,
+/// including a `%x1f` somebody pasted into a commit message, so the reader
+/// splits off the five fixed fields and keeps the whole remainder as the body.
+pub const FORMAT: &str = "--format=%H%x1f%h%x1f%an%x1f%ad%x1f%s%x1f%b";
 
 /// One line of the log viewer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +45,15 @@ pub struct Commit {
     /// `--date=short`, so it sorts and aligns: `2026-09-10`.
     pub date: String,
     pub subject: String,
+    /// Everything under the subject line, as the author wrote it — trailers,
+    /// paragraphs, blank lines and all.
+    ///
+    /// Read with the list rather than on demand (ADR-080): the viewer's column
+    /// shows a subject cut to whatever the pane had left, and the reader who
+    /// wants the rest of it wants it *now*. One `git log` already ran; a second
+    /// subprocess per keystroke would put a spinner on a question git has
+    /// already answered.
+    pub body: String,
 }
 
 impl Commit {
@@ -165,7 +177,9 @@ pub fn parse_log(output: &[u8]) -> Result<Vec<Commit>, GitError> {
         if record.is_empty() {
             continue;
         }
-        let mut fields = record.split('\u{1f}');
+        // Six splits at most: the sixth is the body, which keeps every
+        // separator inside it rather than being cut at the first one.
+        let mut fields = record.splitn(6, '\u{1f}');
         let (Some(oid), Some(short), Some(author), Some(date), Some(subject)) = (
             fields.next(),
             fields.next(),
@@ -175,6 +189,7 @@ pub fn parse_log(output: &[u8]) -> Result<Vec<Commit>, GitError> {
         ) else {
             return Err(GitError::Parse(format!("log record {record:?}")));
         };
+        let body = fields.next().unwrap_or_default();
         commits.push(Commit {
             oid: oid.to_string(),
             short: short.to_string(),
@@ -184,6 +199,9 @@ pub fn parse_log(output: &[u8]) -> Result<Vec<Commit>, GitError> {
             // honoured by an older git; everything past the first line of the
             // subject field is not the subject.
             subject: subject.lines().next().unwrap_or_default().to_string(),
+            // `%b` ends with the newline git puts after every commit message,
+            // and a body of trailing blank lines is rows of an empty box.
+            body: body.trim_end().to_string(),
         });
     }
     Ok(commits)
@@ -195,7 +213,7 @@ mod tests {
 
     fn record(oid: &str, subject: &str) -> String {
         format!(
-            "{oid}\u{1f}{short}\u{1f}Ada\u{1f}2026-09-10\u{1f}{subject}\0",
+            "{oid}\u{1f}{short}\u{1f}Ada\u{1f}2026-09-10\u{1f}{subject}\u{1f}\0",
             short = &oid[..7]
         )
     }

@@ -68,20 +68,35 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         .skip(app.git.scroll)
         .take(inner.height as usize)
         .map(|(index, entry)| {
-            let line = Line::from(vec![
-                Span::styled(
-                    format!(" {} ", entry.codes()),
-                    Style::new().fg(status_color(theme, entry.primary())),
-                ),
-                Span::raw(elide_left(
-                    &entry.path.display().to_string(),
-                    width.saturating_sub(CODE_WIDTH + 1),
-                )),
-            ]);
-            if index == app.git.selected {
-                line.style(selection_style(theme, focused))
+            let selected = index == app.git.selected;
+            let selection = selection_style(theme, focused);
+            let path = elide_left(
+                &entry.path.display().to_string(),
+                width.saturating_sub(CODE_WIDTH + 1),
+            );
+            // A span's own foreground wins over the line's, so the status
+            // letter has to be *told* the selection's text colour, exactly as
+            // the explorer tells a directory name: the Retro theme marks the
+            // row under the cursor with a green bar, and a yellow `M` on it is
+            // 2.7:1. The letter still says which state the file is in.
+            let code_style = match selection.fg.filter(|_| selected) {
+                Some(fg) => Style::new().fg(fg),
+                None => Style::new().fg(status_color(theme, entry.primary())),
+            };
+            let code = format!(" {} ", entry.codes());
+            let mut spans = vec![
+                Span::styled(code.clone(), code_style),
+                Span::raw(path.clone()),
+            ];
+            if selected {
+                // Out to the pane's edge, for the reason the explorer's is.
+                spans.push(Span::raw(crate::ui::explorer::pad(
+                    inner.width as usize,
+                    code.width() + path.width(),
+                )));
+                Line::from(spans).style(selection)
             } else {
-                line
+                Line::from(spans)
             }
         })
         .collect();

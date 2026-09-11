@@ -1193,6 +1193,7 @@ mod tests {
                 author: "Ada".into(),
                 date: "2026-09-10".into(),
                 subject: format!("commit {i}"),
+                body: String::new(),
             })
             .collect();
         let mut app = app();

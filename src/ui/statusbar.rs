@@ -291,18 +291,15 @@ fn readout(app: &App, width: u16, left: u16) -> Vec<Piece> {
     // a raster and a scale, which is what the diff's `position` is for lines
     // (ADR-078).
     if let Some(image) = app.image() {
+        // The format and the dimensions are on the pane's own title one row
+        // above, and were on the metadata column beside it as well: three
+        // copies of `PNG 1400×900` on one screen (ADR-080). What is left here
+        // is what the title does not say — where in the picture the window is
+        // — and the scale, which is the one number a reader checks often
+        // enough to want it in the same place for every kind of tab.
         let pieces = vec![
             piece(image.position().trim().to_string(), 0),
             piece(image.zoom_label(), 0),
-            piece(
-                format!(
-                    "{} {}×{}",
-                    image.image.format.label(),
-                    image.image.width,
-                    image.image.height
-                ),
-                1,
-            ),
             piece(app.focus.label().to_string(), 2),
         ];
         return trim(pieces, budget(width, left));

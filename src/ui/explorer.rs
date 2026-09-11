@@ -5,6 +5,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::focus::FocusTarget;
 use crate::app::App;
@@ -119,21 +120,43 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
                     name_style = name_style.fg(fg);
                 }
             }
-            let line = Line::from(vec![
+            let indent = " ".repeat(1 + row.depth as usize * 2);
+            let mut spans = vec![
                 // One column of padding, then two per nesting level.
-                Span::raw(" ".repeat(1 + row.depth as usize * 2)),
+                Span::raw(indent.clone()),
                 Span::styled(marker, name_style),
                 Span::styled(row.name.clone(), name_style),
-            ]);
+            ];
             if selected {
-                line.style(selection)
+                // The mark on a selected row runs to the pane's edge. A line
+                // is only as wide as its spans — a paragraph pads the rest of
+                // the row in the *widget's* style, not the line's — so the bar
+                // ended where the name did, and a tree of long and short names
+                // drew a ragged column of stripes. The padding stops at the
+                // pane's inside: the border and the scrollbar column beside it
+                // are not the row's to paint.
+                spans.push(Span::raw(pad(
+                    inner.width as usize,
+                    indent.width() + marker.width() + row.name.width(),
+                )));
+                Line::from(spans).style(selection)
             } else {
-                line
+                Line::from(spans)
             }
         })
         .collect();
 
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The blanks that carry a selected row's ground out to the pane's edge.
+///
+/// Shared by the two sidebar panes so that the two selections are the same
+/// shape: they are stacked one above the other, and a bar that ran to the edge
+/// in one and stopped at the name in the other would read as two different
+/// kinds of mark.
+pub fn pad(width: usize, used: usize) -> String {
+    " ".repeat(width.saturating_sub(used))
 }
 
 /// A selection in an unfocused pane stays visible but stops competing with the
@@ -208,6 +231,52 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The mark on a selected row is the pane's width, whatever the name's is.
+    ///
+    /// It used to end with the name, so a tree of long and short names drew a
+    /// column of stripes of different lengths. The pane's right border — and
+    /// the scrollbar drawn down it — is not the row's to paint, so the bar
+    /// stops one column short of the pane's edge.
+    #[test]
+    fn a_selected_row_is_marked_out_to_the_panes_edge() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "").unwrap();
+        std::fs::write(dir.path().join("a-much-longer-name.rs"), "").unwrap();
+        let mut app = App::fixture_in(dir.path());
+        app.focus = FocusTarget::Explorer;
+
+        let theme = Theme::new(crate::config::ThemeKind::Dark);
+        let width = 20u16;
+        let mut widths = Vec::new();
+        for row in 0..app.sidebar.rows().len() {
+            app.sidebar.selected = row;
+            let mut terminal = Terminal::new(TestBackend::new(width, 6)).unwrap();
+            terminal
+                .draw(|frame| render(frame, &app, frame.area(), &theme))
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            // Row 0 is the pane's top border; the tree starts under it.
+            let y = row as u16 + 1;
+            let marked = (0..width)
+                .filter(|x| buffer[(*x, y)].bg == theme.selection.bg.unwrap())
+                .count();
+            widths.push(marked);
+            // The last column is the border and the scrollbar's track.
+            assert_ne!(
+                buffer[(width - 1, y)].bg,
+                theme.selection.bg.unwrap(),
+                "the mark painted over the pane's border"
+            );
+        }
+        assert!(
+            widths.iter().all(|w| *w == usize::from(width) - 1),
+            "the mark is not the pane's width: {widths:?}"
+        );
     }
 
     /// A sidebar too narrow for both keeps "Files" and cuts the folder name

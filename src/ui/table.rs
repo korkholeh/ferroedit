@@ -238,11 +238,27 @@ fn header(
         // first row drawn as a heading, so it reads as one rather than as the
         // first record — until the selection is on it, when it is a cell like
         // any other and is marked like one (SPEC §65).
+        //
+        // The name of the column the cursor is *in* is drawn in the ordinary
+        // text colour instead, still bold: a wide grid is read by looking up
+        // from a cell to ask what it is, and every heading looking the same
+        // made that a count along the row. It is a lift out of the dim, not a
+        // second highlight — the cell itself is what is marked (ADR-081).
+        let heading = if *index == view.column {
+            theme
+                .panel_title
+                .fg(theme.foreground)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            theme.panel_title.add_modifier(Modifier::BOLD)
+        };
         let style = match cell_style(view, HEADER_ORDINAL, *index, focused, theme) {
             Some(style) => style.add_modifier(Modifier::BOLD),
-            None => theme.panel_title.add_modifier(Modifier::BOLD),
+            None => heading,
         };
-        spans.push(Span::styled(fit(&name, *width), style));
+        // The heading takes its column's alignment, so a numeric column's name
+        // sits over its digits rather than away from them.
+        spans.push(Span::styled(fit(&name, *width, align(view, *index)), style));
     }
     Line::from(spans)
 }
@@ -277,7 +293,7 @@ fn record(
     )];
     for (index, width) in columns {
         spans.push(separator(theme));
-        let text = fit(view.table.cell(row, *index), *width);
+        let text = fit(view.table.cell(row, *index), *width, align(view, *index));
         // The cell the user is on is the selection; the rest of its row is
         // marked more faintly, because a wide table is read along a row and a
         // row with nothing on it is one the eye loses between two screenfuls.
@@ -292,6 +308,20 @@ fn record(
         spans.push(Span::styled(text, style));
     }
     Line::from(spans)
+}
+
+/// Which end of the column a value in it is drawn against.
+///
+/// The parse decided this, once, when the file was read (ARCHITECTURE
+/// invariant 4): a renderer that sniffed types as it drew would answer it for
+/// every visible cell on every frame, and could answer differently for two
+/// cells of one column.
+fn align(view: &TableView, column: usize) -> Align {
+    if view.table.is_numeric(column) {
+        Align::Right
+    } else {
+        Align::Left
+    }
 }
 
 /// How a cell is marked, or `None` when it is neither the cursor's nor part of
@@ -323,6 +353,13 @@ fn separator(theme: &Theme) -> Span<'static> {
     Span::styled(SEPARATOR, Style::new().fg(theme.border))
 }
 
+/// Which end of its column a value is padded against (SPEC §65, ADR-081).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Align {
+    Left,
+    Right,
+}
+
 /// A value in exactly `width` cells: padded when it is short, cut with an
 /// ellipsis when it is long.
 ///
@@ -330,7 +367,13 @@ fn separator(theme: &Theme) -> Span<'static> {
 /// text lines up with the ones beside it. A line break inside a quoted field is
 /// drawn as `⏎`: the row is one row, and a value that put a newline through the
 /// grid would break every column to the right of it.
-fn fit(value: &str, width: usize) -> String {
+///
+/// A number is padded on the *left*, so a column of them lines up on its last
+/// digit and two of them can be compared by their length — which is the whole
+/// reason a spreadsheet does it (ADR-081). A value too wide for its column is
+/// still cut from the right and still ends in an ellipsis, whichever way it is
+/// aligned: the front of a number is the part that says how big it is.
+fn fit(value: &str, width: usize, align: Align) -> String {
     if width == 0 {
         return String::new();
     }
@@ -343,7 +386,11 @@ fn fit(value: &str, width: usize) -> String {
         })
         .collect();
     if value.width() <= width {
-        return format!("{value}{}", " ".repeat(width - value.width()));
+        let pad = " ".repeat(width - value.width());
+        return match align {
+            Align::Left => format!("{value}{pad}"),
+            Align::Right => format!("{pad}{value}"),
+        };
     }
     let mut out = String::new();
     let mut used = 0;
@@ -368,12 +415,12 @@ mod tests {
 
     #[test]
     fn a_short_value_is_padded_to_the_column() {
-        assert_eq!(fit("ab", 5), "ab   ");
+        assert_eq!(fit("ab", 5, Align::Left), "ab   ");
     }
 
     #[test]
     fn a_long_value_is_cut_with_an_ellipsis_and_still_fills_the_column() {
-        let cut = fit("abcdefgh", 5);
+        let cut = fit("abcdefgh", 5, Align::Left);
         assert_eq!(cut, "abcd…");
         assert_eq!(cut.width(), 5);
     }
@@ -381,18 +428,35 @@ mod tests {
     #[test]
     fn a_wide_character_never_overflows_its_column() {
         // Each of these is two cells, so three of them do not fit in five.
-        let cut = fit("日本語", 5);
+        let cut = fit("日本語", 5, Align::Left);
         assert_eq!(cut.width(), 5, "{cut:?}");
         assert!(cut.ends_with('…') || cut.ends_with(' '), "{cut:?}");
     }
 
     #[test]
     fn a_newline_inside_a_field_is_drawn_as_one_cell() {
-        assert_eq!(fit("a\nb", 3), "a⏎b");
+        assert_eq!(fit("a\nb", 3, Align::Left), "a⏎b");
+    }
+
+    /// A number lines up on its last digit, so two of them can be compared by
+    /// their length (ADR-081).
+    #[test]
+    fn a_number_is_padded_on_the_left_and_a_string_on_the_right() {
+        assert_eq!(fit("12", 5, Align::Right), "   12");
+        assert_eq!(fit("12", 5, Align::Left), "12   ");
+        assert_eq!(fit("abc", 5, Align::Right), "  abc");
+    }
+
+    /// A value too wide for its column is cut from the right whichever way it
+    /// is aligned: the front of a number is what says how big it is.
+    #[test]
+    fn a_value_too_wide_for_its_column_is_cut_from_the_right_either_way() {
+        assert_eq!(fit("123456", 4, Align::Right), "123…");
+        assert_eq!(fit("123456", 4, Align::Left), "123…");
     }
 
     #[test]
     fn a_zero_width_column_draws_nothing() {
-        assert_eq!(fit("abc", 0), "");
+        assert_eq!(fit("abc", 0, Align::Left), "");
     }
 }

@@ -514,6 +514,12 @@ pub static BINDINGS: &[Binding] = &[
     // `d` as well, because it is the key that shows a diff in the git panel and
     // a reader stepping between the two panes should not have to change hands.
     log_view(KeyCode::Char('d'), Command::LogShowCommit, "d"),
+    // `m` for the message: the subject column is cut to whatever the pane had
+    // left, and `Enter` is the diff and stays the diff (ADR-080).
+    log_view(KeyCode::Char('m'), Command::LogShowMessage, "m"),
+    // `c` for the columns in front of it, which is the other way to get the
+    // subject its room back.
+    log_view(KeyCode::Char('c'), Command::LogToggleColumns, "c"),
     log_view(KeyCode::F(5), Command::LogRefresh, "F5"),
     // `/` opens the search field, which is what every pager the terminal has
     // ever had uses for it.

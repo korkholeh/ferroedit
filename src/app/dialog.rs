@@ -17,6 +17,7 @@ use crate::app::browser::Browser;
 use crate::app::focus::FocusTarget;
 use crate::app::input_field::InputField;
 use crate::commands::{Command, FileOp};
+use crate::config::ThemeKind;
 use crate::editor::charset::Charset;
 use crate::editor::csv::{Dialect, DELIMITERS, QUOTES};
 use crate::editor::document::LineEnding;
@@ -85,6 +86,106 @@ pub enum DialogBody {
     /// a picker does not: a place that changes under the rows, and text to
     /// narrow them with.
     Browser(Browser),
+    /// Lines to read and scroll, and nothing to choose — a commit's full
+    /// message (ADR-080).
+    ///
+    /// Not `Message`, which is one centred sentence: a commit message is
+    /// paragraphs, and one that had to fit on a line would be the subject
+    /// column the reader opened it to get past. Not `List` either, because
+    /// nothing on it is a choice, and a picker whose every row runs nothing is
+    /// a control that lies about what Enter does.
+    Text(TextBody),
+}
+
+/// A block of read-only lines inside a dialog, and where the window over them
+/// starts.
+///
+/// The lines arrive already wrapped: the wrap depends on how wide the box came
+/// out, which is `body_width`'s answer, so it is made once when the dialog is
+/// built rather than every frame in `ui/`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextBody {
+    /// The line drawn where a picker draws its prompt: what these lines are
+    /// about, rather than a question.
+    header: String,
+    lines: Vec<String>,
+    scroll: usize,
+}
+
+/// The most rows of a text body shown at once.
+///
+/// Larger than a picker's ten because it is prose and not a list of choices,
+/// and small enough that the box still fits a short terminal — the layout
+/// clamps it to the frame either way, and the scroll is what shows the rest.
+pub const MAX_TEXT_ROWS: usize = 14;
+
+/// Where a commit message stops being wrapped and starts being cut.
+///
+/// A commit body is written to be read at about this width; a box as wide as a
+/// 200-column terminal would put a sentence on one line and leave the reader
+/// tracking it back across the screen.
+const TEXT_WRAP: usize = 72;
+
+impl TextBody {
+    /// Wraps `text` at `TEXT_WRAP` cells, keeping the author's own blank lines.
+    fn new(header: String, text: &str) -> Self {
+        let mut lines = Vec::new();
+        for paragraph in text.lines() {
+            if paragraph.trim().is_empty() {
+                lines.push(String::new());
+                continue;
+            }
+            let mut line = String::new();
+            for word in paragraph.split_whitespace() {
+                // A word longer than the wrap — a URL, a stack frame — takes a
+                // line of its own and is cut by the box rather than broken:
+                // half a URL on each of two lines is a URL nobody can copy.
+                if !line.is_empty() && line.width() + 1 + word.width() > TEXT_WRAP {
+                    lines.push(std::mem::take(&mut line));
+                }
+                if !line.is_empty() {
+                    line.push(' ');
+                }
+                line.push_str(word);
+            }
+            lines.push(line);
+        }
+        if lines.is_empty() {
+            lines.push(String::new());
+        }
+        Self {
+            header,
+            lines,
+            scroll: 0,
+        }
+    }
+
+    pub fn lines(&self) -> &[String] {
+        &self.lines
+    }
+
+    pub fn scroll(&self) -> usize {
+        self.scroll
+    }
+
+    /// Moves the window, clamped at both ends: there is no selection to move,
+    /// so `Up` and `Down` scroll the text the way a pager's do.
+    fn step(&mut self, delta: i16, height: usize) {
+        let last = self.lines.len().saturating_sub(height.max(1));
+        self.scroll = if delta < 0 {
+            self.scroll.saturating_sub(delta.unsigned_abs() as usize)
+        } else {
+            (self.scroll + delta as usize).min(last)
+        };
+    }
+
+    fn width(&self) -> usize {
+        self.lines
+            .iter()
+            .map(|line| line.width())
+            .max()
+            .unwrap_or(0)
+    }
 }
 
 /// A list to choose from: every row it was built with, which of them the
@@ -756,6 +857,133 @@ impl DialogState {
         )
     }
 
+    /// One commit's message in full, opened from the log viewer (ADR-080).
+    ///
+    /// The viewer's subject column is whatever the pane had left over after the
+    /// name, the date and the author, so a commit whose subject says what it
+    /// did is exactly the commit whose subject is cut. This is where the rest
+    /// of it is — the body as well, which the list never had room for at all.
+    ///
+    /// One button, and it dismisses: nothing here is a choice, and `Enter` in
+    /// the viewer still opens the diff, which is what it did before this
+    /// existed.
+    pub fn commit_message(commit: &crate::git::Commit, return_focus: FocusTarget) -> Self {
+        let mut text = commit.subject.clone();
+        if !commit.body.is_empty() {
+            text.push_str("\n\n");
+            text.push_str(&commit.body);
+        }
+        // The three columns the box replaces, on one line above the message:
+        // which commit this is, when, and whose.
+        let header = format!("{}  ·  {}  ·  {}", commit.short, commit.date, commit.author);
+        Self {
+            title: "Commit".to_string(),
+            body: DialogBody::Text(TextBody::new(header, &text)),
+            buttons: vec![DialogButton::new("Close", None)],
+            selected: 0,
+            return_focus,
+        }
+    }
+
+    /// The theme picker, opened from View → Theme… (ADR-079).
+    ///
+    /// Choosing a row acts at once, like the delimiter picker and unlike the
+    /// encoding: nothing on disk changes, and a confirmation over a colour
+    /// scheme the user can see behind the dialog is a question with no content.
+    pub fn theme(current: ThemeKind, return_focus: FocusTarget) -> Self {
+        let items: Vec<ListItem> = ThemeKind::ALL
+            .iter()
+            .map(|kind| ListItem {
+                label: kind.label().to_string(),
+                command: Command::SetTheme(*kind),
+                current: *kind == current,
+            })
+            .collect();
+        let selected = items.iter().position(|item| item.current).unwrap_or(0);
+        Self::list(
+            "Theme",
+            "The colours the editor is drawn in".to_string(),
+            items,
+            selected,
+            false,
+            vec![
+                DialogButton::new("Use", Some(Command::SubmitListChoice)),
+                DialogButton::new("Cancel", None),
+            ],
+            return_focus,
+        )
+    }
+
+    /// The pane picker, opened from View → Focus Pane… (ADR-079).
+    ///
+    /// `current` is where focus is *now*, which is what the `*` marks and where
+    /// the selection starts — so the picker opens on the pane the user is in
+    /// and one `Down` is the next one, exactly as `F6` would be.
+    pub fn focus_pane(current: FocusTarget, return_focus: FocusTarget) -> Self {
+        let panes = [
+            ("Explorer", FocusTarget::Explorer),
+            ("Git", FocusTarget::GitPanel),
+            ("Editor", FocusTarget::Editor),
+        ];
+        let items: Vec<ListItem> = panes
+            .iter()
+            .map(|(label, target)| ListItem {
+                label: (*label).to_string(),
+                command: Command::FocusPane(*target),
+                current: *target == current,
+            })
+            .collect();
+        let selected = items.iter().position(|item| item.current).unwrap_or(0);
+        Self::list(
+            "Focus Pane",
+            "Which pane the keyboard goes to".to_string(),
+            items,
+            selected,
+            false,
+            vec![
+                DialogButton::new("Go", Some(Command::SubmitListChoice)),
+                DialogButton::new("Cancel", None),
+            ],
+            return_focus,
+        )
+    }
+
+    /// The table's two format questions, as one row each (ADR-079).
+    ///
+    /// A picker whose rows open pickers, which is unusual enough to say why:
+    /// the two answers are independent — a file can need a different delimiter
+    /// *and* a different quote — so they cannot be one list, and two entries on
+    /// the View menu for a pair of questions asked once a session was two rows
+    /// of a menu that had run out of them. The current answer is on the row, so
+    /// the common case — "what is this file being split on?" — is answered by
+    /// the picker itself without opening anything.
+    pub fn table_format(current: Dialect, return_focus: FocusTarget) -> Self {
+        let items = vec![
+            ListItem {
+                label: format!("Column Delimiter    {}", current.delimiter_label()),
+                command: Command::CsvDelimiterPrompt,
+                current: false,
+            },
+            ListItem {
+                label: format!("Quote Character     {}", current.quote_label()),
+                command: Command::CsvQuotePrompt,
+                current: false,
+            },
+        ];
+        Self::list(
+            "Table Format",
+            "How this file is divided into columns".to_string(),
+            items,
+            0,
+            false,
+            vec![
+                DialogButton::new("Change", Some(Command::SubmitListChoice)),
+                DialogButton::new("Cancel", None),
+            ],
+            return_focus,
+        )
+    }
+
     /// The syntax-mode picker, opened from the status bar's grammar name
     /// (SPEC §21, ADR-058).
     ///
@@ -961,6 +1189,7 @@ impl DialogState {
         match &self.body {
             DialogBody::List(picker) => (picker.len(), picker.scroll()),
             DialogBody::Browser(browser) => (browser.len(), browser.scroll()),
+            DialogBody::Text(text) => (text.lines.len(), text.scroll),
             _ => (0, 0),
         }
     }
@@ -998,6 +1227,7 @@ impl DialogState {
             DialogBody::Message(message) => message,
             DialogBody::Input { prompt, .. } => prompt,
             DialogBody::List(picker) => &picker.prompt,
+            DialogBody::Text(text) => &text.header,
             // The browser's prompt is where it is, which changes under it.
             DialogBody::Browser(_) => "",
         }
@@ -1028,6 +1258,7 @@ impl DialogState {
         }
         match &self.body {
             DialogBody::Browser(_) => MAX_BROWSER_ROWS,
+            DialogBody::Text(_) => MAX_TEXT_ROWS,
             _ => MAX_LIST_ROWS,
         }
     }
@@ -1037,9 +1268,25 @@ impl DialogState {
     pub fn has_list_body(&self) -> bool {
         match &self.body {
             DialogBody::List(picker) => !picker.has_no_items(),
-            DialogBody::Browser(_) => true,
+            DialogBody::Browser(_) | DialogBody::Text(_) => true,
             _ => false,
         }
+    }
+
+    /// The lines of a text body, and nothing for every other body.
+    pub fn text(&self) -> Option<&TextBody> {
+        match &self.body {
+            DialogBody::Text(text) => Some(text),
+            _ => None,
+        }
+    }
+
+    /// Whether the body's rows are drawn inside a frame of their own.
+    ///
+    /// Every body that scrolls: the frame is what says the rows are a pane with
+    /// more of it above or below, and the scrollbar is drawn down its edge.
+    pub fn rows_are_framed(&self) -> bool {
+        self.field_filters() || matches!(self.body, DialogBody::Text(_))
     }
 
     /// The widest row the body wants to draw, so the box can be sized to it.
@@ -1051,6 +1298,9 @@ impl DialogState {
                 .map(|entry| entry.name.width() + LIST_MARKER_WIDTH + usize::from(entry.is_dir))
                 .max()
                 .unwrap_or(0),
+            // Two more cells than the widest line: the rows sit inside a frame
+            // of their own, as the browser's do.
+            DialogBody::Text(text) => text.width() + 2,
             _ => 0,
         }
     }
@@ -1091,6 +1341,7 @@ impl DialogState {
         match &mut self.body {
             DialogBody::Browser(browser) => browser.step(delta, height),
             DialogBody::List(picker) => picker.step(delta, height),
+            DialogBody::Text(text) => text.step(delta, height),
             _ => {}
         }
     }
@@ -1117,6 +1368,9 @@ impl DialogState {
             // with the buttons directly beneath the sentence.
             DialogBody::Message(_) => 2,
             DialogBody::Input { .. } => 2,
+            // The prompt, the rows and the two border rows of the frame they
+            // are drawn inside — the picker's shape, without the filter.
+            DialogBody::Text(text) => 3 + MAX_TEXT_ROWS.min(text.lines.len()).max(1),
             // The prompt, the rows, and — when there is a filter — the field
             // and the two border rows of the box the rows are drawn inside.
             DialogBody::List(picker) => {

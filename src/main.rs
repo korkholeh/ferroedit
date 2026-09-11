@@ -151,6 +151,12 @@ fn run(cli: &Cli) -> Result<()> {
         // from what this leaves behind, and a read that lands inside its first
         // slice therefore never draws one at all.
         app.advance_open();
+        // A tab can arrive without a command having put it there: the files
+        // named on the command line, and the last slice of a large one, both
+        // land here. Focus has to follow the tab in front either way, or the
+        // pane on screen is one whose own keys are not bound yet and the first
+        // press is swallowed (SPEC §26).
+        app.normalize_focus();
 
         // Colour the lines that are about to be drawn. Before the draw and not
         // inside it, because `ui/` only ever reads `App` and a cache has to

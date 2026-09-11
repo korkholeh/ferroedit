@@ -24,18 +24,31 @@ use crate::commands::Command;
 use crate::event::keyboard;
 use crate::ui::explorer::selection_style;
 use crate::ui::theme::Theme;
-use crate::ui::{field, scrollbar};
+use crate::ui::{field, legend, scrollbar};
 
 const ELLIPSIS: char = '…';
-
-/// What separates two pieces of the legend on the bottom border.
-const SEPARATOR: &str = "  ·  ";
 
 /// The most cells the author column takes, however long the names are. Past it
 /// a name is cut: the subject is what a reader is scanning for.
 const MAX_AUTHOR: usize = 18;
 
-/// `2026-09-10`, plus the two spaces after every column.
+/// The fewest it takes while it is drawn at all.
+///
+/// Eight cells is a first name or an initial and a surname — enough to tell
+/// one committer from another, which is what the column is for. Below it the
+/// column is dropped rather than shrunk further: three letters and an ellipsis
+/// is a column that costs four cells to say nothing (ADR-080).
+const MIN_AUTHOR: usize = 8;
+
+/// The subject's floor, and the reason the other three columns give way.
+///
+/// A commit message is written to be read at fifty cells and the convention
+/// caps its subject at seventy-two. Thirty is well under both — it is not
+/// "enough", it is the width below which the secondary columns have stopped
+/// being worth their cells, and it is what makes them go one at a time.
+const MIN_SUBJECT: usize = 30;
+
+/// `2026-09-10`, plus the two spaces in front of every column.
 const DATE_WIDTH: usize = 10;
 const GAP: usize = 2;
 
@@ -117,7 +130,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
                 // The selected row is one span, so the highlight covers the
                 // gaps between the columns as well as the columns.
                 Line::from(Span::styled(
-                    widths.row(commit),
+                    widths.row(commit, theme),
                     selection_style(theme, focused),
                 ))
             } else {
@@ -128,60 +141,38 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     frame.render_widget(Paragraph::new(lines), rows);
 }
 
-/// The keys of the pane, as spans for its bottom border.
+/// The keys of the pane, as spans for its bottom border (ADR-071).
 ///
-/// Read out of the keymap rather than written here, so the legend cannot
-/// advertise a key that is not bound — the same rule the menu's shortcut
-/// column follows (SPEC §25, ADR-028). Pieces are dropped from the end while
-/// they do not fit, so a narrow terminal keeps the first and most useful ones
-/// instead of losing the line altogether.
+/// The measuring and the dropping are `ui::legend`'s, which the image viewer
+/// uses too; what is here is which keys this pane has.
 fn legend(log: &LogState, room: usize, theme: &Theme) -> Vec<Span<'static>> {
     let key = |command: &Command| keyboard::binding_for(command).map(|b| b.label);
     // The arrows are the one pair not looked up: they are their own label, and
     // `Up / Down` spelled out is three times the width for no more meaning.
-    let mut pieces: Vec<(&'static str, &'static str)> = if log.searching {
+    let pieces: Vec<legend::Piece> = if log.searching {
         vec![
             ("↑↓", "move"),
             (key(&Command::LogSearchSubmit).unwrap_or(""), "search git"),
             (key(&Command::LogSearchClose).unwrap_or(""), "cancel"),
         ]
     } else {
+        // In the order they are given up, least useful last: the legend drops
+        // from the end, and the two keys ADR-080 added would otherwise have
+        // pushed `Esc close` off a pane of ordinary width.
         vec![
             ("↑↓", "move"),
             (key(&Command::LogShowCommit).unwrap_or(""), "diff"),
+            (key(&Command::LogShowMessage).unwrap_or(""), "message"),
+            (
+                key(&Command::LogToggleColumns).unwrap_or(""),
+                if log.show_columns { "wide" } else { "columns" },
+            ),
             (key(&Command::LogSearchOpen).unwrap_or(""), "search"),
-            (key(&Command::LogRefresh).unwrap_or(""), "refresh"),
             (key(&Command::LogClose).unwrap_or(""), "close"),
+            (key(&Command::LogRefresh).unwrap_or(""), "refresh"),
         ]
     };
-    pieces.retain(|(key, _)| !key.is_empty());
-
-    let width = |pieces: &[(&str, &str)]| {
-        pieces
-            .iter()
-            .map(|(key, what)| key.width() + 1 + what.width())
-            .sum::<usize>()
-            + SEPARATOR.width() * pieces.len().saturating_sub(1)
-            // A space at each end, so the text does not touch the corners.
-            + 2
-    };
-    while !pieces.is_empty() && width(&pieces) > room {
-        pieces.pop();
-    }
-    if pieces.is_empty() {
-        return Vec::new();
-    }
-
-    let mut spans = vec![Span::raw(" ")];
-    for (index, (key, what)) in pieces.into_iter().enumerate() {
-        if index > 0 {
-            spans.push(Span::styled(SEPARATOR, Style::new().fg(theme.dim)));
-        }
-        spans.push(Span::styled(key, Style::new().fg(theme.diff_hunk)));
-        spans.push(Span::styled(format!(" {what}"), Style::new().fg(theme.dim)));
-    }
-    spans.push(Span::raw(" "));
-    spans
+    legend::spans(&pieces, room, theme)
 }
 
 /// The row the search field is drawn in, when it is open.
@@ -241,70 +232,104 @@ fn empty_message(log: &LogState) -> Option<String> {
     ))
 }
 
-/// The width of each column, resolved against the widest value on screen.
+/// The width of each column, resolved against the widest value on screen and
+/// against what the pane has to give (ADR-080).
+///
+/// Zero means the column is not drawn at all, gap included. The subject is
+/// what everything else is resolved *for*: the three columns in front of it
+/// locate a commit, and the subject is the only one that says what it did, so
+/// it is the one that keeps its width and they are the ones that give way.
 struct Columns {
     oid: usize,
+    date: usize,
     author: usize,
     subject: usize,
 }
 
 impl Columns {
     fn of(log: &LogState, width: usize) -> Self {
+        if !log.show_columns {
+            // The whole pane, less the one gap in front of it.
+            return Self {
+                oid: 0,
+                date: 0,
+                author: 0,
+                subject: width.saturating_sub(GAP),
+            };
+        }
         let widest = |f: fn(&crate::git::Commit) -> &str, cap: usize| {
             log.rows().map(|c| f(c).width()).max().unwrap_or(0).min(cap)
         };
-        let oid = widest(|c| c.short.as_str(), 40).max(7);
-        let author = widest(|c| c.author.as_str(), MAX_AUTHOR);
-        // Everything the three fixed columns and the four gaps around them did
-        // not take — one in front of the row and one between each pair. It can
-        // be nothing at all in a very narrow pane, and `fit` answers with an
-        // empty string rather than panicking.
-        let subject = width.saturating_sub(oid + DATE_WIDTH + author + GAP * 4);
+        let mut oid = widest(|c| c.short.as_str(), 40).max(7);
+        let mut date = DATE_WIDTH;
+        let mut author = widest(|c| c.author.as_str(), MAX_AUTHOR);
+
+        // One gap in front of every column that is drawn, the subject
+        // included: a column that is gone takes its gap with it.
+        let left = |oid: usize, date: usize, author: usize| {
+            let drawn = 1 + usize::from(oid > 0) + usize::from(date > 0) + usize::from(author > 0);
+            width.saturating_sub(oid + date + author + GAP * drawn)
+        };
+        // The author gives its cells back first — a cut name is still a name —
+        // and then the columns go one at a time, least useful first: the date
+        // before the author, and the abbreviated name last, because it is the
+        // one thing on the row that names the commit to git.
+        while author > MIN_AUTHOR && left(oid, date, author) < MIN_SUBJECT {
+            author -= 1;
+        }
+        for column in 0..3 {
+            if left(oid, date, author) >= MIN_SUBJECT {
+                break;
+            }
+            match column {
+                0 => date = 0,
+                1 => author = 0,
+                _ => oid = 0,
+            }
+        }
+        let subject = left(oid, date, author);
         Self {
             oid,
+            date,
             author,
             subject,
         }
     }
 
+    /// The columns of one commit, widest-first, skipping the ones that are not
+    /// drawn. The colour of each is a role it already had elsewhere: the
+    /// abbreviated name locates a commit the way `@@ … @@` locates a hunk, and
+    /// an author is a name the way a directory is.
+    fn cells(&self, commit: &crate::git::Commit, theme: &Theme) -> Vec<(String, Style)> {
+        [
+            (self.oid, &commit.short, theme.diff_hunk),
+            (self.date, &commit.date, theme.dim),
+            (self.author, &commit.author, theme.directory),
+            (self.subject, &commit.subject, theme.foreground),
+        ]
+        .into_iter()
+        .filter(|(width, _, _)| *width > 0)
+        .map(|(width, value, colour)| (fit(value, width), Style::new().fg(colour)))
+        .collect()
+    }
+
     /// The whole row as one string — what the selected row is drawn as.
-    fn row(&self, commit: &crate::git::Commit) -> String {
+    fn row(&self, commit: &crate::git::Commit, theme: &Theme) -> String {
         let gap = " ".repeat(GAP);
-        format!(
-            "{gap}{}{gap}{}{gap}{}{gap}{}",
-            fit(&commit.short, self.oid),
-            fit(&commit.date, DATE_WIDTH),
-            fit(&commit.author, self.author),
-            fit(&commit.subject, self.subject),
-        )
+        self.cells(commit, theme)
+            .into_iter()
+            .map(|(text, _)| format!("{gap}{text}"))
+            .collect()
     }
 
     /// The same row in colour, for every row that is not the selected one.
-    ///
-    /// The colours are borrowed rather than new: the abbreviated name is the
-    /// locator of a commit the way `@@ … @@` is the locator of a hunk, and the
-    /// author is a name the way a directory is.
     fn spans(&self, commit: &crate::git::Commit, theme: &Theme) -> Vec<Span<'static>> {
-        let gap = || Span::raw(" ".repeat(GAP));
-        vec![
-            gap(),
-            Span::styled(
-                fit(&commit.short, self.oid),
-                Style::new().fg(theme.diff_hunk),
-            ),
-            gap(),
-            Span::styled(fit(&commit.date, DATE_WIDTH), Style::new().fg(theme.dim)),
-            gap(),
-            Span::styled(
-                fit(&commit.author, self.author),
-                Style::new().fg(theme.directory),
-            ),
-            gap(),
-            Span::styled(
-                fit(&commit.subject, self.subject),
-                Style::new().fg(theme.foreground),
-            ),
-        ]
+        let mut spans = Vec::new();
+        for (text, style) in self.cells(commit, theme) {
+            spans.push(Span::raw(" ".repeat(GAP)));
+            spans.push(Span::styled(text, style));
+        }
+        spans
     }
 }
 
@@ -350,6 +375,7 @@ mod tests {
             author: author.into(),
             date: "2026-09-10".into(),
             subject: subject.into(),
+            body: String::new(),
         }
     }
 
@@ -366,32 +392,87 @@ mod tests {
 
     #[test]
     fn a_row_is_exactly_the_panes_width() {
+        let theme = Theme::default();
         let log = log();
-        let widths = Columns::of(&log, 60);
-        for commit in log.rows() {
-            assert_eq!(widths.row(commit).width(), 60, "{}", commit.short);
+        for width in [40, 60, 100, 200] {
+            let widths = Columns::of(&log, width);
+            for commit in log.rows() {
+                assert_eq!(
+                    widths.row(commit, &theme).width(),
+                    width,
+                    "at {width}: {}",
+                    commit.short
+                );
+            }
         }
     }
 
+    /// A wide pane keeps every column and caps the author's; the subject takes
+    /// what is left, which is most of it.
     #[test]
-    fn a_long_name_is_cut_rather_than_pushing_the_subject_off() {
+    fn a_wide_pane_keeps_every_column_and_caps_the_author() {
+        let theme = Theme::default();
         let log = log();
-        let widths = Columns::of(&log, 60);
+        let widths = Columns::of(&log, 120);
         assert_eq!(widths.author, MAX_AUTHOR);
-        let row = widths.row(log.rows().nth(1).unwrap());
-        assert!(row.contains(ELLIPSIS), "{row}");
+        assert!(widths.subject >= 60, "{}", widths.subject);
+        let row = widths.row(log.rows().nth(1).unwrap(), &theme);
+        assert!(row.contains(ELLIPSIS), "the long name is cut: {row}");
         assert!(row.contains("fix: a bug"), "{row}");
+    }
+
+    /// The columns give way one at a time as the pane narrows, and the subject
+    /// keeps its floor for as long as there is one to keep (ADR-080).
+    ///
+    /// The author shrinks first — a cut name is still a name — then the date
+    /// goes, then the author, and the abbreviated name is the last to leave:
+    /// it is the one thing on the row that names the commit to git.
+    #[test]
+    fn the_subject_keeps_its_width_and_the_columns_give_way_in_turn() {
+        let log = log();
+        let wide = Columns::of(&log, 120);
+        let middling = Columns::of(&log, 70);
+        let narrow = Columns::of(&log, 50);
+
+        assert!(middling.author < wide.author, "the author shrinks first");
+        assert!(middling.subject >= MIN_SUBJECT);
+        assert_eq!(narrow.date, 0, "the date is the first column to go");
+        assert!(narrow.oid > 0, "and the hash is the last");
+        assert!(narrow.subject >= MIN_SUBJECT, "{}", narrow.subject);
+
+        // Never wider than it is asked for, and never widening as the pane
+        // narrows.
+        for width in MIN_SUBJECT..200 {
+            let columns = Columns::of(&log, width);
+            assert!(columns.author == 0 || columns.author >= MIN_AUTHOR);
+        }
+    }
+
+    /// The columns can be switched off outright, which gives the subject the
+    /// whole pane (ADR-080).
+    #[test]
+    fn hiding_the_columns_gives_the_subject_the_pane() {
+        let theme = Theme::default();
+        let mut log = log();
+        log.show_columns = false;
+        let widths = Columns::of(&log, 60);
+        assert_eq!((widths.oid, widths.date, widths.author), (0, 0, 0));
+        assert_eq!(widths.subject, 60 - GAP);
+        let row = widths.row(log.rows().next().unwrap(), &theme);
+        assert!(row.contains("feat: the newest thing"), "{row}");
+        assert_eq!(row.width(), 60);
     }
 
     /// A pane too narrow for the fixed columns leaves the subject nothing, and
     /// that is a row with no subject rather than a panic.
     #[test]
     fn a_pane_with_no_room_for_a_subject_does_not_panic() {
+        let theme = Theme::default();
         let log = log();
         for width in 0..30 {
             let widths = Columns::of(&log, width);
             for commit in log.rows() {
-                let _ = widths.row(commit);
+                let _ = widths.row(commit, &theme);
             }
         }
     }

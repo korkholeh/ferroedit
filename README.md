@@ -119,7 +119,7 @@ ferroedit +42 main.rs  # open a file at line 42
 - Gzipped files opened on their text, read-only — a `dump.sql.gz` reads as SQL without
   being unpacked first, and *Save As* writes it out
 - PNG and JPEG files opened on the picture: coloured half-blocks, so a terminal cell holds
-  two pixels, with a metadata column, zoom, and panning by keyboard or mouse
+  two pixels, with zoom, panning by keyboard or mouse, and an `m` for the metadata
 - Git: status, stage/unstage, commit, pull, push, branches, merge, diff
 - Git history: the repository's log with a text search over it, the history of a file,
   the history of the lines you have selected — and any commit in it opened as a diff

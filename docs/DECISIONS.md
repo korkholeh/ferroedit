@@ -2998,3 +2998,208 @@ as it does for a document (SPEC §11) — a diff of a file is still deliberately
 had something to say about it" is not an I/O failure and reads badly as one. And the sliced
 read (ADR-077) now feeds two destinations: it reads bytes, and `finish_pending_open` is where
 a large PNG and a large log part company.
+
+---
+
+## ADR-079: The View menu's long tails are pickers, not entries
+
+**Decision.** The five `Theme: …` entries, the three `Focus …` entries and the two CSV
+format entries leave the top level of the View menu. In their place stand `Theme…`,
+`Focus Pane…` and `Table Format…` — three list dialogs built from the pickers the editor
+already had. The menu goes from twenty-seven rows to eighteen.
+
+**Why.** A drop-down is clamped to the frame and does not scroll: `popup_rect` takes
+`min(items + 2, area.height - 1)` and whatever is past that is simply not drawn. At
+twenty-seven rows the View menu did not fit a 24-row terminal, which is the size the
+editor is checked at — so `Theme: Retro` was a menu entry that existed in the table and
+not on the screen. Every row that leaves the top level is a row that cannot be lost that
+way.
+
+**Why pickers rather than submenus.** A submenu is a second open drop-down: its own rect,
+its own hit-test, its own keyboard model for opening, returning and closing, and its own
+answer to what happens when it does not fit either. A picker is `DialogState::list`, which
+five features already use, and it comes with the filter, the scroll, the mouse and the
+keyboard for free. It also *says more*: `Table Format…` shows the delimiter and the quote
+character it would change, so the common question — "what is this file being split on?" —
+is answered without opening anything.
+
+**Why `Table View` stays.** It is the switch that is actually reached for, it has a key
+(`F4`), and a switch behind a dialog is a switch nobody flips. The two questions behind it
+are asked once a session, if at all.
+
+**Why `Table Format…` opens a picker whose rows open pickers.** The delimiter and the
+quote are independent — a file can need a different one of each — so they cannot be one
+list, and two rows of a menu that had run out of rows is what this ADR is about.
+
+**Cost.** Choosing a theme is now two keystrokes more than it was, and `ThemeKind::ALL`
+stops being test-only because the picker is built from it. The test that checked every
+theme had a menu entry now checks the picker has a row, which is the same guarantee one
+level down.
+
+---
+
+## ADR-080: A pane's chrome gives its room back to what the pane is for
+
+**Decision.** Two panes stop spending their width on saying what they are.
+
+The **log viewer**'s three columns in front of the subject — the abbreviated name, the
+date and the author — now give way as the pane narrows: the author shrinks to eight cells,
+then the date goes, then the author, and the abbreviated name is the last to leave. The
+subject keeps thirty cells for as long as anything can be dropped to give them to it. `c`
+hides all three outright, and `m` opens the selected commit's whole message — subject and
+body — in a box. `Enter` still opens the diff.
+
+The **image viewer** opens with its metadata column *off*. The compact set — the name, the
+format, the dimensions and the scale — is the frame's own title, which was there all along;
+`m` opens the column, which is now three groups under headings rather than four blocks
+separated by blank lines. The status bar stops repeating the format and the dimensions.
+
+Both panes now advertise their keys on the bottom border, through one shared
+`ui::legend` (ADR-071 was the log's alone).
+
+**Why the subject.** The three columns locate a commit; the subject is the only one that
+says what it did. At eighty columns the pane is fifty-odd cells wide and the columns took
+thirty-five of them, so the thing a reader is scanning for was the thing being cut. The
+same argument the other way is why they are dropped in that order: a date is inferable
+from the ones above it, an author is usually the same person twice, and the abbreviated
+name is what a commit is *called*.
+
+**Why the message is read with the list and not on demand.** `%b` costs nothing to add to
+the `git log --format` that already runs, and a subprocess per keystroke would put a
+spinner on a question git has already answered. The cost is the bodies of up to
+`MAX_COMMITS` commits in memory, which is text nobody writes megabytes of.
+
+**Why the picture's column starts closed.** It was twenty-six columns — a third of a
+pane on an eighty-column terminal — and the first four rows of it were the four things the
+title already said. A viewer that gave the labels more room than the photograph is showing
+the wrong thing (ADR-078 said so about a *narrow* pane; this is the same sentence about
+every pane).
+
+**Why `Showing` is clipped to the raster.** The visible span is how much *pane* there is
+in image pixels, which for a picture smaller than the pane counts the blank margins beside
+it: `660 × 648 px` of a 400-pixel-tall image. And the origin of such a picture is negative
+— that is what centres it — so the corner readout was clamping to `0,0` and reporting a
+place the user could not have panned to. Both now say `whole image` instead, and the
+heading over the group says the coordinates are the image's own pixels.
+
+**Consequence.** `normalize_focus` now runs once a frame rather than only after a command.
+A tab can arrive without a command having put it there — the files named on the command
+line, and the last slice of a large one — and the first key pressed in such a pane was
+being resolved against `Editor` and swallowed. It is what made `m` appear not to work on a
+picture opened as `ferroedit photo.png`.
+
+---
+
+## ADR-081: A column of numbers is read from the right, conservatively
+
+**Decision.** A CSV column whose every non-blank value is a plain number is right-aligned;
+everything else stays left-aligned. "Plain number" is a sign, digits and at most one
+decimal point — so `1.2.3`, `2026-09-09`, `12:30`, `1,234`, `10%` and `007` are all
+strings. The header is not consulted, and the header cell takes its column's alignment.
+The name of the column the cursor is in is drawn in the ordinary text colour, still bold,
+rather than in the panel-title dim.
+
+**Why.** Lining up on the last digit is what lets two quantities be compared by their
+length without reading either — the whole reason a spreadsheet does it. Left-aligned, `479`
+and `50771` look the same size.
+
+**Why so narrow a definition.** A version, a date, an ISO week, a zip code, a part number
+and a phone extension are all made of digits and none of them is a quantity. Right-aligning
+them lines up the wrong end of a string that is read from the left, and the leading zero of
+`007` is information a "number" would have thrown away. The failure mode of being too
+strict is a column of quantities drawn exactly as it was before this existed; the failure
+mode of being too loose is a column of identifiers silently rearranged. One of those is a
+regression and the other is a bug report about the data.
+
+**Why unanimous rather than a majority.** The alignment is a claim about the column, and
+one value in it that is not a quantity is the counter-example. Blanks are ignored — a
+missing measurement is not evidence either way — and a column with no values at all is not
+numeric, because nothing has been found out.
+
+**Why the decision is made in the parse.** `Table::from_records` already walks every cell
+to measure the widths; sniffing types in `ui/` would answer the same question for every
+visible cell on every frame, and could answer it differently for two cells of one column
+(ARCHITECTURE invariant 4).
+
+---
+
+## ADR-082: A replaced line says which part of it changed
+
+**Decision.** When a run of removed lines is followed by a run of added lines of the *same
+length*, the two are paired off in order and each pair's common head and tail are found by
+grapheme cluster. What is left in the middle is marked with a background — a deep green on
+the added line, a deep red on the removed one — and the line keeps the foreground colour
+that says which side of the change it is. Everything else keeps the whole-line colouring it
+had.
+
+**Why.** `+ width.saturating_sub(left.max(MIN_LEFT)).saturating_sub(GAP) as usize` against
+its removed twin is two nearly identical eighty-column lines, and finding the twenty
+characters that differ is work the reader should not be doing.
+
+**Why runs of equal length only.** Three lines becoming one is a rewrite, not three
+replacements: pairing the first of each would mark two lines that have nothing to do with
+each other. Git's own `--word-diff` has the same shape of problem and answers it with a
+real sequence alignment; a prefix-and-suffix walk over equal runs gets the common case —
+one line edited in place — for a fraction of the code and never claims more than it knows.
+
+**Why a quarter of the shorter line has to be common.** `alpha` and `omega` share a final
+`a`. Marking `alph` and `omeg` says nothing the two colours did not already say, and a
+diff where everything is marked has marked nothing.
+
+**Why clusters and not bytes.** A mark that started or ended inside a character would leave
+a combining accent on the wrong side of the boundary, drawn as its own glyph — and slicing
+the line there would panic.
+
+**Why the caps.** The walk is linear in the length of a line, so a minified bundle of half
+a megabyte is a real cost for a mark nobody can read; and a generated file replaced whole
+is thousands of pairs nobody reads one by one. Past two thousand bytes a line, or two
+hundred lines a run, the pair keeps its whole-line colour — the fallback is the previous
+behaviour, so there is nothing to get wrong.
+
+---
+
+## ADR-083: Secondary text is held to a contrast ratio, not to "a different colour"
+
+**Decision.** `Palette` gains three roles — `chrome_readout` (secondary text on the bars
+that is *read*, as against `on_chrome_dim`, which is an inactive tab's name), `find_bar`
+(the find/replace bar's own ground) and `selection_dim` (the ground of the selected row of
+an unfocused pane) — and the dim tiers of every indexed theme are raised. A test computes
+WCAG contrast against the xterm-256 palette and holds secondary text to 4:1 on its own
+ground, and the two quiet cases — a selected row in a pane without focus, and a
+notification on the chrome — to 2.8:1.
+
+**Why a ratio.** The check that existed asked only that text and ground be *different
+colours*, which a comment three shades off its ground passes while being unreadable. The
+dark theme's status readout was 2.8:1, its comments 3.3:1, and the Retro theme's selected
+row in an unfocused git panel put a yellow `M` on a light grey at 2.2:1 — all of which
+that check called correct.
+
+**Why `find_bar` is a role.** The bar is wedged between the editor's ground above it and
+the status bar's chrome below it. Cut from the same grey as the status bar it reads as one
+two-row bar; and with the dark theme's field colour being the editor's own ground, the
+whole thing read as two more rows of the file with the word `Find:` in front of them. It
+needs a tone that is neither, and the field needs one that is none of the three grounds it
+is ever drawn on. The sixteen-colour schemes have no third tone and fall back to `chrome`,
+as the tab strip does (ADR-072).
+
+**Why `selection_dim` is a role.** An unfocused selection was the chrome. In the Retro
+scheme the panes are blue and the chrome is a light grey, so a mark cut from the chrome put
+every colour the pane draws — the yellow of a modified file, the cyan of a directory —
+onto the one ground none of them was chosen against. It is a tone of the *pane's* ground
+now, which is what makes it a quiet mark rather than a second focused selection.
+
+**Why the notification colours are bar colours.** They are drawn on the status bar, on the
+find bar and on the tab strip, and nowhere else — the one exception, the notice a
+too-small terminal gets, is now painted on the chrome too. So they are chosen against
+`chrome`, which is why the Retro scheme's are dark: its cyan and its yellow shine on the
+blue ground and were 1.9:1 and 2.2:1 on the grey the status bar is cut from.
+
+**Why 2.8 for the two quiet cases.** A quiet selection's ground is deliberately a shade of
+the pane's own, so every colour on it loses a little of what it has beside it; and the
+darkest yellow the palette holds is 2.8:1 on Retro's light grey — a yellow dark enough to
+reach four has stopped being yellow, and a warning that is not yellow is not a warning. The
+floor is still worth having: it is what the 1.3:1 error colour failed.
+
+**Cost.** Five palettes gained three fields each and a dozen values moved. The sixteen-
+colour schemes are exempt from the ratio check entirely: those colours are whatever the
+user's terminal says they are, which is the whole point of them.

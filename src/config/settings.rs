@@ -45,12 +45,12 @@ pub enum ThemeKind {
 }
 
 impl ThemeKind {
-    /// Every theme, in the order the View menu lists them.
+    /// Every theme, in the order the picker lists them.
     ///
-    /// Only the tests need the list — the menu is a static table, and it is
-    /// that table this is checked against, so a theme that was added without a
-    /// way to reach it fails a test rather than shipping.
-    #[cfg(test)]
+    /// It was the tests' alone while the View menu spelled the five out as
+    /// five entries. The picker behind View → Theme… is built from this list
+    /// instead (ADR-079), so a theme added here is reachable by that fact —
+    /// and the test that used to check the menu now checks the picker.
     pub const ALL: [ThemeKind; 5] = [
         Self::Dark,
         Self::Light,

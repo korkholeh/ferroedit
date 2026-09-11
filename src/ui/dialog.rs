@@ -56,9 +56,10 @@ pub fn render(frame: &mut Frame, app: &App, rects: &LayoutRects, theme: &Theme) 
             let (len, scroll) = dialog.list_extent();
             render_list_frame(frame, outline, list, len, scroll, theme);
         }
-        match dialog.browser() {
-            Some(browser) => render_browser(frame, browser, list, theme),
-            None => render_list(frame, dialog, list, theme),
+        match (dialog.browser(), dialog.text()) {
+            (Some(browser), _) => render_browser(frame, browser, list, theme),
+            (None, Some(text)) => render_text(frame, text, list, theme),
+            (None, None) => render_list(frame, dialog, list, theme),
         }
     }
     render_buttons(frame, dialog, rects, theme);
@@ -193,6 +194,26 @@ fn render_list(frame: &mut Frame, dialog: &DialogState, area: Rect, theme: &Them
         })
         .collect();
     frame.render_widget(Paragraph::new(rows), area);
+}
+
+/// The lines of a text body, in the window the scroll has put over them.
+///
+/// A paragraph and not a list: nothing is selected, nothing is marked, and the
+/// only thing that moves is which lines are on screen (ADR-080).
+fn render_text(frame: &mut Frame, text: &crate::app::dialog::TextBody, rows: Rect, theme: &Theme) {
+    let lines: Vec<Line> = text
+        .lines()
+        .iter()
+        .skip(text.scroll())
+        .take(rows.height as usize)
+        .map(|line| {
+            Line::from(Span::styled(
+                format!(" {line}"),
+                theme.dialog.fg(theme.foreground),
+            ))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), rows);
 }
 
 fn render_message(frame: &mut Frame, dialog: &DialogState, area: Rect, theme: &Theme) {

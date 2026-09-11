@@ -49,8 +49,13 @@ const DIALOG_BROWSER_MIN_WIDTH: u16 = 52;
 /// Width of the ` Find: ` / ` Repl: ` labels at the left of each bar row.
 const SEARCH_LABEL_WIDTH: u16 = 7;
 
-/// `[Aa]` plus the space in front of it.
-const CASE_TOGGLE_WIDTH: u16 = 5;
+/// `[Aa✓]` plus the space in front of it.
+///
+/// Five cells and not four: the toggle says which way it is pointing with a
+/// mark inside the brackets as well as with a colour, so that a terminal whose
+/// palette flattens the highlight — or a reader who does not see the
+/// difference — still has the answer.
+const CASE_TOGGLE_WIDTH: u16 = 6;
 
 /// Room kept on the find row for the `3/17` readout.
 const COUNT_WIDTH: u16 = 8;
@@ -60,9 +65,15 @@ const COUNT_WIDTH: u16 = 8;
 /// the field it is crowding.
 const MIN_SEARCH_FIELD: u16 = 8;
 
-/// `[Replace]` and `[All]`, each with a leading space.
-const REPLACE_BUTTON_WIDTH: u16 = 10;
-const REPLACE_ALL_BUTTON_WIDTH: u16 = 6;
+/// `[Replace]` and `[Replace all]`, each with the two blank columns that keep
+/// it off the button beside it.
+///
+/// `[All]` said what it did to nobody who had not already guessed: the row it
+/// sits on is the *replacement* row, and "all" of something is not a verb. The
+/// two columns rather than one because the two buttons were touching, and a
+/// pair of bracketed words with a single space between them reads as one.
+const REPLACE_BUTTON_WIDTH: u16 = 11;
+const REPLACE_ALL_BUTTON_WIDTH: u16 = 15;
 
 /// Where the pieces of the find/replace bar are.
 ///
@@ -236,7 +247,10 @@ pub fn compute(area: Rect, app: &App) -> LayoutRects {
     // A field pushes the rows one row down, and is also what says the rows are
     // a pane worth framing: every list with a filter over it is one long enough
     // to scroll (ADR-051, ADR-058).
-    let framed = app.dialog.as_ref().is_some_and(DialogState::field_filters);
+    let framed = app
+        .dialog
+        .as_ref()
+        .is_some_and(DialogState::rows_are_framed);
     let has_field = app.dialog.as_ref().is_some_and(|d| d.field().is_some());
     let dialog_list_frame = match (dialog, app.dialog.as_ref()) {
         (Some(rect), Some(state)) if state.has_list_body() && framed => {
@@ -1038,6 +1052,40 @@ mod tests {
             let rects = compute(area, &app);
             let popup = rects.menu_popup.expect("an open menu has a popup");
             assert!(contains(area, popup), "menu {index}: {popup:?}");
+        }
+    }
+
+    /// Nothing on the find bar is ever drawn over anything else on it, at any
+    /// width the editor draws at all.
+    ///
+    /// The pieces are packed from the right and the field takes what is left,
+    /// so a bar too narrow for a piece drops it — and a piece that was dropped
+    /// has a zero-width rect the renderer skips, which is what stops a click
+    /// landing on something that was not drawn. Every command the dropped
+    /// furniture stands for is on the Search menu, so a narrow window loses a
+    /// button and not the ability.
+    #[test]
+    fn the_find_bars_pieces_never_overlap_at_any_width() {
+        for width in MIN_WIDTH..=200 {
+            let bar = Rect::new(0, 0, width, 2);
+            let rects = search_rects(bar, true);
+            let mut spans: Vec<Rect> = vec![rects.query, rects.count, rects.case_toggle];
+            spans.extend(rects.replacement);
+            spans.extend(rects.replace_button);
+            spans.extend(rects.replace_all_button);
+            spans.retain(|rect| rect.width > 0);
+            for (i, a) in spans.iter().enumerate() {
+                assert!(
+                    a.x >= bar.x + SEARCH_LABEL_WIDTH && a.right() <= bar.right(),
+                    "at {width}: {a:?} escapes the bar"
+                );
+                for b in spans.iter().skip(i + 1) {
+                    assert!(
+                        a.y != b.y || !a.intersects(*b),
+                        "at {width}: {a:?} and {b:?} overlap"
+                    );
+                }
+            }
         }
     }
 

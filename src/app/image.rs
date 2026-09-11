@@ -16,7 +16,8 @@ use std::path::{Path, PathBuf};
 
 use crate::image::Image;
 
-/// The zoom steps, as image pixels per half-cell.
+/// The zoom steps, as half-cells per image pixel — the scale a `100%` readout
+/// means, since a half-cell is what this renderer draws a pixel with.
 ///
 /// Steps rather than a continuous factor so that zooming in and back out lands
 /// exactly where it started, and so `1:1` is a stop the user passes through
@@ -43,7 +44,7 @@ pub const LEVELS: &[f64] = &[
     16.0,
 ];
 
-/// The index of `1.0` in `LEVELS`: one image pixel per half-cell, which is what
+/// The index of `1.0` in `LEVELS`: one half-cell per image pixel, which is what
 /// `1` on the keyboard goes to.
 pub const ACTUAL: usize = 8;
 
@@ -130,7 +131,12 @@ pub struct ImageState {
     file_bytes: u64,
     pub image: Image,
     pub zoom: Zoom,
-    /// Whether the metadata column is drawn.
+    /// Whether the metadata column is drawn (ADR-080).
+    ///
+    /// Off to start with. The column was on and took twenty-six of the pane's
+    /// columns to repeat what the frame's own title already says — the name,
+    /// the format, the size and the scale — leaving the picture two thirds of
+    /// the pane it was opened to fill. `m` is what asks for the rest.
     pub show_meta: bool,
     /// The image pixel at the pane's top-left corner. Fractional, because a
     /// zoomed-out pane advances by less than a pixel per cell and rounding
@@ -162,7 +168,7 @@ impl ImageState {
             // wants to see what it is before they see what it is made of, and
             // `1` is one key away.
             zoom: Zoom::Fit,
-            show_meta: true,
+            show_meta: false,
             origin: (0.0, 0.0),
             grab: None,
             canvas: Canvas::default(),
@@ -508,57 +514,124 @@ impl ImageState {
         }
     }
 
-    /// `1024,768`, the bottom-right readout: which pixel of the picture is in
-    /// the pane's top-left corner.
+    /// The bottom-right readout: where in the picture the window is.
+    ///
+    /// `1024,768 px` is the image pixel in the pane's top-left corner — a
+    /// coordinate in the *file's* raster and not in the terminal, which is
+    /// what the `px` is there to say. A window that covers the whole picture
+    /// has no such corner to report: the origin is then negative, because the
+    /// picture is centred in a pane bigger than it is, and the readout used to
+    /// clamp that to `0,0` and report a corner the user was not at. It says
+    /// `whole image` instead.
     pub fn position(&self) -> String {
+        if self.shows_whole_image() {
+            return " whole image ".to_string();
+        }
         format!(
-            " {},{} ",
+            " {},{} px ",
             self.origin.0.max(0.0).round() as u64,
             self.origin.1.max(0.0).round() as u64
         )
     }
 
-    /// The metadata column, as labelled rows.
+    /// Whether every pixel of the picture is on screen.
     ///
-    /// A blank label is a spacer, which is how the four groups — the file, the
-    /// picture, the colour and the view — are separated without a widget for it.
-    pub fn meta_rows(&self) -> Vec<(&'static str, String)> {
+    /// Asked of the span rather than of the zoom: `Fit` is not the only way to
+    /// see all of a picture — a small icon at 100% in a large pane is another
+    /// — and "is this all of it?" is a question about what is drawn.
+    pub fn shows_whole_image(&self) -> bool {
         let (span_x, span_y) = self.span();
-        vec![
-            ("File", self.title.clone()),
-            ("Size", byte_label(self.file_bytes)),
-            ("", String::new()),
-            ("Format", self.image.format.label().to_string()),
-            ("Width", format!("{} px", self.image.width)),
-            ("Height", format!("{} px", self.image.height)),
-            ("Pixels", format!("{:.1} MP", self.image.megapixels())),
-            ("Aspect", aspect_label(self.image.width, self.image.height)),
-            ("", String::new()),
-            ("Colour", self.image.colour.clone()),
-            (
+        span_x >= f64::from(self.image.width) && span_y >= f64::from(self.image.height)
+    }
+
+    /// The part of the picture the pane is showing, in image pixels: the
+    /// window clipped to the raster.
+    ///
+    /// Clipped, because the window is not the answer on its own — a picture
+    /// smaller than the pane is centred in it, so the window covers blank
+    /// margins as well, and `660 × 648 px` of a 400-pixel-tall image was a
+    /// number describing the terminal rather than the file.
+    fn visible_region(&self) -> (u64, u64) {
+        let (span_x, span_y) = self.span();
+        let clip = |origin: f64, span: f64, whole: u32| {
+            let start = origin.max(0.0);
+            let end = (origin + span).min(f64::from(whole));
+            (end - start).max(0.0).round() as u64
+        };
+        (
+            clip(self.origin.0, span_x, self.image.width),
+            clip(self.origin.1, span_y, self.image.height),
+        )
+    }
+
+    /// The metadata panel, as rows (ADR-080).
+    ///
+    /// Three groups under headings of their own — the file, the picture, and
+    /// where the window over it is — rather than four blocks separated by
+    /// blank lines. The heading is what makes the last group readable: `Top
+    /// left` and `Showing` are coordinates and sizes *in the image's own
+    /// pixels*, which the group's name now says and three unlabelled numbers
+    /// did not.
+    pub fn meta_rows(&self) -> Vec<MetaRow> {
+        let (visible_x, visible_y) = self.visible_region();
+        let mut rows = vec![
+            MetaRow::Heading("File"),
+            MetaRow::value("Name", self.title.clone()),
+            MetaRow::value("Size", byte_label(self.file_bytes)),
+            MetaRow::value("Format", self.image.format.label().to_string()),
+            MetaRow::Heading("Image"),
+            MetaRow::value(
+                "Size",
+                format!("{} × {} px", self.image.width, self.image.height),
+            ),
+            MetaRow::value("Pixels", format!("{:.1} MP", self.image.megapixels())),
+            MetaRow::value("Aspect", aspect_label(self.image.width, self.image.height)),
+            MetaRow::value("Colour", self.image.colour.clone()),
+            MetaRow::value(
                 "Alpha",
                 if self.image.has_alpha {
-                    "yes — over a checkerboard".to_string()
+                    "yes, on a checkerboard".to_string()
                 } else {
                     "no".to_string()
                 },
             ),
-            ("Bytes/px", bytes_per_pixel(self.file_bytes, &self.image)),
-            ("", String::new()),
-            ("Zoom", self.zoom_label()),
-            (
-                "Origin",
+            MetaRow::value("On disk", bytes_per_pixel(self.file_bytes, &self.image)),
+            MetaRow::Heading("View · image px"),
+            MetaRow::value("Zoom", self.zoom_label()),
+        ];
+        if self.shows_whole_image() {
+            // No corner to report and nothing cropped: two rows of numbers
+            // saying "0, 0" and the size of the picture again would be the
+            // panel answering a question the reader can see the answer to.
+            rows.push(MetaRow::value("Showing", "all of it".to_string()));
+        } else {
+            rows.push(MetaRow::value(
+                "Showing",
+                format!("{visible_x} × {visible_y} px"),
+            ));
+            rows.push(MetaRow::value(
+                "Top left",
                 format!(
                     "{}, {}",
                     self.origin.0.max(0.0).round() as u64,
                     self.origin.1.max(0.0).round() as u64
                 ),
-            ),
-            (
-                "Showing",
-                format!("{} × {} px", span_x.round() as u64, span_y.round() as u64),
-            ),
-        ]
+            ));
+        }
+        rows
+    }
+}
+
+/// One row of the metadata panel: a group's name, or a labelled value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MetaRow {
+    Heading(&'static str),
+    Value { label: &'static str, value: String },
+}
+
+impl MetaRow {
+    fn value(label: &'static str, value: String) -> Self {
+        Self::Value { label, value }
     }
 }
 
@@ -831,9 +904,22 @@ mod tests {
 
     #[test]
     fn the_metadata_column_is_dropped_when_it_would_crowd_out_the_picture() {
-        let view = viewer(10, 10);
+        let mut view = viewer(10, 10);
+        view.show_meta = true;
         assert!(view.meta_fits(80));
         assert!(!view.meta_fits(40));
+    }
+
+    /// A picture opens on the picture (ADR-080): the column is what `m` asks
+    /// for, and until it is asked for the pane is the photograph.
+    #[test]
+    fn a_picture_opens_with_the_pane_to_itself() {
+        let view = viewer(10, 10);
+        assert!(!view.show_meta);
+        assert!(
+            !view.meta_fits(200),
+            "the column is off, however wide the pane"
+        );
     }
 
     #[test]
@@ -847,9 +933,79 @@ mod tests {
         view.sync(canvas);
         assert!(view.title().contains("PNG 1920×1080"), "{}", view.title());
         assert!(view.title().contains("100%"), "{}", view.title());
-        let rows = view.meta_rows();
-        let aspect = rows.iter().find(|(label, _)| *label == "Aspect").unwrap();
-        assert_eq!(aspect.1, "16:9");
+        assert_eq!(value(&view, "Aspect").as_deref(), Some("16:9"));
+        // The "Size" of the *image*, which is the second row with that label:
+        // the first is the file's own size on disk.
+        assert!(
+            view.meta_rows().contains(&MetaRow::Value {
+                label: "Size",
+                value: "1920 × 1080 px".to_string(),
+            }),
+            "{:?}",
+            view.meta_rows()
+        );
+    }
+
+    /// The value of the first row with this label, for the tests below.
+    fn value(view: &ImageState, label: &str) -> Option<String> {
+        view.meta_rows().into_iter().find_map(|row| match row {
+            MetaRow::Value { label: name, value } if name == label => Some(value),
+            _ => None,
+        })
+    }
+
+    /// A window that covers the whole picture says so, rather than reporting a
+    /// corner it is not at and a region larger than the file (ADR-080).
+    ///
+    /// The origin of a picture smaller than the pane is *negative* — that is
+    /// what centres it — and the readout used to clamp it to `0,0`, which is a
+    /// coordinate the user could not have panned to.
+    #[test]
+    fn a_window_over_the_whole_picture_says_so() {
+        let mut view = viewer(40, 30);
+        view.sync(Canvas {
+            width: 200,
+            height: 50,
+        });
+        assert!(view.shows_whole_image());
+        assert_eq!(view.position().trim(), "whole image");
+        assert_eq!(value(&view, "Showing").as_deref(), Some("all of it"));
+        assert!(value(&view, "Top left").is_none(), "there is no corner");
+    }
+
+    /// A window over part of it reports the part, clipped to the raster: the
+    /// span alone counts the blank margins beside a picture as if they were
+    /// pixels of it.
+    #[test]
+    fn a_window_over_part_of_the_picture_reports_the_part() {
+        let mut view = viewer(1920, 1080);
+        view.zoom_actual();
+        view.sync(Canvas {
+            width: 80,
+            height: 24,
+        });
+        assert!(!view.shows_whole_image());
+        // 80 cells across and 48 pixel rows down, at one pixel per half-cell.
+        assert_eq!(value(&view, "Showing").as_deref(), Some("80 × 48 px"));
+        assert!(view.position().contains("px"), "{}", view.position());
+        let (x, y) = view.visible_region();
+        assert!(x <= u64::from(view.image.width) && y <= u64::from(view.image.height));
+    }
+
+    /// Every group of the panel is under a heading, so the last three values —
+    /// which are coordinates in the image's own pixels — say which pixels.
+    #[test]
+    fn the_panel_is_three_groups_under_headings() {
+        let view = viewer(40, 30);
+        let headings: Vec<&str> = view
+            .meta_rows()
+            .into_iter()
+            .filter_map(|row| match row {
+                MetaRow::Heading(name) => Some(name),
+                MetaRow::Value { .. } => None,
+            })
+            .collect();
+        assert_eq!(headings, vec!["File", "Image", "View · image px"]);
     }
 
     #[test]

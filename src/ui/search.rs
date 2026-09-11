@@ -16,6 +16,7 @@ use crate::app::search::SearchField;
 use crate::app::App;
 use crate::ui::layout::{LayoutRects, SearchRects};
 use crate::ui::theme::Theme;
+use unicode_width::UnicodeWidthStr;
 
 pub fn render(frame: &mut Frame, app: &App, rects: &LayoutRects, theme: &Theme) {
     let Some(search) = rects.search.as_ref() else {
@@ -28,6 +29,15 @@ pub fn render(frame: &mut Frame, app: &App, rects: &LayoutRects, theme: &Theme) 
     render_replace_row(frame, app, search, theme, focused);
 }
 
+/// Whether the caret is in this row's field.
+///
+/// The bar's own ground, its labels and its field styles all key off this: the
+/// find bar is two rows of the same furniture, and "which of them am I typing
+/// into" was answerable only from where the terminal had put its cursor.
+fn field_focused(app: &App, focused: bool, field: SearchField) -> bool {
+    focused && app.search.field == field
+}
+
 fn render_find_row(
     frame: &mut Frame,
     app: &App,
@@ -35,13 +45,14 @@ fn render_find_row(
     theme: &Theme,
     focused: bool,
 ) {
-    label(frame, theme, rects.bar.x, rects.bar.y, " Find: ");
+    let here = field_focused(app, focused, SearchField::Query);
+    label(frame, theme, rects.bar.x, rects.bar.y, " Find: ", here);
     crate::ui::field::render(
         frame,
         &app.search.query,
         rects.query,
-        theme.search_field,
-        focused && app.search.field == SearchField::Query,
+        field_style(theme, here),
+        here,
     );
 
     // Right-aligned so the number does not walk left and right as it changes.
@@ -73,18 +84,21 @@ fn render_find_row(
         );
     }
 
-    // `[Aa]` filled in means case-sensitive. A label rather than a checkbox
-    // because the bar has four cells for it, not fourteen.
+    // The case-sensitivity toggle. A five-cell label rather than a checkbox
+    // because the bar has that many cells for it, not fourteen — but the mark
+    // inside the brackets is what says which way it is pointing, and the
+    // colour only agrees with it. It was the highlight and nothing else, which
+    // on a bar the same grey as the button was a difference nobody read.
     if rects.case_toggle.width > 0 {
-        let style = if app.search.case_sensitive {
-            theme.search_option_on
+        let (text, style) = if app.search.case_sensitive {
+            ("[Aa✓]", theme.search_option_on)
         } else {
-            theme.search_button
+            ("[Aa ]", theme.search_button)
         };
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(" ", theme.search_bar),
-                Span::styled("[Aa]", style),
+                Span::styled(text, style),
             ])),
             rects.case_toggle,
         );
@@ -101,24 +115,39 @@ fn render_replace_row(
     let Some(row) = rects.replacement else {
         return;
     };
-    label(frame, theme, rects.bar.x, rects.bar.y + 1, " Repl: ");
+    let here = field_focused(app, focused, SearchField::Replacement);
+    label(frame, theme, rects.bar.x, rects.bar.y + 1, " Repl: ", here);
     crate::ui::field::render(
         frame,
         &app.search.replacement,
         row,
-        theme.search_field,
-        focused && app.search.field == SearchField::Replacement,
+        field_style(theme, here),
+        here,
     );
+    // `[All]` was the shortest true thing the button could be called and not
+    // the clearest: it sits beside `[Replace]` on the replacement row, where
+    // "all" of what was left to the reader.
     button(frame, theme, rects.replace_button, "[Replace]");
-    button(frame, theme, rects.replace_all_button, "[All]");
+    button(frame, theme, rects.replace_all_button, "[Replace all]");
 }
 
-fn label(frame: &mut Frame, theme: &Theme, x: u16, y: u16, text: &str) {
+/// The ground a field is drawn on, and whether it is underlined.
+fn field_style(theme: &Theme, focused: bool) -> Style {
+    if focused {
+        theme.search_field_focused
+    } else {
+        theme.search_field
+    }
+}
+
+fn label(frame: &mut Frame, theme: &Theme, x: u16, y: u16, text: &str, focused: bool) {
+    let style = if focused {
+        theme.search_label_focused
+    } else {
+        theme.search_bar.fg(theme.search_label)
+    };
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            text.to_string(),
-            theme.search_bar.fg(theme.search_label),
-        ))),
+        Paragraph::new(Line::from(Span::styled(text.to_string(), style))),
         Rect::new(x, y, text.len() as u16, 1),
     );
 }
@@ -127,9 +156,12 @@ fn button(frame: &mut Frame, theme: &Theme, rect: Option<Rect>, text: &str) {
     let Some(rect) = rect.filter(|r| r.width > 0) else {
         return;
     };
+    // The blank columns in front are drawn in the bar's own style, so the two
+    // buttons have the bar between them rather than a seam.
+    let lead = usize::from(rect.width).saturating_sub(text.width());
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" ", theme.search_bar),
+            Span::styled(" ".repeat(lead), theme.search_bar),
             Span::styled(text.to_string(), theme.search_button),
         ]))
         .style(Style::new()),

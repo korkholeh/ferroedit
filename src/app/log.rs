@@ -35,6 +35,12 @@ pub struct LogState {
     /// Index into `visible`.
     selected: usize,
     pub scroll: usize,
+    /// Whether the three columns in front of the subject are drawn (ADR-080).
+    ///
+    /// On by default — a history without its dates is a list of sentences —
+    /// and off is what a reader turns to when the pane is narrow enough that
+    /// the columns are costing them the end of every subject.
+    pub show_columns: bool,
 }
 
 impl LogState {
@@ -51,6 +57,7 @@ impl LogState {
             truncated,
             selected: 0,
             scroll: 0,
+            show_columns: true,
         }
     }
 
@@ -255,6 +262,7 @@ mod tests {
             author: "Ada".into(),
             date: "2026-09-10".into(),
             subject: subject.into(),
+            body: String::new(),
         }
     }
 

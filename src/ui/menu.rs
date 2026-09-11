@@ -212,16 +212,27 @@ mod tests {
         );
     }
 
-    /// The themes are a choice of one, and the one in use is the one marked.
+    /// The themes are a choice of one, and the one in use is the one the
+    /// picker opens on and marks with git's own `*` (ADR-079).
+    ///
+    /// It used to be a mark against one of five menu entries. The menu entry is
+    /// now a door, so what has to be checked is behind it.
     #[test]
-    fn only_the_live_theme_is_marked() {
-        let mut app = App::fixture();
-        app.menu.open = Some(open("View"));
-        app.settings.theme = ThemeKind::Retro;
+    fn the_theme_picker_opens_on_the_live_theme() {
+        use crate::app::dialog::DialogState;
+        use crate::app::focus::FocusTarget;
 
-        assert!(row_with(&app, "Theme: Retro").contains('✓'));
-        assert!(!row_with(&app, "Theme: Dark").contains('✓'));
-        assert!(!row_with(&app, "Theme: Light").contains('✓'));
+        let dialog = DialogState::theme(ThemeKind::Retro, FocusTarget::Editor);
+        assert_eq!(
+            dialog.selected_item().map(|row| row.label.as_str()),
+            Some(ThemeKind::Retro.label())
+        );
+        let marked: Vec<&str> = dialog
+            .rows()
+            .filter(|row| row.current)
+            .map(|row| row.label.as_str())
+            .collect();
+        assert_eq!(marked, vec![ThemeKind::Retro.label()]);
     }
 
     /// Opening a menu must not resize it: the mark column is there whether or

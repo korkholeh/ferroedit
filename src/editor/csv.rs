@@ -317,6 +317,9 @@ pub struct Table {
     pub rows: Vec<Vec<String>>,
     /// Display width of each column, clamped to `MIN_COL_WIDTH..=MAX_COL_WIDTH`.
     pub widths: Vec<usize>,
+    /// Whether each column holds numbers, and so is read from the right
+    /// (SPEC §65, ADR-081). Parallel to `widths`.
+    pub numeric: Vec<bool>,
     /// Set when the file had more rows than `MAX_ROWS`. Said in the view, so
     /// "where is the rest of it?" has an answer on screen.
     pub truncated: bool,
@@ -384,18 +387,55 @@ impl Table {
                     .clamp(MIN_COL_WIDTH, MAX_COL_WIDTH)
             })
             .collect();
+        let numeric = (0..columns)
+            .map(|column| {
+                // The header is left out: it is a name, and a column called
+                // `2024` is not what makes the values under it numbers.
+                Self::is_numeric_column(rows.iter().filter_map(|row| row.get(column)))
+            })
+            .collect();
         Self {
             header,
             rows,
             widths,
+            numeric,
             truncated,
             header_spans,
             row_spans,
         }
     }
 
+    /// Whether a column's values are quantities, and so line up on their last
+    /// digit rather than on their first character (ADR-081).
+    ///
+    /// Deliberately unanimous and deliberately narrow. A column is numeric only
+    /// when *every* value in it that is not blank is a plain number, because
+    /// the alignment is a claim about the column and one string in it that is
+    /// not a quantity is the counter-example. Blanks are ignored — a missing
+    /// measurement is not evidence either way — and a column with no values at
+    /// all is not numeric, because there is nothing to have found out.
+    pub fn is_numeric_column<'a>(values: impl Iterator<Item = &'a String>) -> bool {
+        let mut seen = false;
+        for value in values {
+            let value = value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            if !is_number(value) {
+                return false;
+            }
+            seen = true;
+        }
+        seen
+    }
+
     pub fn columns(&self) -> usize {
         self.widths.len()
+    }
+
+    /// Whether this column is read from the right.
+    pub fn is_numeric(&self, column: usize) -> bool {
+        self.numeric.get(column).copied().unwrap_or(false)
     }
 
     pub fn len(&self) -> usize {
@@ -652,6 +692,45 @@ impl Parser {
     fn finish(mut self) -> Vec<Raw> {
         self.end_row(self.line_end);
         self.rows
+    }
+}
+
+/// Whether one value is a plain number.
+///
+/// Conservative on purpose (ADR-081). A version, a date, an identifier and a
+/// zip code are all *made of digits* and none of them is a quantity: right-
+/// aligning a column of them would line up the wrong end of a string that is
+/// read from the left. So the grammar here is a sign, digits, and at most one
+/// decimal point — and everything that is more than that is a string:
+///
+/// - `1.2.3` — two points, a version.
+/// - `2026-09-09` — a `-` that is not the leading sign, a date.
+/// - `12:30`, `1/2`, `1e9`, `10%`, `$4`, `1,234` — anything with a character
+///   that is not a digit, a point or a leading sign in it.
+/// - `007`, `01234` — a leading zero in front of more digits, which is how
+///   part numbers, zip codes and phone extensions are written. `0` and `0.5`
+///   are numbers; `0.` and `.5` are not, because a value that has to be
+///   guessed at is a value to leave alone.
+///
+/// The cost of being wrong in the other direction is small: a column of
+/// quantities the check refuses is drawn exactly as it was before this
+/// existed.
+fn is_number(value: &str) -> bool {
+    let digits = value.strip_prefix(['-', '+']).unwrap_or(value);
+    let mut parts = digits.split('.');
+    let (Some(whole), fraction, None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let all_digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    if !all_digits(whole) {
+        return false;
+    }
+    if whole.len() > 1 && whole.starts_with('0') {
+        return false;
+    }
+    match fraction {
+        Some(fraction) => all_digits(fraction),
+        None => true,
     }
 }
 
@@ -925,5 +1004,75 @@ mod tests {
         let table = comma(&text);
         assert!(table.truncated);
         assert_eq!(table.len(), MAX_ROWS - 1, "the header is one of them");
+    }
+    /// A quantity is a sign, digits and at most one decimal point. Anything
+    /// else made of digits is a string that happens to look like one
+    /// (ADR-081).
+    #[test]
+    fn only_plain_numbers_are_numbers() {
+        for value in ["0", "7", "-3", "+3", "1234", "0.5", "-0.25", "12.0"] {
+            assert!(is_number(value), "{value:?} is a number");
+        }
+        for value in [
+            // A version, a date, a time, a fraction, an exponent.
+            "1.2.3",
+            "2026-09-09",
+            "12:30",
+            "1/2",
+            "1e9", // A unit, a currency, a grouped number.
+            "10%",
+            "$4",
+            "1,234",
+            "4 kg", // Identifiers written with a leading zero.
+            "007",
+            "01234", // Half-written numbers nobody should guess at.
+            "0.",
+            ".5",
+            "-",
+            "",
+            "1.2.",
+            "--1",
+        ] {
+            assert!(!is_number(value), "{value:?} is not a number");
+        }
+    }
+
+    /// The claim is about the column, so one value that is not a quantity is
+    /// enough to settle it — and blanks settle nothing either way.
+    #[test]
+    fn a_column_is_numeric_only_when_every_value_in_it_is() {
+        let column = |values: &[&str]| {
+            let owned: Vec<String> = values.iter().map(|v| (*v).to_string()).collect();
+            Table::is_numeric_column(owned.iter())
+        };
+        assert!(column(&["1", "22", "333"]));
+        assert!(column(&["1", "", "333"]), "a blank is not evidence");
+        assert!(!column(&["1", "n/a", "333"]));
+        assert!(!column(&["1", "2", "1.2.3"]));
+        assert!(!column(&[]), "an empty column has found nothing out");
+        assert!(!column(&["", ""]), "and neither has a blank one");
+    }
+
+    /// The header is a name and not a value: a column of counts headed
+    /// `2024` is still counts, and a column of names headed `id` is still
+    /// names.
+    #[test]
+    fn a_table_reads_its_columns_and_not_its_header() {
+        let table = Table::parse(
+            [
+                "version,downloads,released",
+                "0.1.5,318,2026-09-09",
+                "0.1.4,96,2026-09-08",
+            ]
+            .into_iter(),
+            Dialect::default(),
+        );
+        assert!(!table.is_numeric(0), "a version is not a number");
+        assert!(table.is_numeric(1), "a download count is");
+        assert!(!table.is_numeric(2), "a date is not");
+        assert!(
+            !table.is_numeric(9),
+            "and neither is a column that is not there"
+        );
     }
 }
