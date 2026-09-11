@@ -10,6 +10,13 @@ version, so that heading becomes the new version's on the way out (see
 
 ## [Unreleased]
 
+### Changed
+
+- **The README's screenshots are captures of 0.1.10.** Every image was retaken against
+  the current chrome — the shorter View menu with its theme picker, the tab strip on the
+  editor's own ground, the panes that keep their width — so the pictures no longer show
+  a menu and a palette that were renamed two releases ago.
+
 ## [0.1.10] — 2026-09-11
 
 ### Added
