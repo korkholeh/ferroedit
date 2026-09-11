@@ -23,6 +23,12 @@ use unicode_width::UnicodeWidthStr;
 /// `XY` plus the space after it.
 const CODE_WIDTH: usize = 3;
 
+/// The line SPEC §28 names for a workspace that is an ordinary directory.
+const NOT_A_REPOSITORY: &str = "Not a Git repository";
+
+/// The button under it (ADR-084).
+const INIT_BUTTON: &str = "[ git init ]";
+
 pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let focused = app.focus == FocusTarget::GitPanel;
     let block = Block::new()
@@ -35,16 +41,51 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         return;
     }
 
+    // The repository is somewhere above the workspace, so the panel says whose
+    // changes it is listing (ADR-085). A row and not the title, because the
+    // title has no room for it at the width the sidebar actually is.
+    let list = match &app.git.above {
+        Some(name) => {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!(
+                        " in {}",
+                        elide_left(&format!("{name}/"), inner.width.saturating_sub(4) as usize)
+                    ),
+                    Style::new().fg(theme.dim),
+                ))),
+                Rect::new(inner.x, inner.y, inner.width, 1),
+            );
+            Rect::new(
+                inner.x,
+                inner.y + 1,
+                inner.width,
+                inner.height.saturating_sub(1),
+            )
+        }
+        None => inner,
+    };
+    if list.height == 0 {
+        return;
+    }
+
     // On the pane's own right border, like the explorer's above it (ADR-052).
     scrollbar::render(
         frame,
-        Rect::new(area.right() - 1, inner.y, 1, inner.height),
+        Rect::new(area.right() - 1, list.y, 1, list.height),
         theme,
         focused,
         app.git.entries().len(),
-        inner.height as usize,
+        list.height as usize,
         app.git.scroll,
     );
+
+    // A plain directory is a state the user can leave, so the panel offers the
+    // way out instead of only naming the state (ADR-084).
+    if app.git.availability == GitAvailability::NotARepository {
+        render_no_repository(frame, inner, theme, focused);
+        return;
+    }
 
     if let Some(message) = empty_message(app) {
         // Wrapped, not clipped: the sidebar is sixteen cells wide at its
@@ -59,14 +100,14 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         return;
     }
 
-    let width = inner.width as usize;
+    let width = list.width as usize;
     let rows: Vec<Line> = app
         .git
         .entries()
         .iter()
         .enumerate()
         .skip(app.git.scroll)
-        .take(inner.height as usize)
+        .take(list.height as usize)
         .map(|(index, entry)| {
             let selected = index == app.git.selected;
             let selection = selection_style(theme, focused);
@@ -91,7 +132,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             if selected {
                 // Out to the pane's edge, for the reason the explorer's is.
                 spans.push(Span::raw(crate::ui::explorer::pad(
-                    inner.width as usize,
+                    list.width as usize,
                     code.width() + path.width(),
                 )));
                 Line::from(spans).style(selection)
@@ -101,7 +142,111 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         })
         .collect();
 
-    frame.render_widget(Paragraph::new(rows), inner);
+    frame.render_widget(Paragraph::new(rows), list);
+}
+
+/// Rows of chrome above the first change: the border the title sits on, and the
+/// row naming the repository when there is one to name (ADR-085).
+///
+/// The one answer the renderer, the hit test and the scroll arithmetic all read,
+/// because a panel whose click lands a row off from what it drew is worse than
+/// one with no note at all.
+pub fn header_rows(app: &App) -> u16 {
+    1 + u16::from(app.git.above.is_some())
+}
+
+/// What the panel says instead of a list in a folder that is not a repository:
+/// the sentence SPEC §28 asks for, and under it the one thing that can be done
+/// about it.
+///
+/// `[ git init ]` and not `[ Initialize Repository ]`: the pane is sixteen cells
+/// wide at its narrowest, the long label does not fit in it at any width the
+/// sidebar actually takes, and the short one is the command the button runs —
+/// which is the label a reader can check against what happened. The menu, which
+/// has the room, spells it out.
+fn render_no_repository(frame: &mut Frame, inner: Rect, theme: &Theme, focused: bool) {
+    let width = inner.width as usize;
+    let mut lines: Vec<Line> = wrap_words(NOT_A_REPOSITORY, width.saturating_sub(1))
+        .into_iter()
+        .map(|line| Line::from(Span::styled(format!(" {line}"), Style::new().fg(theme.dim))))
+        .collect();
+    // A blank row between the state and the button: without it the button
+    // reads as the last line of the sentence.
+    lines.push(Line::default());
+    if inner.height as usize > lines.len() && width.saturating_sub(1) >= INIT_BUTTON.width() {
+        lines.push(Line::from(Span::styled(
+            format!(" {INIT_BUTTON}"),
+            // The panel has one thing to press and no selection to move, so
+            // the button is lit whenever the pane that owns it has focus.
+            if focused {
+                theme.dialog_button_selected
+            } else {
+                theme.dialog_button
+            },
+        )));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Where the button landed, so that a click can be tested against the same
+/// geometry that drew it — the rule `status_zones` follows for the status bar.
+///
+/// `None` when there is no button: inside a repository, or in a pane too small
+/// to have drawn one.
+pub fn init_button(app: &App, panel: Rect) -> Option<Rect> {
+    if app.git.availability != GitAvailability::NotARepository {
+        return None;
+    }
+    // The pane's inside: one row of border and title at the top, one column of
+    // border and scrollbar at the right.
+    let width = panel.width.saturating_sub(1);
+    let height = panel.height.saturating_sub(1);
+    let text_width = (width as usize).saturating_sub(1);
+    if text_width < INIT_BUTTON.width() {
+        return None;
+    }
+    let row = wrap_words(NOT_A_REPOSITORY, text_width).len() + 1;
+    if row >= height as usize {
+        return None;
+    }
+    Some(Rect::new(
+        panel.x + 1,
+        panel.y + 1 + row as u16,
+        INIT_BUTTON.width() as u16,
+        1,
+    ))
+}
+
+/// Greedy word wrap, in cells.
+///
+/// Ours rather than `Wrap`, because the button under the sentence has to be at
+/// a row both the drawing and the hit test can name, and a widget that wraps
+/// inside `render` can only be asked where it put things by reading the frame
+/// back out afterwards.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let candidate = if current.is_empty() {
+            word.width()
+        } else {
+            current.width() + 1 + word.width()
+        };
+        if !current.is_empty() && candidate > width {
+            lines.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+    lines
 }
 
 /// ` Git — main ↑1 (4) `: the head, how far it has drifted from its upstream,
@@ -110,6 +255,10 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 /// The count is in the title rather than on a "Changes" row of its own, which
 /// is what SPEC §30 sketches: the panel is four to ten rows tall, and a header
 /// would spend one of them on a word (ADR-031).
+///
+/// It does *not* name the repository when the workspace is inside one rather
+/// than at its root: ` Git — Projects · main (73) ` is twenty-eight cells and
+/// the pane is nineteen. That goes on a row of its own (ADR-085).
 fn title(app: &App) -> String {
     if !app.git.is_repository() {
         return " Git ".to_string();
@@ -123,26 +272,27 @@ fn title(app: &App) -> String {
         return format!(" Git — {progress} ");
     }
     let status = &app.git.status;
-    let mut title = format!(" Git — {}", status.head_label());
+    let mut tail = String::new();
     // An unfinished operation outranks the ahead/behind counts: it is a state
     // the user has to finish, and it stays true after every conflicted file has
     // been staged (SPEC §35).
     if let Some(operation) = status.operation {
-        title.push_str(&format!(" [{}]", operation.label()));
+        tail.push_str(&format!(" [{}]", operation.label()));
     }
     if status.ahead > 0 {
-        title.push_str(&format!(" ↑{}", status.ahead));
+        tail.push_str(&format!(" ↑{}", status.ahead));
     }
     if status.behind > 0 {
-        title.push_str(&format!(" ↓{}", status.behind));
+        tail.push_str(&format!(" ↓{}", status.behind));
     }
     match status.entries.len() {
         0 => {}
-        count if status.truncated => title.push_str(&format!(" ({count}+)")),
-        count => title.push_str(&format!(" ({count})")),
+        count if status.truncated => tail.push_str(&format!(" ({count}+)")),
+        count => tail.push_str(&format!(" ({count})")),
     }
-    title.push(' ');
-    title
+    tail.push(' ');
+
+    format!(" Git — {}{tail}", status.head_label())
 }
 
 /// What the panel says instead of a list, and `None` when it has one to show.

@@ -6,6 +6,7 @@ use std::time::Instant;
 use crate::app::dialog::{DialogState, ListItem, MAX_LIST_ROWS};
 use crate::app::diff::{DiffSource, DiffState, HORIZONTAL_STEP};
 use crate::app::focus::FocusTarget;
+use crate::app::git::GitAvailability;
 use crate::app::git::NotStarted;
 use crate::app::help::HelpState;
 use crate::app::image::ImageState;
@@ -15,7 +16,7 @@ use crate::app::search::SearchField;
 use crate::app::table::{CellEditor, CellStep, TableView};
 use crate::app::tabs::{active_after_close, Stale, TabItem};
 use crate::app::{App, LastClick, Opened, SidebarMode};
-use crate::commands::{Command, FileOp, MenuEntry, MENUS};
+use crate::commands::{menu_enabled, Command, FileOp, MenuEntry, MENUS};
 use crate::config::ThemeKind;
 use crate::editor::charset::Charset;
 use crate::editor::compression::Compression;
@@ -81,6 +82,7 @@ pub fn execute_command(app: &mut App, command: Command) {
             refresh_git(app);
             app.notifications.info("Explorer refreshed");
         }
+        Command::GitInit => git_init(app),
         Command::GitRefresh => git_rescan(app),
         Command::ExternalChange(change) => external_change(app, change),
         Command::GitOpenSelected => git_open_selected(app),
@@ -502,10 +504,7 @@ pub fn execute_command(app: &mut App, command: Command) {
         Command::MenuNextItem => step_menu_item(app, 1),
         Command::MenuPrevItem => step_menu_item(app, -1),
         Command::MenuActivate => activate_menu_item(app),
-        Command::MenuActivateItem(item) => {
-            app.menu.item = item;
-            activate_menu_item(app);
-        }
+        Command::MenuActivateItem(item) => activate_menu_row(app, item),
     }
 
     // The help screen is drawn over the whole body, so it cannot outlive its
@@ -2816,6 +2815,41 @@ fn external_change(app: &mut App, change: FsChange) {
     }
 }
 
+/// Creates a repository in the workspace (SPEC §28, ADR-084).
+///
+/// Foreground, unlike every other git command that writes: `git init` lays down
+/// a handful of small files on the local disk and takes no lock anyone else
+/// holds, so it is `status`-shaped rather than `push`-shaped and putting it on
+/// the worker would buy nothing but a frame in which the panel is wrong.
+///
+/// The tree is re-read afterwards because a directory appeared in it. `.git` is
+/// hidden and so usually invisible, but `ignore` reads the repository it is now
+/// in, and an explorer still filtering by the rules of a directory that has
+/// stopped being one is the gap ADR-043 exists to close.
+fn git_init(app: &mut App) {
+    if app.git.is_repository() {
+        app.notifications.warning("Already a Git repository");
+        return;
+    }
+    let root = app.workspace.root().to_path_buf();
+    match app.git.init(&root) {
+        Ok(()) => {
+            follow_git(app);
+            refresh_tree(app, None);
+            // The summary and not a sentence of our own: it names the branch
+            // git chose, which is the one thing about a fresh repository the
+            // user cannot predict from having asked for it.
+            app.notifications
+                .info(format!("Repository created — {}", app.git.summary()));
+        }
+        Err(err) => {
+            log::error!("git init failed in {}: {err}", root.display());
+            app.notifications
+                .error(format!("Could not create the repository: {}", err.reason()));
+        }
+    }
+}
+
 fn git_rescan(app: &mut App) {
     let root = app.workspace.root().to_path_buf();
     app.git.discover(&root);
@@ -2927,7 +2961,17 @@ fn has_conflict_markers(app: &App, path: &Path) -> bool {
 /// The status lists repository-relative paths, so the root is what turns one
 /// back into something to open — and the root is the repository's, not the
 /// workspace's, which matters when the editor was opened in a subdirectory.
+///
+/// Outside a repository the panel draws a button rather than a list, and Enter
+/// presses the button that is actually there (ADR-084). It is the same key
+/// doing the same thing — activating what the panel is showing — and the
+/// alternative is a key that does nothing in the one state the panel has
+/// something for it to do.
 fn git_open_selected(app: &mut App) {
+    if app.git.availability == GitAvailability::NotARepository {
+        git_init(app);
+        return;
+    }
     let Some(entry) = app.git.selected_entry() else {
         app.notifications
             .warning("Nothing selected in the Git panel");
@@ -3783,7 +3827,7 @@ fn open_menu(app: &mut App, index: usize) {
         app.menu.return_focus = app.focus;
     }
     app.menu.open = Some(index);
-    app.menu.item = 0;
+    app.menu.item = first_menu_item(app, index);
     app.focus = FocusTarget::Menu;
 }
 
@@ -3798,7 +3842,26 @@ fn step_menu(app: &mut App, delta: i16) {
     let len = MENUS.len() as i16;
     let next = (open as i16 + delta).rem_euclid(len) as usize;
     app.menu.open = Some(next);
-    app.menu.item = 0;
+    app.menu.item = first_menu_item(app, next);
+}
+
+/// The row a drop-down opens on: the first one the selection may rest on.
+///
+/// Not simply row zero. A rule cannot be selected, and neither can an entry the
+/// app's state has greyed out (ADR-084) — the Git menu in a plain directory
+/// opens on `Initialize Repository` because that is the first thing in it that
+/// can be pressed. `0` is the answer for a menu with nothing selectable in it,
+/// which no menu is: it would be a drop-down that does nothing at all.
+fn first_menu_item(app: &App, open: usize) -> usize {
+    MENUS[open]
+        .items
+        .iter()
+        .position(|entry| {
+            entry
+                .item()
+                .is_some_and(|item| menu_enabled(app, &item.command))
+        })
+        .unwrap_or(0)
 }
 
 /// Moves the selection by `delta` rows, stepping over the rules.
@@ -3819,11 +3882,35 @@ fn step_menu_item(app: &mut App, delta: i16) {
     let mut next = app.menu.item as i16;
     for _ in 0..len {
         next = (next + step).rem_euclid(len);
-        if !items[next as usize].is_separator() {
+        // A greyed entry is stepped over exactly as a rule is (ADR-084): it is
+        // a row of the popup and it keeps its place, but it is not somewhere
+        // the cursor may come to rest.
+        if items[next as usize]
+            .item()
+            .is_some_and(|item| menu_enabled(app, &item.command))
+        {
             break;
         }
     }
     app.menu.item = next as usize;
+}
+
+/// Chooses the row a click landed on (SPEC §25).
+///
+/// The selection is moved *after* the row is found to be one that can be
+/// chosen, so a click on a rule or on a greyed entry leaves the cursor where
+/// the user last put it rather than parking it somewhere it could not have
+/// walked to (ADR-084).
+fn activate_menu_row(app: &mut App, row: usize) {
+    let Some(open) = app.menu.open else { return };
+    let Some(item) = MENUS[open].items.get(row).and_then(MenuEntry::item) else {
+        return;
+    };
+    if !menu_enabled(app, &item.command) {
+        return;
+    }
+    app.menu.item = row;
+    activate_menu_item(app);
 }
 
 fn activate_menu_item(app: &mut App) {
@@ -3836,6 +3923,12 @@ fn activate_menu_item(app: &mut App) {
     else {
         return;
     };
+    // Nor does a greyed entry, and the menu stays open: pressing Enter on
+    // something that cannot run is not a reason to take the drop-down away
+    // from the user (ADR-084).
+    if !menu_enabled(app, &item.command) {
+        return;
+    }
     let command = item.command.clone();
     close_menu(app);
     // One level of recursion only: no menu entry produces another Menu* command,
@@ -8279,20 +8372,53 @@ five",
         // Phase 9's acceptance, as a test: the menu is wired to commands, and
         // no entry is a hole. The Git four and the help screen report
         // themselves; nothing else may.
+        //
+        // Twice over, because the Git menu now reads the folder it is in: its
+        // entries are greyed out where there is no repository, and
+        // `Initialize Repository` is greyed out where there is one (ADR-084).
+        // So each entry is run in the world that enables it, and checked for
+        // leaving the drop-down alone in the world that does not — and a hole
+        // of the new kind, an entry nothing can ever enable, is caught by the
+        // tally at the end.
+        let mut ever_enabled = std::collections::HashSet::new();
+        for repository in [false, true] {
+            for (menu_index, menu) in MENUS.iter().enumerate() {
+                for (item_index, entry) in menu.items.iter().enumerate() {
+                    // A rule is not an entry: activating one is a no-op that
+                    // deliberately leaves the menu open (see the test below).
+                    let Some(item) = entry.item() else { continue };
+                    let dir = project();
+                    if repository {
+                        crate::git::GitService::init(dir.path()).unwrap();
+                    }
+                    let mut app = App::fixture_in(dir.path());
+                    app.git.discover(dir.path());
+                    assert_eq!(app.git.is_repository(), repository);
+                    app.open_path(&dir.path().join("src/main.rs"), None)
+                        .unwrap();
+                    execute_command(&mut app, Command::MenuOpen(menu_index));
+                    let enabled = menu_enabled(&app, &item.command);
+                    if enabled {
+                        ever_enabled.insert((menu_index, item_index));
+                    }
+                    execute_command(&mut app, Command::MenuActivateItem(item_index));
+                    assert_eq!(
+                        app.menu.open.is_none(),
+                        enabled,
+                        "{} > {} with{} a repository",
+                        menu.title,
+                        item.label,
+                        if repository { "" } else { "out" }
+                    );
+                }
+            }
+        }
         for (menu_index, menu) in MENUS.iter().enumerate() {
             for (item_index, entry) in menu.items.iter().enumerate() {
-                // A rule is not an entry: activating one is a no-op that
-                // deliberately leaves the menu open (see the test below).
                 let Some(item) = entry.item() else { continue };
-                let dir = project();
-                let mut app = App::fixture_in(dir.path());
-                app.open_path(&dir.path().join("src/main.rs"), None)
-                    .unwrap();
-                execute_command(&mut app, Command::MenuOpen(menu_index));
-                execute_command(&mut app, Command::MenuActivateItem(item_index));
                 assert!(
-                    app.menu.open.is_none(),
-                    "{} > {} left the menu open",
+                    ever_enabled.contains(&(menu_index, item_index)),
+                    "{} > {} is greyed out in every state there is",
                     menu.title,
                     item.label
                 );
@@ -8347,6 +8473,83 @@ five",
                 );
             }
         }
+    }
+
+    /// A greyed entry is stepped over exactly as a rule is, and the drop-down
+    /// opens on the first row that can be pressed rather than on row zero
+    /// (ADR-084).
+    #[test]
+    fn the_git_menu_steps_over_what_a_plain_folder_greys_out() {
+        let git = MENUS
+            .iter()
+            .position(|menu| menu.title == "Git")
+            .expect("a Git menu");
+        let items = MENUS[git].items;
+        let dir = project();
+        let mut app = App::fixture_in(dir.path());
+        app.git.discover(dir.path());
+        assert!(!app.git.is_repository());
+
+        execute_command(&mut app, Command::MenuOpen(git));
+        let row = |app: &App| items[app.menu.item].item().expect("an entry").label;
+        assert_eq!(row(&app), "Initialize Repository");
+
+        // All the way round, in both directions: the only stops are the two
+        // entries a folder that is not a repository has anything to run.
+        let mut seen = Vec::new();
+        for _ in 0..items.len() + 1 {
+            execute_command(&mut app, Command::MenuNextItem);
+            seen.push(row(&app));
+        }
+        for _ in 0..items.len() + 1 {
+            execute_command(&mut app, Command::MenuPrevItem);
+            seen.push(row(&app));
+        }
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen, vec!["Initialize Repository", "Refresh"]);
+    }
+
+    /// Making a repository out of the folder the editor is open in (SPEC §28).
+    #[test]
+    fn initialising_a_repository_leaves_the_panel_reading_it() {
+        let dir = project();
+        let mut app = App::fixture_in(dir.path());
+        app.git.discover(dir.path());
+        assert_eq!(app.git.availability, GitAvailability::NotARepository);
+
+        execute_command(&mut app, Command::GitInit);
+        assert!(app.git.is_repository(), "{}", app.git.summary());
+        assert!(dir.path().join(".git").is_dir());
+        // Two files in the project fixture, both of them new to git.
+        assert_eq!(app.git.entries().len(), 2, "{:?}", app.git.entries());
+        let said = app.notifications.current().unwrap().message.clone();
+        assert!(said.starts_with("Repository created"), "{said}");
+
+        // And it will not do it twice: the second press is a question already
+        // answered, not an error.
+        execute_command(&mut app, Command::GitInit);
+        assert_eq!(
+            app.notifications.current().unwrap().message,
+            "Already a Git repository"
+        );
+    }
+
+    /// Enter in the panel presses the button the panel is actually showing
+    /// (ADR-084) — and goes back to opening the selected file the moment
+    /// there is a list to select in.
+    #[test]
+    fn enter_in_a_panel_with_no_repository_creates_one() {
+        let dir = project();
+        let mut app = App::fixture_in(dir.path());
+        app.git.discover(dir.path());
+
+        execute_command(&mut app, Command::GitOpenSelected);
+        assert!(app.git.is_repository(), "{}", app.git.summary());
+
+        execute_command(&mut app, Command::GitOpenSelected);
+        let said = app.notifications.current().unwrap().message.clone();
+        assert!(said.contains("Opened"), "{said}");
     }
 
     // --- themes (SPEC §43) -------------------------------------------------

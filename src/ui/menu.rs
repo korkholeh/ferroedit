@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::app::App;
-use crate::commands::{menu_state, MenuEntry, MenuItem, MENUS};
+use crate::commands::{menu_enabled, menu_state, MenuEntry, MenuItem, MENUS};
 use crate::event::keyboard::shortcut_for;
 use crate::ui::layout::LayoutRects;
 use crate::ui::theme::Theme;
@@ -69,10 +69,18 @@ fn render_popup(frame: &mut Frame, app: &App, items: &[MenuEntry], popup: Rect, 
                 mark.chars().count() + item.label.chars().count() + shortcut.chars().count() + 2,
             );
             let selected = app.menu.item == i;
-            let base = if selected {
-                theme.menu_item_selected
-            } else {
-                theme.menu_popup
+            // An entry the state has greyed out (ADR-084). It keeps its row,
+            // its label and its key — what it loses is its contrast, and the
+            // selection cannot rest on it, so it is never drawn selected.
+            let enabled = menu_enabled(app, &item.command);
+            let base = match (selected, enabled) {
+                // Greyed wins over selected. The walk cannot put the cursor on
+                // a row like this, but the state behind a menu can change
+                // under an open drop-down, and a bar drawn across an entry
+                // that will not run is the one thing worse than no bar at all.
+                (_, false) => theme.menu_popup.fg(theme.menu_disabled),
+                (true, true) => theme.menu_item_selected,
+                (false, true) => theme.menu_popup,
             };
             let shortcut_style = if selected {
                 base
@@ -197,6 +205,58 @@ mod tests {
             column_of(&wrap, "Word Wrap"),
             column_of(&refresh, "Refresh Explorer"),
             "{wrap}\n{refresh}"
+        );
+    }
+
+    /// A greyed entry keeps its row and its label — what it loses is its
+    /// colour (ADR-084). Checked as a colour rather than as a string, because
+    /// the whole point is that the text is unchanged.
+    #[test]
+    fn a_git_entry_goes_grey_outside_a_repository() {
+        use crate::app::git::{GitAvailability, GitState};
+
+        let mut app = App::fixture();
+        app.menu.open = Some(open("Git"));
+
+        let colour = |app: &App, label: &str| {
+            let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+            let theme = Theme::default();
+            let mut popup = None;
+            terminal
+                .draw(|frame| {
+                    let rects = layout::compute(frame.area(), app);
+                    crate::ui::render(frame, app, &rects, &theme);
+                    popup = rects.menu_popup;
+                })
+                .unwrap();
+            let popup = popup.expect("a menu is open");
+            let buffer = terminal.backend().buffer().clone();
+            let row = (popup.y..popup.bottom())
+                .find(|y| {
+                    (popup.x..popup.right())
+                        .map(|x| buffer[(x, *y)].symbol())
+                        .collect::<String>()
+                        .contains(label)
+                })
+                .unwrap_or_else(|| panic!("a row for {label}"));
+            buffer[(popup.x + 2, row)].fg
+        };
+
+        // The fixture's panel is a repository, so Stage is live and
+        // Initialize Repository is the one that is not.
+        let theme = Theme::default();
+        assert_ne!(colour(&app, "Stage All"), theme.menu_disabled);
+        assert_eq!(colour(&app, "Initialize Repository"), theme.menu_disabled);
+
+        app.git = GitState::default();
+        app.git.availability = GitAvailability::NotARepository;
+        assert_eq!(colour(&app, "Stage All"), theme.menu_disabled);
+        assert_ne!(colour(&app, "Initialize Repository"), theme.menu_disabled);
+        // Still there, still where it was: greying a row must not move the
+        // rows around it.
+        assert_eq!(
+            column_of(&row_with(&app, "Stage All"), "Stage All"),
+            Some(2)
         );
     }
 

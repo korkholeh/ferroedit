@@ -335,6 +335,7 @@ Every item is a command, and the *Shortcut* column is the same lookup the menu i
 | View | Scroll Right | `Alt+Right` | Editor |
 | View | Focus Pane… | — | — |
 | View | Theme… | — | — |
+| Git | Initialize Repository | — | — |
 | Git | Refresh | `F5` | Git panel |
 | Git | Stage | — | — |
 | Git | Unstage | — | — |

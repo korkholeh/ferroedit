@@ -126,6 +126,27 @@ impl GitService {
         })
     }
 
+    /// Creates a repository in `dir` (SPEC §28).
+    ///
+    /// An associated function and not a method, because the whole point of it
+    /// is that there is no service yet. It answers nothing: the caller runs
+    /// `discover` on the directory afterwards, so the panel's idea of the
+    /// repository comes from `rev-parse` in every case rather than from a path
+    /// this guessed (ADR-084).
+    ///
+    /// `--initial-branch` is deliberately not passed. The name of the first
+    /// branch is the user's `init.defaultBranch` and git's own default behind
+    /// it, and an editor that quietly picked one would be overriding a setting
+    /// the user made on purpose.
+    pub fn init(dir: &Path) -> Result<(), GitError> {
+        if !dir.is_dir() {
+            return Err(GitError::NotARepository);
+        }
+        run(dir, &["init"])?;
+        log::info!("created a repository in {}", dir.display());
+        Ok(())
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }

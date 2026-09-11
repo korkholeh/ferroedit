@@ -92,6 +92,15 @@ pub struct Palette {
     /// rather than `on_chrome_dim`, because a theme is free to make its
     /// drop-downs darker than its bars and then the two dims differ.
     pub on_popup_dim: Color,
+    /// The label of a menu entry the state has greyed out (ADR-084).
+    ///
+    /// A third tier and not `on_popup_dim`, which is held to 4:1 because the
+    /// shortcut column is *read*: the dark theme's is 250 against a label's
+    /// 252, two steps apart on the greyscale, and a greyed entry drawn in it
+    /// was indistinguishable from a live one. This one is deliberately quiet —
+    /// half the contrast of a label at most — because a row that cannot be
+    /// pressed should be recognised as such before it is read.
+    pub on_popup_disabled: Color,
     /// The ground of a text field, so an empty one reads as a field.
     ///
     /// A field is drawn both inside a dialog and on the find bar, so this is
@@ -172,6 +181,8 @@ pub struct Theme {
     pub menu_popup: Style,
     pub menu_item_selected: Style,
     pub menu_shortcut: Color,
+    /// A menu entry the state has greyed out (ADR-084).
+    pub menu_disabled: Color,
     /// The frame of a floating box — a drop-down, a dialog — and the rules
     /// drawn inside it. Not `border`, which is the frame of a pane on the
     /// editor's ground: a theme whose boxes are light and whose ground is
@@ -302,6 +313,7 @@ impl Theme {
             // A shortcut is drawn in the menu's drop-down, so it is dim
             // against `popup` rather than against the editor's ground.
             menu_shortcut: p.on_popup_dim,
+            menu_disabled: p.on_popup_disabled,
             popup_border: p.popup_border,
             highlight: p.highlight,
             chrome_dim: p.chrome_readout,
@@ -417,6 +429,8 @@ fn dark() -> Palette {
         on_popup: Color::Indexed(252),
         popup_border: Color::Indexed(240),
         on_popup_dim: Color::Indexed(250),
+        // 2.9:1 against a label's 7.4 and a shortcut's 6.0.
+        on_popup_disabled: Color::Indexed(244),
         // Under the editor's ground and not equal to it. It was 235 — the
         // ground itself — which made a dialog's field a well on the popup and
         // the find bar's fields an unbroken continuation of the text above
@@ -495,6 +509,8 @@ fn light() -> Palette {
         on_popup: Color::Indexed(236),
         popup_border: Color::Indexed(249),
         on_popup_dim: Color::Indexed(240),
+        // 2.8:1 against a label's 9.4 and a shortcut's 5.1.
+        on_popup_disabled: Color::Indexed(244),
         field: Color::Indexed(231),
         on_field: Color::Indexed(236),
         selection: Color::Indexed(153),
@@ -574,6 +590,9 @@ fn dark_simple() -> Palette {
         on_popup: Color::White,
         popup_border: Color::DarkGray,
         on_popup_dim: Color::Gray,
+        // The fourth tone this scheme has: White label, Gray shortcut,
+        // DarkGray for a row that cannot be pressed.
+        on_popup_disabled: Color::DarkGray,
         // The third dark tone, because a field is drawn on the grey of the
         // find bar and on the black of a dialog and has to be neither.
         field: Color::Gray,
@@ -647,6 +666,10 @@ fn light_simple() -> Palette {
         on_popup: Color::Black,
         popup_border: Color::DarkGray,
         on_popup_dim: Color::DarkGray,
+        // The shortcut's colour again: a sixteen-colour scheme has no fourth
+        // grey, and a Black label beside a DarkGray one is already the
+        // difference this has to say.
+        on_popup_disabled: Color::DarkGray,
         field: Color::White,
         on_field: Color::Black,
         selection: Color::LightBlue,
@@ -724,6 +747,8 @@ fn retro() -> Palette {
         popup: Color::Indexed(248),
         on_popup: Color::Indexed(16),
         on_popup_dim: Color::Indexed(236),
+        // 3.0:1 against a label's 8.8 and a shortcut's 5.6.
+        on_popup_disabled: Color::Indexed(240),
         // Black: a drop-down of this scheme is a grey box with a black frame
         // sitting on the blue, and the cyan `border` — which is what the
         // frames *on* the blue are — is barely there against the grey.
@@ -899,6 +924,7 @@ mod tests {
             for (text, ground, what) in [
                 (t.chrome_dim, p.chrome, "the status readout on the chrome"),
                 (t.menu_shortcut, p.popup, "a menu shortcut on a drop-down"),
+                (t.menu_disabled, p.popup, "a greyed menu entry"),
                 (p.on_popup, p.popup, "a menu item"),
                 // The rule between two groups of a menu is the border colour
                 // drawn on the popup, and a menu whose groups run together is
@@ -983,6 +1009,30 @@ mod tests {
         Some((hi + 0.05) / (lo + 0.05))
     }
 
+    /// A greyed entry has to stop looking like a live one.
+    ///
+    /// This is the bug the role exists for: a greyed entry was first drawn in
+    /// `on_popup_dim`, which on the dark theme is 250 against a label's 252 —
+    /// two steps of the greyscale, and both checks above called it correct.
+    /// Half the contrast of a label is the gap at which the difference is
+    /// seen rather than looked for.
+    #[test]
+    fn a_greyed_menu_entry_is_visibly_quieter_than_a_live_one() {
+        for kind in [ThemeKind::Dark, ThemeKind::Light, ThemeKind::Retro] {
+            let p = palette(kind);
+            let t = Theme::new(kind);
+            let live = contrast(p.on_popup, p.popup).expect("an indexed theme");
+            let greyed = contrast(t.menu_disabled, p.popup).expect("an indexed theme");
+            assert!(
+                greyed * 2.0 <= live,
+                "{}: a greyed entry is {:.1}:1 where a label is {:.1}:1",
+                kind.label(),
+                greyed,
+                live
+            );
+        }
+    }
+
     /// Secondary text has to stay *text*.
     ///
     /// `no_theme_draws_text_in_the_colour_underneath_it` only asks that the two
@@ -1009,6 +1059,7 @@ mod tests {
     fn secondary_text_is_read_rather_than_merely_different() {
         const ON_GROUND: f64 = 4.0;
         const ON_A_QUIET_SELECTION: f64 = 2.8;
+        const ON_A_GREYED_ROW: f64 = 2.5;
         for kind in [ThemeKind::Dark, ThemeKind::Light, ThemeKind::Retro] {
             let p = palette(kind);
             let t = Theme::new(kind);
@@ -1019,6 +1070,10 @@ mod tests {
                 (t.chrome_dim, p.find_bar, ON_GROUND, "the hit count"),
                 (t.search_label, p.find_bar, ON_GROUND, "a find bar label"),
                 (t.menu_shortcut, p.popup, ON_GROUND, "a menu shortcut"),
+                // Not `ON_GROUND`: a greyed entry is meant to recede, and one
+                // held to four is one nobody can tell from a live entry. Two
+                // and a half is the floor at which the label is still read.
+                (t.menu_disabled, p.popup, ON_A_GREYED_ROW, "a greyed entry"),
                 (
                     p.on_chrome_dim,
                     p.tab_strip,

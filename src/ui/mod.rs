@@ -252,6 +252,99 @@ mod tests {
         );
     }
 
+    /// A workspace inside a repository lists paths the explorer beside it has
+    /// never heard of, so the panel says whose they are — on a row, because at
+    /// the width the sidebar actually is the title has no room (ADR-085).
+    #[test]
+    fn a_workspace_inside_a_repository_says_whose_changes_these_are() {
+        let mut app = app();
+        app.git.above = Some("Projects".to_string());
+
+        let rows = draw(&app, 80, 24);
+        let rects = layout::compute(Rect::new(0, 0, 80, 24), &app);
+        let panel = rects.git_panel;
+        // By cells, not by bytes: the panel's border is multi-byte.
+        let row = |y: u16| -> String {
+            rows[y as usize]
+                .chars()
+                .take(panel.width as usize)
+                .collect()
+        };
+
+        assert!(row(panel.y).contains("Git — main (4)"), "{}", row(panel.y));
+        assert!(
+            row(panel.y + 1).contains("in Projects/"),
+            "{}",
+            row(panel.y + 1)
+        );
+        assert!(
+            row(panel.y + 2).contains("src/main.rs"),
+            "the list starts under the note: {}",
+            row(panel.y + 2)
+        );
+        assert_eq!(crate::ui::git::header_rows(&app), 2);
+    }
+
+    /// And costs nothing in the ordinary case: no note, no row, the first
+    /// change against the title as before.
+    #[test]
+    fn a_workspace_at_its_repositorys_root_spends_no_row_on_saying_so() {
+        let app = app();
+        let rows = draw(&app, 80, 24);
+        let rects = layout::compute(Rect::new(0, 0, 80, 24), &app);
+        let panel = rects.git_panel;
+        assert!(
+            rows[(panel.y + 1) as usize].contains("src/main.rs"),
+            "{}",
+            rows[(panel.y + 1) as usize]
+        );
+        assert_eq!(crate::ui::git::header_rows(&app), 1);
+    }
+
+    /// SPEC §28 says what the panel reads in a plain directory; ADR-084 adds
+    /// the way out of it, because being told a state and being given no way to
+    /// leave it is where the panel used to stop.
+    #[test]
+    fn a_folder_that_is_not_a_repository_gets_a_button_rather_than_a_list() {
+        let mut app = app();
+        app.git = crate::app::git::GitState::default();
+        app.git.availability = crate::app::git::GitAvailability::NotARepository;
+
+        let screen = draw(&app, 80, 24).join("\n");
+        assert!(screen.contains("Not a Git"), "{screen}");
+        assert!(screen.contains("[ git init ]"), "{screen}");
+    }
+
+    /// The rect the hit test uses is the one the button was drawn at — the
+    /// rule the status bar's zones follow, here because the two are computed
+    /// in different modules (ADR-084).
+    #[test]
+    fn the_init_buttons_rect_is_where_the_button_landed() {
+        let mut app = app();
+        app.git = crate::app::git::GitState::default();
+        app.git.availability = crate::app::git::GitAvailability::NotARepository;
+
+        let rects = layout::compute(Rect::new(0, 0, 80, 24), &app);
+        let button = crate::ui::git::init_button(&app, rects.git_panel).expect("a button");
+        let rows = draw(&app, 80, 24);
+        let drawn: String = rows[button.y as usize]
+            .chars()
+            .skip(button.x as usize)
+            .take(button.width as usize)
+            .collect();
+        assert_eq!(drawn, "[ git init ]");
+    }
+
+    /// Inside a repository there is no button to press, so there is no rect to
+    /// click either — otherwise a click on the first changed file would land
+    /// on a button that is not there.
+    #[test]
+    fn a_repository_has_no_init_button() {
+        let app = app();
+        let rects = layout::compute(Rect::new(0, 0, 80, 24), &app);
+        assert!(crate::ui::git::init_button(&app, rects.git_panel).is_none());
+    }
+
     /// SPEC §34: while a network operation runs, the panel says so — and keeps
     /// saying so, which a four-second notification cannot.
     #[test]

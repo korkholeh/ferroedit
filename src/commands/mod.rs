@@ -100,6 +100,12 @@ pub enum Command {
     /// default, so this hides them first (SPEC §19).
     ToggleHiddenFiles,
 
+    /// Runs `git init` in the workspace root (SPEC §28, ADR-084).
+    ///
+    /// The one Git command that exists *because* there is no repository: the
+    /// panel offers it as a button in place of the list it cannot draw, and
+    /// the Git menu greys it out again the moment there is one.
+    GitInit,
     /// Looks for the repository again and re-reads `git status` (SPEC §30).
     /// Everything that changes a file refreshes the status on its own; this is
     /// for a change made outside the editor.
@@ -593,6 +599,7 @@ impl Command {
             Self::ExplorerRefresh => "Re-read the tree from disk".into(),
             Self::ToggleHiddenFiles => "Show or hide ignored and hidden files".into(),
 
+            Self::GitInit => "Create a Git repository in this folder".into(),
             Self::GitRefresh => "Re-read the repository status".into(),
             Self::GitOpenSelected => "Open the selected changed file".into(),
             Self::GitDiffRow(_) => "Show the diff of a changed file".into(),
@@ -916,6 +923,11 @@ impl MenuEntry {
         }
     }
 
+    /// Test-only since the menu walk started asking `menu_enabled` instead: a
+    /// row the selection may rest on is now "an entry, and one that can be
+    /// chosen", which answers the separator question on the way past
+    /// (ADR-084). The tests still check the shape of the tables directly.
+    #[cfg(test)]
     pub fn is_separator(&self) -> bool {
         matches!(self, Self::Separator)
     }
@@ -1050,6 +1062,11 @@ pub static MENUS: &[MenuDef] = &[
     MenuDef {
         title: "Git",
         items: &[
+            // Above Refresh rather than at the foot of the menu: in a folder
+            // that is not a repository it is the only entry here that does
+            // anything, and an entry that is the whole menu does not belong
+            // under fifteen greyed-out ones (ADR-084).
+            item("Initialize Repository", Command::GitInit),
             item("Refresh", Command::GitRefresh),
             SEP,
             item("Stage", Command::GitStage),
@@ -1112,6 +1129,63 @@ pub fn menu_state(app: &App, command: &Command) -> Option<bool> {
         Command::SetTheme(kind) => app.settings.theme == *kind,
         _ => return None,
     })
+}
+
+/// Whether a menu entry can be chosen in the state the app is in (SPEC §24).
+///
+/// A greyed entry is still a row: it keeps its place, its label and its key, so
+/// a menu does not change shape between one folder and the next — what changes
+/// is that the selection steps over it and a click on it does nothing
+/// (ADR-084). The alternative, leaving the rows out, would move every entry
+/// under them and make a menu the user has learned the shape of a different
+/// menu in a folder that is not a repository.
+pub fn menu_enabled(app: &App, command: &Command) -> bool {
+    match command {
+        // The mirror of the rest: the one entry that exists because there is
+        // no repository, and so the one that goes grey once there is.
+        Command::GitInit => !app.git.is_repository(),
+        // Re-reading is the one Git entry that still means something in a
+        // plain directory: it is `rev-parse` run again, which is how a
+        // repository made in another window is found.
+        Command::GitRefresh => true,
+        other => !needs_repository(other) || app.git.is_repository(),
+    }
+}
+
+/// The commands there is nothing to run outside a repository.
+///
+/// Listed rather than matched on a prefix of the name: `GitInit` and
+/// `GitRefresh` are `Git*` too, and a rule that had to be read as "every Git
+/// command except the two" is a rule that goes wrong the next time one is
+/// added.
+fn needs_repository(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::GitOpenSelected
+            | Command::GitDiffRow(_)
+            | Command::GitStage
+            | Command::GitUnstage
+            | Command::GitToggleStage
+            | Command::GitStageAll
+            | Command::GitUnstageAll
+            | Command::GitCommitPrompt
+            | Command::GitCommit(_)
+            | Command::GitPull
+            | Command::GitPush
+            | Command::GitCancel
+            | Command::GitBranchPrompt
+            | Command::GitSwitchBranch(_)
+            | Command::GitNewBranchPrompt
+            | Command::GitCreateBranch(_)
+            | Command::GitMergePrompt
+            | Command::GitMerge(_)
+            | Command::GitStageResolved
+            | Command::GitDiff
+            | Command::GitLog
+            | Command::GitFileHistory
+            | Command::GitLineHistory
+            | Command::GitOpenConfig
+    )
 }
 
 const fn item(label: &'static str, command: Command) -> MenuEntry {

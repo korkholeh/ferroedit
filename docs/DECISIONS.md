@@ -3203,3 +3203,110 @@ floor is still worth having: it is what the 1.3:1 error colour failed.
 **Cost.** Five palettes gained three fields each and a dozen values moved. The sixteen-
 colour schemes are exempt from the ratio check entirely: those colours are whatever the
 user's terminal says they are, which is the whole point of them.
+
+---
+
+## ADR-084: A folder that is not a repository gets a button, and the Git menu greys out
+
+**Decision.** The git panel, in a workspace that is an ordinary directory, draws
+`[ git init ]` under the `Not a Git repository` line SPEC §28 asks for. The button is
+pressed with the mouse or with `Enter` while the panel has focus, and the Git menu carries
+the same thing as `Initialize Repository`. Every other entry of that menu is greyed out
+while there is no repository: it keeps its row, its label and its key, the selection steps
+over it as it steps over a rule, and a click on it does nothing at all. `Initialize
+Repository` greys out the other way round, the moment there is a repository; `Refresh`
+never greys out. `git init` runs in the foreground, and `GitService::init` is followed by
+the ordinary `discover`.
+
+**Why a button and not only a sentence.** `Not a Git repository` is a true statement about
+a state the user can leave in one command, and the panel was the one place in the editor
+that named a state and then offered nothing to do about it. The Git menu was worse: sixteen
+entries, every one of which answered `Not a Git repository` when pressed, and no way to
+tell that from the outside.
+
+**Why greyed rather than hidden.** A drop-down whose rows come and go is a different menu
+in every folder — `Push` would be the ninth entry here and the second one there, and the
+muscle memory that makes a menu faster than a key is exactly what that breaks. Greyed rows
+keep the shape and say *why* nothing happens, which is the question a user who pressed
+`Commit…` and got a status-bar line was left with.
+
+**Why `Refresh` stays live.** It is `rev-parse` run again, and it is how a repository made
+in another window — or by this button in another instance — is found. It is the one entry
+in the menu whose answer can change the state the rest of the menu is greyed for, so
+greying it would be locking the door from the inside.
+
+**Why greyed beats selected in the renderer.** The walk cannot leave the cursor on a greyed
+row, and `open_menu` opens on the first row that can be pressed. But the state behind an
+open drop-down can change under it — a background job finishing, a watcher firing — and a
+selection bar drawn across an entry that will not run is worse than no bar at all.
+
+**Why the foreground.** ADR-033 put the write operations on a worker because `push` is
+network-bound and `commit` runs the user's hooks. `git init` is neither: it writes a
+handful of small files on the local disk and takes no lock anyone else holds, so it is
+`status`-shaped, and putting it on the worker would buy nothing but a frame in which the
+panel is wrong.
+
+**Why `[ git init ]` in the panel and `Initialize Repository` in the menu.** The sidebar is
+sixteen cells wide at its narrowest and the long label does not fit at any width the pane
+actually takes. The short one is the command the button runs, which is the label a reader
+can check against what happened; the menu has the room and spells it out.
+
+**Why the panel wraps its own text.** The button under the sentence has to sit at a row
+that both the drawing and the hit test can name — the rule `status_zones` follows for the
+status bar — and a widget that wraps inside `render` can only be asked where it put things
+by reading the frame back out afterwards.
+
+**Why a colour of its own and not the shortcut column's.** A greyed entry was first drawn
+in `on_popup_dim`, the colour the key labels are. That colour is held to 4:1 by ADR-083
+because a shortcut is *read* — the dark theme's is 250 against a label's 252, two steps of
+the xterm greyscale — so a greyed entry was indistinguishable from a live one and both
+contrast checks called it correct. `on_popup_disabled` is a third tier at about 2.9:1, and
+a test holds it to at most half the contrast of a label: the difference has to be seen
+rather than looked for. The sixteen-colour schemes use `DarkGray`, which is the fourth tone
+one of them has and the shortcut's colour in the other — a Black label beside a DarkGray
+one already says it there.
+
+**Cost.** One command, one `GitService` function, a `menu_enabled` predicate beside
+`menu_state`, a palette role, and a greyed tier in the popup renderer.
+`MenuEntry::is_separator` became test-only: the menu walk now asks "an entry, and one that
+can be chosen", which answers the separator question on the way past.
+
+---
+
+## ADR-085: A panel whose repository is above the workspace says whose changes it is listing
+
+**Decision.** When `rev-parse --show-toplevel` answers with a directory that is not the
+workspace root, the git panel draws a dim row under its title naming it — ` in Projects/`
+— and the list starts one row lower. `GitState::above` holds the name, worked out once when
+the repository is found; `ui::git::header_rows` is the single answer the renderer, the hit
+test and `app.git_rows` all read. Nothing else changes: the panel still lists the whole
+repository, and `Initialize Repository` stays greyed out inside one (ADR-084).
+
+**Why.** Opening `~/Projects/autodev` where `~/Projects` is itself a repository gave a
+sidebar whose explorer showed four entries and whose git panel showed seventy-three, none
+of them in the folder on screen, under a title reading `Git — main (73)`. Every one of
+those facts was true and the pane was unreadable: there was nothing anywhere saying the
+repository was a level up.
+
+**Why not scope the status to the workspace.** `git status -- <workspace>` would make the
+two halves of the sidebar agree, and it is what the pane looks like it is promising. But it
+is not what git does in a subdirectory, and it would have to be carried into `Stage All`,
+`Unstage All` and the commit or the panel would list one set of changes and commit another.
+It also loses the case that makes opening a subdirectory worth doing: open `ferroedit/src`
+and a change to `Cargo.toml` stops existing.
+
+**Why a row and not the title.** ` Git — Projects · main (73) ` is twenty-eight cells. The
+sidebar is sixteen to thirty-two and nineteen in the default layout, so the title would
+have shed the name in exactly the pane that needed it — or kept it and clipped away the
+branch and the count, which are the parts about the changes themselves. The row is there
+only when there is something to say, so the ordinary case still spends nothing (ADR-031's
+objection was to a header row that said "Changes").
+
+**Why the name is computed once.** Deciding it needs a `realpath`: `rev-parse` answers with
+a path git has already resolved, and the workspace's may still hold a symlink — on macOS
+every temporary directory does, which is how the editor's own tests open one. A comparison
+that did that I/O on the way to a frame would be a `stat` sixty times a second to re-answer
+a question settled when the repository was found.
+
+**Cost.** One field on `GitState`, one exported `header_rows`, and three call sites that
+used to assume one row of chrome.

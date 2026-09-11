@@ -56,6 +56,14 @@ pub struct GitState {
     /// in three keystrokes must not be three refusals.
     running: VecDeque<(JobId, GitJob)>,
     pub availability: GitAvailability,
+    /// The name of the repository's own directory, when the workspace sits
+    /// somewhere *inside* it rather than at its root (ADR-085). `None` in the
+    /// ordinary case, where the two are the same directory.
+    ///
+    /// Worked out once, when the repository is found, and not on the way to a
+    /// frame: deciding it needs a `realpath` or two, and the panel draws its
+    /// title sixty times a second.
+    pub above: Option<String>,
     pub status: RepoStatus,
     pub selected: usize,
     pub scroll: usize,
@@ -72,6 +80,10 @@ impl GitState {
         match GitService::discover(root) {
             Ok(service) => {
                 log::info!("git status will run in {}", service.root().display());
+                self.above = name_above(service.root(), root);
+                if let Some(name) = &self.above {
+                    log::info!("the workspace is inside the {name} repository, not at its root");
+                }
                 self.repo = Some(service);
                 self.availability = GitAvailability::Repository;
                 self.refresh();
@@ -82,6 +94,23 @@ impl GitState {
                 self.set_unavailable(GitAvailability::Unavailable(err.to_string()));
             }
         }
+    }
+
+    /// Creates a repository in the workspace and reads it (SPEC §28).
+    ///
+    /// In the foreground, like `discover` and for the same reason: `git init`
+    /// writes a handful of small files on the local disk, so it has an upper
+    /// bound a frame can wait for, and the panel it changes has to be right on
+    /// the very next one (ADR-084).
+    ///
+    /// Whether the directory became a repository is not this function's
+    /// answer — `discover` re-reads it either way, and an `Ok` from git with a
+    /// panel that still says `Not a Git repository` is a state the caller
+    /// should be able to see rather than one this hides.
+    pub fn init(&mut self, root: &Path) -> Result<(), GitError> {
+        GitService::init(root)?;
+        self.discover(root);
+        Ok(())
     }
 
     /// Re-reads the status of a repository already found. Does nothing at all
@@ -108,6 +137,7 @@ impl GitState {
     /// state, and a job already in flight still has an answer to deliver.
     fn set_unavailable(&mut self, availability: GitAvailability) {
         self.repo = None;
+        self.above = None;
         self.status = RepoStatus::default();
         self.availability = availability;
         self.clamp();
@@ -278,6 +308,31 @@ impl GitState {
     }
 }
 
+/// The name of the repository's own directory, when `workspace` is somewhere
+/// inside it rather than at its root (ADR-085).
+///
+/// Opening a subdirectory of a repository is an ordinary thing to do, and git
+/// itself answers for the whole repository when you do — so the panel does too,
+/// and this is what lets it say whose changes it is listing.
+fn name_above(repo: &Path, workspace: &Path) -> Option<String> {
+    if repo == workspace {
+        return None;
+    }
+    // `rev-parse` answers with a path git has already resolved, and the
+    // workspace's may still hold a symlink — `/tmp` on macOS is `/private/tmp`
+    // — so the cheap comparison above is backed by one that does the I/O.
+    // Once, here, and never again: a false `Some` would put a repository's name
+    // on the title of every workspace opened through a link.
+    if std::fs::canonicalize(workspace).is_ok_and(|resolved| resolved == repo) {
+        return None;
+    }
+    Some(match repo.file_name() {
+        Some(name) => name.to_string_lossy().into_owned(),
+        // A repository at the root of the filesystem has no name to give.
+        None => repo.display().to_string(),
+    })
+}
+
 /// Test fixture: a repository with one file in each of the states the panel
 /// draws differently, built in memory so that no test of the *rendering* needs
 /// a repository on disk. The tests of the reading itself use a real one.
@@ -298,6 +353,7 @@ impl GitState {
             worker: None,
             running: VecDeque::new(),
             availability: GitAvailability::Repository,
+            above: None,
             status: RepoStatus {
                 head: Some(Head::Branch("main".into())),
                 oid: Some("5944bbe".into()),
@@ -361,6 +417,61 @@ mod tests {
         assert_eq!(git.status.head, Some(Head::Branch("main".into())));
         assert_eq!(git.entries().len(), 1);
         assert_eq!(git.summary(), "main — 1 change");
+    }
+
+    /// Opening a subdirectory of a repository is an ordinary thing to do, and
+    /// git answers for the whole repository when you do — so the panel says
+    /// whose changes it is listing (ADR-085).
+    #[test]
+    fn a_workspace_inside_a_repository_knows_whose_changes_it_is_showing() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+        let sub = repo.path().join("src");
+        std::fs::create_dir(&sub).unwrap();
+
+        let mut git = GitState::default();
+        git.discover(&sub);
+        assert!(git.is_repository());
+        assert_eq!(
+            git.above.as_deref(),
+            repo.path().file_name().and_then(|name| name.to_str()),
+            "the panel names the repository the workspace is inside"
+        );
+    }
+
+    /// And says nothing at all in the ordinary case, where the workspace *is*
+    /// the repository — including when the path it was opened by holds a
+    /// symlink, which on macOS every temporary directory does.
+    #[test]
+    fn a_workspace_at_the_root_of_its_repository_has_nothing_to_name() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.run(&["add", "."]);
+        repo.commit("init");
+
+        let mut git = GitState::default();
+        git.discover(repo.path());
+        assert!(git.is_repository());
+        assert_eq!(git.above, None, "{:?}", git.root());
+    }
+
+    /// The name goes away with the repository it named, or a panel that had
+    /// found one would go on claiming its name after a failed refresh.
+    #[test]
+    fn the_name_goes_away_with_the_repository() {
+        let repo = TestRepo::new();
+        let sub = repo.path().join("src");
+        std::fs::create_dir(&sub).unwrap();
+        let mut git = GitState::default();
+        git.discover(&sub);
+        assert!(git.above.is_some());
+
+        let dir = tempfile::tempdir().unwrap();
+        git.discover(dir.path());
+        assert_eq!(git.availability, GitAvailability::NotARepository);
+        assert_eq!(git.above, None);
     }
 
     #[test]

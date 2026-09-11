@@ -423,11 +423,25 @@ fn explorer_click(app: &App, panel: Rect, at: Position) -> Command {
 ///
 /// A panel with no rows in it — no repository, or a clean tree — has nothing
 /// to open, so a click there does the one thing a click on a pane always does.
+/// The exception is the button a folder that is not a repository gets in place
+/// of the list: it is tested against the rect the renderer drew it at, so a
+/// click cannot land on something other than what it looked like it hit
+/// (ADR-084).
 fn git_click(app: &App, panel: Rect, at: Position) -> Command {
+    if crate::ui::git::init_button(app, panel).is_some_and(|button| button.contains(at)) {
+        return Command::GitInit;
+    }
     if app.git.entries().is_empty() {
         return Command::FocusPane(FocusTarget::GitPanel);
     }
-    let row = at.y.saturating_sub(panel.y + PANEL_HEADER_ROWS) as usize;
+    // Not `PANEL_HEADER_ROWS`: this panel grows a second row of chrome when the
+    // repository is above the workspace, and the renderer is what says so
+    // (ADR-085).
+    let header = crate::ui::git::header_rows(app);
+    if at.y < panel.y + header {
+        return Command::FocusPane(FocusTarget::GitPanel);
+    }
+    let row = at.y.saturating_sub(panel.y + header) as usize;
     Command::GitDiffRow(row + app.git.scroll)
 }
 
@@ -792,6 +806,58 @@ mod tests {
         assert_eq!(
             hit_test(&app, &r, click(r.git_panel.x + 2, r.git_panel.y + 2)),
             Some(Command::FocusPane(FocusTarget::GitPanel))
+        );
+    }
+
+    /// Except for the one row a folder that is not a repository does have:
+    /// the button that makes one (ADR-084). The row above it is the sentence
+    /// saying why, and a click there is still only a click on a pane.
+    #[test]
+    fn clicking_the_init_button_creates_a_repository() {
+        let mut app = app();
+        app.git = crate::app::git::GitState::default();
+        app.git.availability = crate::app::git::GitAvailability::NotARepository;
+        let r = rects(&app);
+        let button = crate::ui::git::init_button(&app, r.git_panel).expect("a button");
+
+        assert_eq!(
+            hit_test(&app, &r, click(button.x, button.y)),
+            Some(Command::GitInit)
+        );
+        assert_eq!(
+            hit_test(&app, &r, click(button.x, button.y - 1)),
+            Some(Command::FocusPane(FocusTarget::GitPanel)),
+            "the blank row above the button is not the button"
+        );
+        assert_eq!(
+            hit_test(&app, &r, click(button.right(), button.y)),
+            Some(Command::FocusPane(FocusTarget::GitPanel)),
+            "nor is the gap to the right of it"
+        );
+    }
+
+    /// The note naming the repository above the workspace is a row of chrome,
+    /// not the first change: a click on it is a click on the pane, and the
+    /// list under it is counted from below it (ADR-085).
+    #[test]
+    fn the_repository_note_shifts_the_rows_it_sits_above() {
+        let mut app = app();
+        app.git.above = Some("Projects".to_string());
+        let r = rects(&app);
+
+        assert_eq!(
+            hit_test(&app, &r, click(r.git_panel.x + 2, r.git_panel.y + 1)),
+            Some(Command::FocusPane(FocusTarget::GitPanel)),
+            "the note itself is not a change"
+        );
+        assert_eq!(
+            hit_test(&app, &r, click(r.git_panel.x + 2, r.git_panel.y + 2)),
+            Some(Command::GitDiffRow(0)),
+            "the first change is the row under the note"
+        );
+        assert_eq!(
+            hit_test(&app, &r, click(r.git_panel.x + 2, r.git_panel.y + 3)),
+            Some(Command::GitDiffRow(1))
         );
     }
 
