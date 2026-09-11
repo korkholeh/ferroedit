@@ -8,6 +8,33 @@ Unreleased work is collected under **Unreleased**; `scripts/release.sh` cuts a
 version, so that heading becomes the new version's on the way out (see
 [README](README.md#cutting-a-release)).
 
+## [Unreleased]
+
+## [0.1.10] — 2026-09-11
+
+### Added
+
+- **A folder that is not a Git repository gets a way to become one.** The Git panel draws
+  a `[ git init ]` button under the `Not a Git repository` line — pressed with the mouse,
+  or with `Enter` while the panel has focus — and the Git menu carries the same thing as
+  `Initialize Repository` (ADR-084).
+
+### Changed
+
+- **The Git panel says when its repository is above the workspace.** Opening a
+  subdirectory of a repository — or a folder that merely happens to sit inside one —
+  gave a panel listing paths the explorer beside it had never heard of, with nothing
+  saying why. A dim row under the title now names the repository (` in Projects/`), and
+  the panel costs no row at all in the ordinary case where the workspace *is* the
+  repository (ADR-085).
+- **The Git menu greys out what the current folder has nothing to run.** Outside a
+  repository every entry but `Refresh` and `Initialize Repository` is drawn dim: it keeps
+  its row, its label and its key, the selection steps over it, and a click on it does
+  nothing. `Initialize Repository` greys out the other way round, once there is a
+  repository (ADR-084). A greyed row has a colour of its own — the shortcut column's dim
+  is held to a reading contrast and was two steps off a live label, which is no
+  difference at all.
+
 ## [0.1.9] — 2026-09-11
 
 ### Added
@@ -280,7 +307,8 @@ The first release: the editor through Phase 14.
   the help screen, and a quit that asks about each unsaved file in turn.
 - Releases are GitHub Releases, built for four targets.
 
-[Unreleased]: https://github.com/korkholeh/ferroedit/compare/v0.1.9...HEAD
+[Unreleased]: https://github.com/korkholeh/ferroedit/compare/v0.1.10...HEAD
+[0.1.10]: https://github.com/korkholeh/ferroedit/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/korkholeh/ferroedit/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/korkholeh/ferroedit/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/korkholeh/ferroedit/compare/v0.1.6...v0.1.7
