@@ -10,6 +10,30 @@ version, so that heading becomes the new version's on the way out (see
 
 ## [Unreleased]
 
+### Added
+
+- **A Markdown file can be read typeset.** `F7` — or *View ▸ Markdown Preview* — swaps a
+  `.md` tab between its text and a read-only preview: headings in colour with the top two
+  underlined, bullets and numbers with hanging indents, ticked and unticked task boxes,
+  block quotes with a bar and GitHub's `> [!NOTE]` alerts labelled, tables framed and
+  aligned as their `:--:` row asks (the widest column wraps when the table is too wide),
+  code blocks on a ground of their own and highlighted by the grammar their fence names,
+  and emphasis, strikethrough and inline code as styles rather than punctuation. Local
+  PNG and JPEG pictures are drawn in place in half-blocks; a remote one is its alt text.
+  The HTML a README centres its logo with is read for what it shows — `<img>` is a
+  picture, `<h1>` a heading — instead of shown as markup (ADR-086).
+- **The preview has an outline.** A column down the right lists the headings, marks the
+  section the top of the pane is in, and goes to one when it is clicked; `F8` hides it,
+  and it steps aside by itself in a pane narrower than 72 columns. `Alt+Up` / `Alt+Down`
+  (*Search ▸ Previous/Next Heading*) move heading to heading, and *Go to Heading…* —
+  `Ctrl+G` while the preview is up — is the outline as a filtered picker.
+- **Links in the preview go somewhere.** A click on a `#fragment` goes to that heading, one
+  on a file beside the document opens it in a tab (a picture as a picture), and one on an
+  address outside the editor copies it.
+- **The preview and the text keep each other's place.** It opens on the part of the file
+  the caret is in, `F7` back puts the caret on the line the preview was showing, and
+  `F3` over the preview scrolls it to the match.
+
 ### Changed
 
 - **The README's screenshots are captures of 0.1.10.** Every image was retaken against

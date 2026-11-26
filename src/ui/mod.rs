@@ -11,6 +11,7 @@ pub mod image;
 pub mod layout;
 pub mod legend;
 pub mod log;
+pub mod markdown;
 pub mod menu;
 pub mod opening;
 pub mod scrollbar;
@@ -70,6 +71,10 @@ pub fn render(frame: &mut Frame, app: &App, rects: &LayoutRects, theme: &Theme) 
     // The same, for a file being read as columns rather than as lines.
     if let Some(area) = rects.table {
         table::render(frame, app, area, theme);
+    }
+    // The same, for a Markdown file being read typeset rather than as source.
+    if let Some(area) = rects.preview {
+        markdown::render(frame, app, area, theme);
     }
     // Over whichever of them is in front: a file being read is about to be a
     // tab, and the box that says so belongs in the pane it will appear in

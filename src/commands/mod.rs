@@ -380,6 +380,25 @@ pub enum Command {
     /// `None` for the quote is a file with no quoting at all.
     SetCsvDelimiter(char),
     SetCsvQuote(Option<char>),
+    /// Swaps the active tab between the text and the Markdown preview (SPEC
+    /// §72, ADR-086).
+    ToggleMarkdownPreview,
+    /// Shows or hides the preview's outline of headings.
+    ToggleMarkdownOutline,
+    /// Scrolls the preview to the next heading below the top of the pane, or
+    /// the one above it.
+    StepHeading(i16),
+    /// Scrolls the preview to an entry of its outline — a click on the outline,
+    /// a row of the heading picker, a `#fragment` link.
+    JumpToHeading(usize),
+    /// Asks which heading to go to: the outline as a picker, for the keyboard.
+    HeadingPrompt,
+    /// A click on the preview's text: `row` is a row of the whole layout and
+    /// `col` a column of the text area. Follows a link when there is one there.
+    PreviewClick {
+        row: usize,
+        col: usize,
+    },
     /// Moves the table's window without moving the selected cell — the wheel.
     ScrollTable(i16),
     ScrollTableHorizontal(i16),
@@ -750,6 +769,16 @@ impl Command {
             Self::SetCsvDelimiter(ch) => format!("Split the columns on {ch:?}"),
             Self::SetCsvQuote(Some(ch)) => format!("Quote the fields with {ch:?}"),
             Self::SetCsvQuote(None) => "Read the fields unquoted".into(),
+            Self::ToggleMarkdownPreview => "Show this Markdown file typeset, or as text".into(),
+            Self::ToggleMarkdownOutline => "Show or hide the preview's outline of headings".into(),
+            Self::StepHeading(delta) => step(
+                *delta,
+                "Go to the next heading in the preview",
+                "Go to the previous heading in the preview",
+            ),
+            Self::JumpToHeading(_) => "Go to the heading".into(),
+            Self::HeadingPrompt => "Choose a heading of the preview to go to".into(),
+            Self::PreviewClick { .. } => "Follow the link under the pointer".into(),
             Self::ScrollTable(delta) => {
                 step(*delta, "Scroll the table down", "Scroll the table up")
             }
@@ -1019,6 +1048,12 @@ pub static MENUS: &[MenuDef] = &[
             item("Find Previous", Command::FindPrev),
             SEP,
             item("Go to Line…", Command::GotoLinePrompt),
+            // The preview's way around a document: its headings, which are
+            // what a reader moves between where a writer moves between lines
+            // (SPEC §72).
+            item("Go to Heading…", Command::HeadingPrompt),
+            item("Next Heading", Command::StepHeading(1)),
+            item("Previous Heading", Command::StepHeading(-1)),
             SEP,
             item("Match Case", Command::SearchToggleCase),
             SEP,
@@ -1039,6 +1074,8 @@ pub static MENUS: &[MenuDef] = &[
             // about *how* the file is parsed sit behind one entry (ADR-079).
             item("Table View", Command::ToggleTableView),
             item("Table Format…", Command::TableFormatPrompt),
+            item("Markdown Preview", Command::ToggleMarkdownPreview),
+            item("Outline", Command::ToggleMarkdownOutline),
             SEP,
             // The three readouts on the status bar that are now questions
             // (ADR-058). They are here as well as there because a feature that
@@ -1124,6 +1161,11 @@ pub fn menu_state(app: &App, command: &Command) -> Option<bool> {
         // The table is a property of the tab in front, so with no file open
         // there is nothing to be on: an unmarked entry, not a missing one.
         Command::ToggleTableView => app.active().is_some_and(|tab| tab.shows_table()),
+        Command::ToggleMarkdownPreview => app.active().is_some_and(|tab| tab.shows_preview()),
+        Command::ToggleMarkdownOutline => app
+            .active()
+            .and_then(|tab| tab.preview.as_ref())
+            .is_some_and(|view| view.outline),
         Command::SearchToggleCase => app.search.case_sensitive,
         Command::ToggleUpdateChecks => app.settings.check_for_updates,
         Command::SetTheme(kind) => app.settings.theme == *kind,

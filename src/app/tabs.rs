@@ -10,6 +10,7 @@ use std::path::Path;
 use crate::app::diff::DiffState;
 use crate::app::image::ImageState;
 use crate::app::log::LogState;
+use crate::app::markdown::MarkdownView;
 use crate::app::table::TableView;
 use crate::app::TextView;
 use crate::editor::csv::Dialect;
@@ -200,6 +201,18 @@ pub struct Tab {
     /// A `.csv` or `.tsv` file opens with one already on, because that is what
     /// the file is; every other file gets one only when asked.
     pub table: Option<TableView>,
+    /// The Markdown preview, when this tab is showing one (SPEC §72).
+    ///
+    /// `Some` means the pane draws the typeset document instead of the text,
+    /// and the tab is read-only while it lasts: the rows are a layout of the
+    /// buffer, wrapped and restyled, and there is no character in them a caret
+    /// could stand on (ADR-086). Off until asked for — a Markdown file is a
+    /// file people write, and opening it on something they cannot type into
+    /// would be the CSV surprise again (ADR-062) without the CSV's excuse.
+    pub preview: Option<MarkdownView>,
+    /// Whether the last preview had its outline open, so that turning the
+    /// preview off and on again keeps the answer.
+    last_outline: Option<bool>,
     /// Whether the user has already been asked about the current `stale`.
     ///
     /// The watcher reports every burst in the workspace, so without this the
@@ -217,6 +230,8 @@ impl Tab {
             viewport: Viewport::default(),
             highlights: HighlightCache::default(),
             table,
+            preview: None,
+            last_outline: None,
             stale: None,
             last_dialect: None,
             asked: false,
@@ -238,6 +253,58 @@ impl Tab {
                 let dialect = self.last_dialect.unwrap_or_else(|| sniff(&self.document));
                 self.table = Some(TableView::new(dialect));
             }
+        }
+    }
+
+    /// Whether the pane is showing the Markdown preview (SPEC §72).
+    pub fn shows_preview(&self) -> bool {
+        self.preview.is_some()
+    }
+
+    /// Whether the document is one the preview is offered for: a Markdown
+    /// extension, or a file the user told the highlighter is Markdown.
+    pub fn is_markdown(&self) -> bool {
+        let by_name = self
+            .document
+            .path()
+            .and_then(|path| path.extension())
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| {
+                MARKDOWN_EXTENSIONS
+                    .iter()
+                    .any(|known| ext.eq_ignore_ascii_case(known))
+            });
+        by_name || self.highlights.language().contains("Markdown")
+    }
+
+    /// Turns the preview on or off.
+    ///
+    /// On, it opens on the part of the document the caret is in; off, the
+    /// caret is put on the line the preview was scrolled to and the text is
+    /// scrolled there with it. Either way the reader stays where they were,
+    /// which is the whole point of having one switch instead of two windows.
+    pub fn toggle_preview(&mut self) {
+        match self.preview.take() {
+            Some(view) => {
+                self.last_outline = Some(view.outline);
+                let line = view.top_line();
+                self.document
+                    .place_cursor(line, crate::editor::coords::VisualCol(0));
+                self.viewport.top_line = line;
+                self.viewport.top_row = 0;
+            }
+            None => {
+                let mut view = MarkdownView::new(self.document.cursor().line);
+                view.outline = self.last_outline.unwrap_or(true);
+                self.preview = Some(view);
+            }
+        }
+    }
+
+    /// Re-lays the preview, if it is on and anything it was made from changed.
+    pub fn sync_preview(&mut self, pane_width: u16) {
+        if let Some(view) = self.preview.as_mut() {
+            view.sync(&self.document, pane_width);
         }
     }
 
@@ -292,6 +359,9 @@ impl Tab {
         self.document.path() == Some(path)
     }
 }
+
+/// The extensions a Markdown file is written with.
+const MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown", "mdown", "mkd", "mkdn", "mdx"];
 
 /// Whether a document is one the CSV view opens by itself.
 ///

@@ -295,6 +295,18 @@ pub static BINDINGS: &[Binding] = &[
     // table has the pane, and every `Ctrl` letter that reads as "table" is
     // already an editing command the table refuses.
     editor(KeyCode::F(4), Command::ToggleTableView, "F4"),
+    // `F7` swaps a Markdown file between its text and its preview, and `F8`
+    // shows or hides the preview's outline (SPEC §72). Function keys for the
+    // reason `F4` is one: they have to work while the pane refuses typing, and
+    // the `Ctrl` letters other editors use for a preview are editing commands
+    // here, or are not told apart from them by a legacy terminal (ADR-008).
+    editor(KeyCode::F(7), Command::ToggleMarkdownPreview, "F7"),
+    editor(KeyCode::F(8), Command::ToggleMarkdownOutline, "F8"),
+    // Heading to heading. `Alt` beside the `Alt+Left`/`Alt+Right` that move the
+    // window sideways; both are in the Search menu as well, for the terminals
+    // that do not deliver it (ADR-008).
+    editor_binding(ALT, KeyCode::Up, Command::StepHeading(-1), "Alt+Up"),
+    editor_binding(ALT, KeyCode::Down, Command::StepHeading(1), "Alt+Down"),
     // The two keys the grid adds. `F2` is the rename key every file manager and
     // every spreadsheet has, and over the text it says which key shows a table;
     // `Insert` adds a record, which is a key no terminal spends on anything else

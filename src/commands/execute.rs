@@ -12,6 +12,7 @@ use crate::app::help::HelpState;
 use crate::app::image::ImageState;
 use crate::app::input_field::InputField;
 use crate::app::log::LogState;
+use crate::app::markdown::{self as preview, MarkdownView};
 use crate::app::search::SearchField;
 use crate::app::table::{CellEditor, CellStep, TableView};
 use crate::app::tabs::{active_after_close, Stale, TabItem};
@@ -262,6 +263,60 @@ pub fn execute_command(app: &mut App, command: Command) {
         }
         Command::KeepBuffer(index) => keep_buffer(app, index),
 
+        // The preview is read-only and has no caret: the keys that move one
+        // move the window instead, and everything that would change the text
+        // says so and does nothing (SPEC §72, ADR-086).
+        Command::ScrollEditor(delta) if showing_preview(app) => {
+            scroll_preview(app, delta as isize);
+        }
+        Command::MoveCursor(motion) | Command::ExtendSelection(motion) if showing_preview(app) => {
+            move_in_preview(app, motion);
+        }
+        Command::GotoLinePrompt if showing_preview(app) => prompt_heading(app),
+        Command::InsertChar(_)
+        | Command::InsertText(_)
+        | Command::InsertNewline
+        | Command::Backspace
+        | Command::Delete
+        | Command::DeleteLine
+        | Command::Cut
+        | Command::Paste
+        | Command::Undo
+        | Command::Redo
+        | Command::SelectAll
+        | Command::Copy
+        | Command::ReplaceOpen
+        | Command::ReplaceCurrent
+        | Command::ReplaceAll
+        | Command::EditCell
+        | Command::InsertRecord
+        | Command::DeleteRecord
+        | Command::SelectRow
+        | Command::SelectColumn
+        | Command::ToggleTableView
+            if showing_preview(app) =>
+        {
+            refuse_in_preview(app);
+        }
+        Command::FindNext if showing_preview(app) => {
+            step_match(app, 1);
+            reveal_cursor_in_preview(app);
+        }
+        Command::FindPrev if showing_preview(app) => {
+            step_match(app, -1);
+            reveal_cursor_in_preview(app);
+        }
+        Command::ToggleMarkdownPreview => toggle_preview(app),
+        Command::ToggleMarkdownOutline => toggle_outline(app),
+        Command::StepHeading(delta) => step_heading(app, delta),
+        Command::JumpToHeading(index) => {
+            focus_pane(app, FocusTarget::Editor);
+            if let Some(view) = preview_mut(app) {
+                view.jump_to_heading(index);
+            }
+        }
+        Command::HeadingPrompt => prompt_heading(app),
+        Command::PreviewClick { row, col } => click_preview(app, row, col),
         Command::ScrollEditor(delta) if showing_table(app) => {
             execute_command(app, Command::ScrollTable(delta));
         }
@@ -958,6 +1013,227 @@ fn set_language(app: &mut App, name: &str) {
     tab.highlights.set_syntax(syntax, &tab.document);
     app.notifications
         .info(format!("Highlighting as {}", syntax.name));
+}
+
+// --- the Markdown preview (SPEC §72, ADR-086) ----------------------------------
+
+/// The active tab's preview, when the pane in front is showing one.
+fn preview_mut(app: &mut App) -> Option<&mut MarkdownView> {
+    app.active_mut()?.preview.as_mut()
+}
+
+/// Whether the pane in front is the typeset document rather than its text.
+fn showing_preview(app: &App) -> bool {
+    app.active().is_some_and(|tab| tab.shows_preview())
+}
+
+/// Says why a command that changes or selects text did nothing, naming the key
+/// that puts the text back — the same shape as the table's refusal.
+fn refuse_in_preview(app: &mut App) {
+    app.notifications
+        .info("The preview is read-only — F7 shows the text");
+}
+
+/// Rows the preview pane could show in the last drawn frame.
+fn preview_rows(app: &App) -> usize {
+    app.editor_view.height as usize
+}
+
+fn scroll_preview(app: &mut App, delta: isize) {
+    let height = preview_rows(app);
+    if let Some(view) = preview_mut(app) {
+        view.scroll_by(delta, height);
+    }
+}
+
+/// The caret's motions, read as the window's: a line is a row, a page is a
+/// pane less two rows of overlap, and the ends are the ends.
+fn move_in_preview(app: &mut App, motion: Motion) {
+    let height = preview_rows(app);
+    let page = height.saturating_sub(2).max(1) as isize;
+    let Some(view) = preview_mut(app) else { return };
+    match motion {
+        Motion::Up => view.scroll_by(-1, height),
+        Motion::Down => view.scroll_by(1, height),
+        Motion::PageUp => view.scroll_by(-page, height),
+        Motion::PageDown => view.scroll_by(page, height),
+        Motion::Home | Motion::DocumentStart => view.home(),
+        Motion::End | Motion::DocumentEnd => view.end(height),
+        // There is no sideways in a text set to the pane's width.
+        _ => {}
+    }
+}
+
+/// Swaps the pane between the text and the preview (SPEC §72).
+fn toggle_preview(app: &mut App) {
+    let Some(tab) = app.active_mut() else {
+        app.notifications.warning("No file open");
+        return;
+    };
+    if tab.shows_table() {
+        app.notifications
+            .info("The table view is on — F4 shows the text");
+        return;
+    }
+    if !tab.shows_preview() && !tab.is_markdown() {
+        app.notifications.info("Not a Markdown file");
+        return;
+    }
+    tab.toggle_preview();
+    let showing = tab.shows_preview();
+    if showing {
+        // The caret has nowhere to be while the preview is up, and focus has
+        // to be on the pane for its keys to reach it.
+        app.focus = FocusTarget::Editor;
+        app.notifications
+            .info("Markdown preview — F7 shows the text, F8 the outline");
+    } else {
+        let view = app.text_view();
+        if let Some(tab) = app.active_mut() {
+            tab.follow_cursor(view);
+        }
+        app.notifications.info("Text view");
+    }
+}
+
+fn toggle_outline(app: &mut App) {
+    let Some(view) = preview_mut(app) else {
+        app.notifications
+            .info("The outline is the preview's — F7 shows it");
+        return;
+    };
+    view.outline = !view.outline;
+    let (outline, headings) = (view.outline, view.has_headings());
+    let wide = app.editor_view.width.saturating_add(1) >= preview::OUTLINE_MIN_PANE;
+    app.notifications.info(match (outline, headings, wide) {
+        (false, _, _) => "Outline hidden",
+        (true, false, _) => "Outline on — this document has no headings",
+        (true, true, false) => "Outline on — the pane is too narrow to show it",
+        (true, true, true) => "Outline shown",
+    });
+}
+
+fn step_heading(app: &mut App, delta: i16) {
+    let Some(view) = preview_mut(app) else {
+        app.notifications
+            .info("Headings are the preview's — F7 shows it");
+        return;
+    };
+    if view.rendered.outline.is_empty() {
+        app.notifications.info("No headings in this document");
+        return;
+    }
+    if view.step_heading(delta as isize).is_none() {
+        app.notifications.info(if delta > 0 {
+            "No heading below"
+        } else {
+            "No heading above"
+        });
+    }
+}
+
+/// The outline as a picker: the keyboard's way to the heading the mouse
+/// reaches by clicking the outline (SPEC §72).
+fn prompt_heading(app: &mut App) {
+    let Some(view) = app.active().and_then(|tab| tab.preview.as_ref()) else {
+        app.notifications
+            .info("Headings are the preview's — F7 shows it");
+        return;
+    };
+    let outline = &view.rendered.outline;
+    if outline.is_empty() {
+        app.notifications.info("No headings in this document");
+        return;
+    }
+    let top = outline.iter().map(|h| h.level).min().unwrap_or(1);
+    let current = view.current_heading();
+    let items: Vec<ListItem> = outline
+        .iter()
+        .enumerate()
+        .map(|(index, heading)| ListItem {
+            label: format!(
+                "{}{}",
+                "  ".repeat(usize::from(heading.level.saturating_sub(top))),
+                heading.text
+            ),
+            command: Command::JumpToHeading(index),
+            current: current == Some(index),
+        })
+        .collect();
+    let return_focus = dialog_return_focus(app);
+    open_dialog(app, DialogState::headings(items, return_focus));
+}
+
+/// After Find moved the document's caret, scrolls the preview to the row the
+/// caret's line was laid out into, so a hit is found in the pane that is up.
+fn reveal_cursor_in_preview(app: &mut App) {
+    let height = preview_rows(app);
+    let Some(tab) = app.active_mut() else { return };
+    let line = tab.document.cursor().line;
+    if let Some(view) = tab.preview.as_mut() {
+        let row = view.row_for_line(line);
+        if row < view.top || row >= view.top + height {
+            view.top = row.saturating_sub(height / 3);
+        }
+    }
+}
+
+/// A click on the text of the preview: it takes the focus, and follows the
+/// link it landed on (ADR-086).
+fn click_preview(app: &mut App, row: usize, col: usize) {
+    focus_pane(app, FocusTarget::Editor);
+    let Some(url) = app
+        .active()
+        .and_then(|tab| tab.preview.as_ref())
+        .and_then(|view| view.link_at(row, col))
+        .map(str::to_string)
+    else {
+        return;
+    };
+    follow_link(app, &url);
+}
+
+/// Where a link goes: a heading of this document, a file beside it — opened in
+/// a tab of its own, as a picture if it is one — or somewhere outside the
+/// editor, which is copied rather than opened. Starting a browser is not a
+/// thing a terminal program can do the same way over SSH as on a desktop, and
+/// a copied address works in both.
+fn follow_link(app: &mut App, url: &str) {
+    if let Some(anchor) = url.strip_prefix('#') {
+        let found = app
+            .active()
+            .and_then(|tab| tab.preview.as_ref())
+            .and_then(|view| view.heading_for_anchor(anchor));
+        match found {
+            Some(index) => {
+                if let Some(view) = preview_mut(app) {
+                    view.jump_to_heading(index);
+                }
+            }
+            None => app
+                .notifications
+                .warning(format!("No heading here is #{anchor}")),
+        }
+        return;
+    }
+    let base = app
+        .active()
+        .and_then(|tab| tab.document.path())
+        .and_then(Path::parent)
+        .map(Path::to_path_buf);
+    match preview::local_path(url, base.as_deref()) {
+        Some(path) if path.is_file() => open_and_report(app, &path),
+        Some(path) => app
+            .notifications
+            .warning(format!("No such file: {}", display_name(&path))),
+        None => match app.clipboard.set(url) {
+            Ok(()) => app.notifications.info(format!("Link copied: {url}")),
+            Err(err) => {
+                log::warn!("clipboard write failed: {err}");
+                app.notifications.info(format!("Link: {url}"));
+            }
+        },
+    }
 }
 
 // --- the CSV view (SPEC §65, ADR-062) ---------------------------------------
@@ -3955,6 +4231,136 @@ mod tests {
 
     fn app() -> App {
         App::fixture()
+    }
+
+    // --- the Markdown preview (SPEC §72, ADR-086) ---------------------------
+
+    /// An app with a Markdown file open in front, in the text view, and a pane
+    /// 80×20 as the last frame left it.
+    fn app_with_markdown(name: &str, text: &str) -> App {
+        use crate::app::{Tab, TabItem};
+
+        let mut app = app();
+        let path = std::path::PathBuf::from("/dev/null/ferroedit-fixture").join(name);
+        app.tabs.push(TabItem::editing(Tab::new(Document::from_text(
+            text,
+            Some(path),
+        ))));
+        app.active_tab = Some(app.tabs.len() - 1);
+        app.focus = FocusTarget::Editor;
+        app.editor_view = EditorView {
+            width: 79,
+            height: 20,
+        };
+        app
+    }
+
+    fn preview(app: &App) -> &MarkdownView {
+        app.active().unwrap().preview.as_ref().unwrap()
+    }
+
+    fn long_markdown() -> String {
+        let mut text = "# Top\n\n[down](#second)\n\n".to_string();
+        for n in 0..40 {
+            text.push_str(&format!("para {n}\n\n"));
+        }
+        text.push_str("## Second\n\ntail\n");
+        text
+    }
+
+    #[test]
+    fn the_preview_is_offered_for_markdown_and_nothing_else() {
+        let mut app = app_with_markdown("notes.txt", "# not markdown\n");
+        execute_command(&mut app, Command::ToggleMarkdownPreview);
+        assert!(!app.active().unwrap().shows_preview());
+        assert_eq!(said(&app), "Not a Markdown file");
+
+        let mut app = app_with_markdown("README.md", "# yes\n");
+        execute_command(&mut app, Command::ToggleMarkdownPreview);
+        assert!(app.active().unwrap().shows_preview());
+        assert_eq!(
+            crate::commands::menu_state(&app, &Command::ToggleMarkdownPreview),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn the_preview_refuses_every_edit() {
+        let mut app = app_with_markdown("README.md", "# title\n\ntext\n");
+        execute_command(&mut app, Command::ToggleMarkdownPreview);
+        app.sync_preview();
+        for command in [
+            Command::InsertChar('x'),
+            Command::InsertNewline,
+            Command::Backspace,
+            Command::Delete,
+            Command::DeleteLine,
+            Command::Paste,
+            Command::Undo,
+            Command::ReplaceAll,
+        ] {
+            execute_command(&mut app, command);
+        }
+        let tab = app.active().unwrap();
+        assert_eq!(tab.document.line(0), "# title");
+        assert!(!tab.document.is_dirty());
+        assert!(said(&app).contains("read-only"), "{}", said(&app));
+    }
+
+    #[test]
+    fn the_caret_and_the_preview_follow_each_other() {
+        let text = long_markdown();
+        let mut app = app_with_markdown("README.md", &text);
+        // The caret on "para 30", line 64: the preview opens there.
+        let line = text.lines().position(|l| l == "para 30").unwrap();
+        app.active_mut()
+            .unwrap()
+            .document
+            .place_cursor(line, VisualCol(0));
+        execute_command(&mut app, Command::ToggleMarkdownPreview);
+        app.sync_preview();
+        assert_eq!(preview(&app).top_line(), line);
+
+        execute_command(&mut app, Command::MoveCursor(Motion::Down));
+        execute_command(&mut app, Command::MoveCursor(Motion::Down));
+        let shown = preview(&app).top_line();
+        assert!(shown > line);
+
+        execute_command(&mut app, Command::ToggleMarkdownPreview);
+        let tab = app.active().unwrap();
+        assert!(!tab.shows_preview());
+        assert_eq!(tab.document.cursor().line, shown);
+    }
+
+    #[test]
+    fn headings_are_stepped_through_and_an_anchor_link_is_followed() {
+        let mut app = app_with_markdown("README.md", &long_markdown());
+        execute_command(&mut app, Command::ToggleMarkdownPreview);
+        app.sync_preview();
+        execute_command(&mut app, Command::StepHeading(1));
+        assert_eq!(preview(&app).current_heading(), Some(1));
+        execute_command(&mut app, Command::StepHeading(-1));
+        assert_eq!(preview(&app).top, 0);
+
+        // `[down](#second)` is the third row: under the heading and its rule.
+        let row = preview(&app)
+            .rendered
+            .rows
+            .iter()
+            .position(|row| row.pieces.iter().any(|p| p.text == "down"))
+            .unwrap();
+        execute_command(&mut app, Command::PreviewClick { row, col: 1 });
+        assert_eq!(preview(&app).current_heading(), Some(1));
+    }
+
+    #[test]
+    fn go_to_line_over_a_preview_asks_for_a_heading() {
+        let mut app = app_with_markdown("README.md", &long_markdown());
+        execute_command(&mut app, Command::ToggleMarkdownPreview);
+        app.sync_preview();
+        execute_command(&mut app, Command::GotoLinePrompt);
+        let dialog = app.dialog.as_ref().expect("a picker is open");
+        assert_eq!(dialog.title, "Go to Heading");
     }
 
     // --- the CSV table (SPEC §65, ADR-062) --------------------------------

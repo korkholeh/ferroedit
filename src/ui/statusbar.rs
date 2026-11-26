@@ -328,8 +328,31 @@ fn readout(app: &App, width: u16, left: u16) -> Vec<Piece> {
     // and not a position, and the two questions the bar asks about it are the
     // ones the parse turns on: what splits the columns, and what quotes the
     // fields (SPEC §65, ADR-062).
-    let mut pieces = match table {
-        Some(view) => vec![
+    let preview = app.active().and_then(|tab| tab.preview.as_ref());
+    let mut pieces = match (preview, table) {
+        // The preview has no caret either. Where the reader is, is how far
+        // down the document and under which heading (SPEC §72) — and the
+        // readout is still the Go to Line zone, which over a preview opens the
+        // heading picker.
+        (Some(view), _) => {
+            let mut text = format!("Preview {}", view.position(app.editor_view.height as usize));
+            if let Some(heading) = view
+                .current_heading()
+                .and_then(|index| view.rendered.outline.get(index))
+            {
+                text.push_str(" · ");
+                // A heading is a sentence, sometimes, and the bar has a dozen
+                // other things to say.
+                if heading.text.chars().count() > 32 {
+                    text.extend(heading.text.chars().take(31));
+                    text.push('…');
+                } else {
+                    text.push_str(&heading.text);
+                }
+            }
+            vec![clickable(text, 0, StatusZone::Cursor)]
+        }
+        (None, Some(view)) => vec![
             // Not clickable: Go to Line has nothing to go to in a grid, and a
             // readout that opened a dialog about lines would be the bar
             // answering a question nobody asked of it.
@@ -345,7 +368,7 @@ fn readout(app: &App, width: u16, left: u16) -> Vec<Piece> {
                 StatusZone::CsvQuote,
             ),
         ],
-        None => vec![clickable(
+        (None, None) => vec![clickable(
             format!("Ln {line}, Col {column}"),
             0,
             StatusZone::Cursor,
@@ -364,7 +387,7 @@ fn readout(app: &App, width: u16, left: u16) -> Vec<Piece> {
             1,
         ));
     } else if let Some(count) = document
-        .filter(|_| table.is_none())
+        .filter(|_| table.is_none() && preview.is_none())
         .map(|d| d.selected_len())
         .filter(|n| *n > 0)
     {
@@ -373,7 +396,7 @@ fn readout(app: &App, width: u16, left: u16) -> Vec<Piece> {
     // Shown only while it is on: it says the pane is not in the state it is in
     // by default, and a wrapped file that did not say so reads as a file full
     // of short lines.
-    if app.settings.word_wrap && table.is_none() {
+    if app.settings.word_wrap && table.is_none() && preview.is_none() {
         pieces.push(piece("Wrap".to_string(), 2));
     }
     // What the file was packed in, and whether what is on screen is all of it

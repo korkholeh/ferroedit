@@ -158,6 +158,10 @@ pub struct LayoutRects {
     /// covers the pane rather than splitting it, and a hit test that finds it
     /// must be made before the editor's own.
     pub table: Option<Rect>,
+    /// The Markdown preview, when the tab in front is showing one (SPEC §72).
+    /// The whole pane, as the table takes it, and hit-tested before the
+    /// editor for the same reason.
+    pub preview: Option<Rect>,
     /// The find/replace bar under the editor, when it is open.
     pub search: Option<SearchRects>,
     pub status_bar: Rect,
@@ -288,6 +292,7 @@ pub fn compute(area: Rect, app: &App) -> LayoutRects {
         image_meta: app.image().and_then(|image| image_meta(image, pane)),
         image_canvas: app.image().map(|image| image_canvas(image, pane)),
         table: app.active().filter(|tab| tab.shows_table()).map(|_| pane),
+        preview: app.active().filter(|tab| tab.shows_preview()).map(|_| pane),
         search,
         status_bar,
         status_zones: statusbar::zones(app, status_bar),

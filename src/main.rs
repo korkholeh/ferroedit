@@ -165,6 +165,7 @@ fn run(cli: &Cli) -> Result<()> {
         app.sync_highlight();
         app.sync_image();
         app.sync_table();
+        app.sync_preview();
         app.sync_search();
 
         if shown_tab != app.active_tab {

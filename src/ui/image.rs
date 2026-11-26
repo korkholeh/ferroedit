@@ -34,7 +34,7 @@ use unicode_width::UnicodeWidthStr;
 /// in every font that has them, and two independent colours per cell is what
 /// makes a picture rather than a texture — quarter blocks would give four
 /// pixels and still only two colours.
-const HALF: &str = "▀";
+pub(crate) const HALF: &str = "▀";
 
 /// Takes the whole rect table rather than one area: the metadata column and
 /// the canvas are laid out in `ui::layout`, and the mouse hit-tests against
@@ -171,7 +171,7 @@ fn truncate(value: &str, width: usize) -> String {
 ///
 /// Answered once and remembered: it is an environment variable, and reading it
 /// per cell of a full-screen picture would be twenty thousand lookups a frame.
-fn truecolor() -> bool {
+pub(crate) fn truecolor() -> bool {
     static ANSWER: OnceLock<bool> = OnceLock::new();
     *ANSWER.get_or_init(|| {
         matches!(
@@ -188,7 +188,7 @@ fn truecolor() -> bool {
 /// photograph. So RGB where the terminal advertises it, and the xterm-256 cube
 /// where it does not — which every terminal the editor supports does have, and
 /// which is the same picture a little coarser rather than a different one.
-fn colour(rgb: [u8; 3], truecolor: bool) -> Color {
+pub(crate) fn colour(rgb: [u8; 3], truecolor: bool) -> Color {
     if truecolor {
         return Color::Rgb(rgb[0], rgb[1], rgb[2]);
     }

@@ -1010,6 +1010,29 @@ impl DialogState {
         )
     }
 
+    /// The heading picker, opened from Search → Go to Heading… or `Ctrl+G`
+    /// over a preview (SPEC §72). Filtered, like the syntax picker: a long
+    /// document has more headings than a list can be stepped through.
+    pub fn headings(items: Vec<ListItem>, return_focus: FocusTarget) -> Self {
+        let selected = items.iter().position(|item| item.current).unwrap_or(0);
+        let prompt = match items.len() {
+            1 => "1 heading".to_string(),
+            count => format!("{count} headings"),
+        };
+        Self::list(
+            "Go to Heading",
+            prompt,
+            items,
+            selected,
+            true,
+            vec![
+                DialogButton::new("Go", Some(Command::SubmitListChoice)),
+                DialogButton::new("Cancel", None),
+            ],
+            return_focus,
+        )
+    }
+
     fn branch_items(branches: &[Branch], command: impl Fn(&Branch) -> Command) -> Vec<ListItem> {
         branches
             .iter()

@@ -66,6 +66,11 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 # one terminal pane is a dependency tree bought for nothing.
 png = "0.17"
 jpeg-decoder = { version = "0.3", default-features = false }
+# Markdown on the way to the preview (ADR-086). Pure Rust, which keeps a static
+# musl build working (ADR-003), and taken without its default features: those
+# are an HTML writer and a command-line binary's argument parser, and the
+# preview wants the events and nothing that turns them into anything.
+pulldown-cmark = { version = "0.13", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 # Both are already in the tree under crossterm, so taking them directly costs

@@ -79,6 +79,10 @@ The document pane. Every motion here also has a `Shift` form that extends the se
 | `Tab` | Insert a tab |
 | `F5` | Re-read the active file from disk |
 | `F4` | Show this file as a table, or as text |
+| `F7` | Show this Markdown file typeset, or as text |
+| `F8` | Show or hide the preview's outline of headings |
+| `Alt+Up` | Go to the previous heading in the preview |
+| `Alt+Down` | Go to the next heading in the preview |
 | `F2` | Type into the selected cell |
 | `Insert` | Add a row under this one |
 
@@ -319,6 +323,9 @@ Every item is a command, and the *Shortcut* column is the same lookup the menu i
 | Search | Find Next | `F3` | anywhere |
 | Search | Find Previous | `Shift+F3` | anywhere |
 | Search | Go to Line… | `Ctrl+G` | anywhere |
+| Search | Go to Heading… | — | — |
+| Search | Next Heading | `Alt+Down` | Editor |
+| Search | Previous Heading | `Alt+Up` | Editor |
 | Search | Match Case | `Alt+C` | Find bar |
 | Search | Replace Match | `Alt+R` | Find bar |
 | Search | Replace All | `Alt+A` | Find bar |
@@ -328,6 +335,8 @@ Every item is a command, and the *Shortcut* column is the same lookup the menu i
 | View | Word Wrap | `Alt+Z` | anywhere |
 | View | Table View | `F4` | Editor |
 | View | Table Format… | — | — |
+| View | Markdown Preview | `F7` | Editor |
+| View | Outline | `F8` | Editor |
 | View | Syntax Mode… | — | — |
 | View | Line Endings… | — | — |
 | View | Encoding… | — | — |

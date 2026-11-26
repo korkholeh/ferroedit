@@ -56,14 +56,17 @@ src/
   docs.rs                 # renders docs/SHORTCUTS.md from the tables (ADR-028)
   app/       mod.rs focus.rs tabs.rs dialog.rs diff.rs log.rs input_field.rs
              browser.rs notifications.rs search.rs table.rs workspace.rs
+             markdown.rs      # the preview's layout and state (ADR-086)
              opening.rs       # a large file read a slice a frame (ADR-077)
   event/     mod.rs keyboard.rs mouse.rs
   commands/  mod.rs execute.rs
   ui/        mod.rs layout.rs menu.rs tabs.rs editor.rs explorer.rs field.rs
              git.rs search.rs statusbar.rs dialog.rs diff.rs log.rs table.rs theme.rs
+             markdown.rs      # the preview and its outline, painted (ADR-086)
              opening.rs       # the box a large file is read behind (ADR-077)
   editor/    mod.rs document.rs cursor.rs selection.rs history.rs search.rs
              coords.rs viewport.rs wrap.rs clipboard.rs charset.rs csv.rs
+             markdown.rs      # Markdown read into blocks, headless (ADR-086)
              compression.rs   # gzip on the way in, read-only (ADR-074)
   filesystem/ mod.rs tree.rs      # file operations; lazy, ignore-aware tree
   git/       mod.rs service.rs parser.rs models.rs diff.rs log.rs worker.rs

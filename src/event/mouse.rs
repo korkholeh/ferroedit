@@ -15,6 +15,7 @@ use crate::app::App;
 use crate::commands::Command;
 use crate::editor::viewport::gutter_width;
 use crate::ui::layout::LayoutRects;
+use crate::ui::markdown;
 use crate::ui::table;
 
 /// Rows the wheel moves per notch, matching the usual terminal convention.
@@ -225,6 +226,16 @@ fn left_click(app: &App, rects: &LayoutRects, at: Position) -> Option<Command> {
     if rects.image.is_some_and(|image| image.contains(at)) {
         return Some(Command::FocusPane(FocusTarget::Image));
     }
+    // The preview covers the pane the same way. A click on the outline goes
+    // to its heading, one on the text follows the link under it, and either
+    // takes the focus (SPEC §72).
+    if let Some(area) = rects.preview.filter(|preview| preview.contains(at)) {
+        return Some(match markdown::hit(app, area, at) {
+            Some(markdown::Hit::Heading(index)) => Command::JumpToHeading(index),
+            Some(markdown::Hit::Text { row, col }) => Command::PreviewClick { row, col },
+            None => Command::FocusPane(FocusTarget::Editor),
+        });
+    }
     // The table covers the editor pane the same way, and for the same reason
     // has to be tested before it: a click on a cell must not put a caret in the
     // text behind it (SPEC §65).
@@ -359,6 +370,10 @@ fn drag(app: &App, rects: &LayoutRects, at: Position) -> Option<Command> {
     // Over a table the drag makes a block of cells rather than a run of
     // characters, and it is clamped into the pane for the same reason: a drag
     // that runs off the edge keeps selecting to the edge (SPEC §65).
+    // Nothing in a preview is selectable, so a drag over it is not a gesture.
+    if rects.preview.is_some() {
+        return None;
+    }
     if let Some(area) = rects.table {
         if area.width == 0 || area.height == 0 {
             return None;
@@ -463,6 +478,9 @@ fn scroll(rects: &LayoutRects, at: Position, delta: i16) -> Option<Command> {
     }
     if rects.table.is_some_and(|table| table.contains(at)) {
         return Some(Command::ScrollTable(delta));
+    }
+    if rects.preview.is_some_and(|preview| preview.contains(at)) {
+        return Some(Command::ScrollEditor(delta));
     }
     // The wheel over the tab strip scrolls the strip, not the document under
     // it: a bar with more tabs on it than fit is the one place where the thing

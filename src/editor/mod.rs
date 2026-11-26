@@ -8,6 +8,7 @@ pub mod csv;
 pub mod cursor;
 pub mod document;
 pub mod history;
+pub mod markdown;
 pub mod search;
 pub mod selection;
 pub mod viewport;

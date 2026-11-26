@@ -13,6 +13,7 @@ pub mod input_field;
 // three logging calls below therefore spell it `::log::`. Every other module
 // imports `LogState` by name and is unaffected.
 pub mod log;
+pub mod markdown;
 pub mod notifications;
 pub mod opening;
 pub mod search;
@@ -479,6 +480,21 @@ impl App {
     pub fn sync_table(&mut self) {
         if let Some(tab) = self.active_mut() {
             tab.sync_table();
+        }
+    }
+
+    /// Re-lays the active tab's Markdown preview when its document or the
+    /// pane's width has changed (SPEC §72).
+    ///
+    /// The same shape as `sync_table`, with the width added: wrapping is the
+    /// one part of a preview that depends on the pane, so a resized terminal
+    /// is a new layout and a frame that changed nothing is not.
+    pub fn sync_preview(&mut self) {
+        // The editor rect does not include the scrollbar column; the preview
+        // covers both, as the table does.
+        let width = self.editor_view.width.saturating_add(1);
+        if let Some(tab) = self.active_mut() {
+            tab.sync_preview(width);
         }
     }
 

@@ -3310,3 +3310,65 @@ a question settled when the repository was found.
 
 **Cost.** One field on `GitState`, one exported `header_rows`, and three call sites that
 used to assume one row of chrome.
+
+---
+
+## ADR-086: A Markdown preview is a third reading of the buffer, and it writes nothing
+
+**Decision.** `F7` over a Markdown file swaps the pane between the text and a typeset
+preview (SPEC §72). The preview is `app::markdown::MarkdownView` on the ordinary editor
+`Tab` — beside the CSV view's `TableView`, and for the same reasons (ADR-062): the file is
+still the document, so `Ctrl+S`, reload, the stale prompt and the encoding picker keep
+working untouched. It is read-only for as long as it is showing. The parse is
+`pulldown-cmark` (CommonMark and the GitHub extensions); `editor::markdown` folds its
+events into blocks of styled runs, `app::markdown` lays them out at the pane's width into
+rows of styled pieces, and `ui::markdown` paints them. Both caches are rebuilt by
+`App::sync_preview` from the run loop — the parse when the revision moves, the layout when
+the parse or the geometry does (ARCHITECTURE invariant 4).
+
+**Why read-only, when the table is writable.** A cell is a span of the file, so ADR-063
+could write one back exactly. A preview row is not a span of anything: it is a paragraph
+wrapped to a width, its emphasis marks removed, its HTML interpreted, its table re-framed.
+A caret in it would stand between characters the file does not contain. The editing
+commands therefore say *"The preview is read-only — F7 shows the text"* and do nothing,
+and the motions move the window instead of a caret. What crosses the switch is the
+reader's *place*: every row carries the source line it was laid out from, so the preview
+opens at the caret's line and `F7` back puts the caret on the line the preview was
+showing.
+
+**Why a dependency.** CommonMark is not a format that rewards writing a parser by hand —
+lazy continuation lines, the two kinds of list tightness, link reference definitions —
+and the editor already reads a dozen formats through grammars it did not write.
+`pulldown-cmark` is pure Rust (ADR-003), taken without its default features: the HTML
+writer and the binary's argument parser are both things the preview has no use for.
+
+**Why the outline lives inside the pane.** It is a property of the document on screen, not
+of the workspace, so it is the preview's and not the sidebar's: it appears with the
+preview, goes with it, and needs no focus target of its own — a click on it is a heading
+jump, and the keyboard has `Alt+Up`/`Alt+Down` and the heading picker, which `Ctrl+G`
+opens while the preview is up because Go to Line has no lines to go to there. It costs a
+quarter of the pane (20 to 32 columns) and is dropped below 72, where the text needs the
+room more.
+
+**Why HTML is interpreted, a little.** The commonest first screen of a README is a
+`<p align="center">` around an `<img>`, an `<h1>` and a row of badges. Shown as source it
+is the least readable thing in the file. So a block of HTML is read for what it shows:
+`<img>` is a picture, `<h1>`–`<h6>` a heading with an outline entry, `<hr>` a rule,
+`<b>`/`<em>`/`<code>`/`<kbd>`/`<br>` the styles they name, text is text, and every other tag
+is dropped. That is a reading, not a renderer: alignment, widths and nesting are ignored.
+
+**Why pictures are drawn and links are not opened.** A local PNG or JPEG is read with the
+decoder the image tab already has (ADR-078), scaled to at most the measure and twenty rows,
+and drawn in half-blocks, so a screenshot in a README is a screenshot. A remote one is
+never fetched — a preview that made network requests on open would be the editor doing
+something the user did not ask for — and is its alt text, underlined, on a line with any
+others like it. A click on a link goes to a `#heading`, opens a file beside the document
+in a tab of its own, or copies an address: starting a browser is not something a terminal
+program can do the same way over SSH as on a desktop, and a copied address works in both.
+
+**Cost.** One dependency, three modules, six commands (`ToggleMarkdownPreview`,
+`ToggleMarkdownOutline`, `StepHeading`, `JumpToHeading`, `HeadingPrompt`, `PreviewClick`),
+a `preview` rect hit-tested before the editor's, and `ui::image`'s colour helpers made
+crate-visible. The text measure is capped at 100 columns, so a very wide terminal shows a
+column of prose and not a line the eye loses on the way back.
+

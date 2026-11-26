@@ -118,6 +118,10 @@ ferroedit +42 main.rs  # open a file at line 42
 - Word wrap, or horizontal scrolling when it is off
 - Gzipped files opened on their text, read-only — a `dump.sql.gz` reads as SQL without
   being unpacked first, and *Save As* writes it out
+- A Markdown preview on `F7`: headings, lists, task boxes, block quotes and GitHub alerts,
+  framed tables, highlighted code blocks, links you can click and local pictures drawn in
+  place — read-only, with an outline of the headings beside it (`F8`) that marks the
+  section you are in and goes to any of them
 - PNG and JPEG files opened on the picture: coloured half-blocks, so a terminal cell holds
   two pixels, with zoom, panning by keyboard or mouse, and an `m` for the metadata
 - Git: status, stage/unstage, commit, pull, push, branches, merge, diff
